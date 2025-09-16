@@ -106,10 +106,13 @@ pub async fn stream_mjpeg_handler(
             return;
         }
 
-        // Pipeline más simple y robusto para MJPEG
+        // Pipeline MJPEG robusto: parseo H264, decodificación, conversión, control de framerate, y JPEG
+        // rtspsrc -> rtph264depay -> h264parse -> avdec_h264 -> videoconvert -> videorate -> caps(10fps) -> jpegenc -> queue(leaky) -> appsink
         let pipeline_str = format!(
-            "rtspsrc location={camera_url} protocols=tcp latency=100 ! rtph264depay ! avdec_h264 ! videoconvert ! jpegenc quality=100 ! appsink name=sink emit-signals=true max-buffers=5 drop=true"
+            "rtspsrc location={camera_url} protocols=tcp latency=100 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! videorate ! video/x-raw,framerate=10/1 ! jpegenc quality=100 ! queue leaky=downstream max-size-buffers=2 ! appsink name=sink sync=false max-buffers=5 drop=true"
         );
+
+        eprintln!("[MJPEG] Launching pipeline: {pipeline_str}");
 
         let pipeline = match gst::parse::launch(&pipeline_str) {
             Ok(e) => e.downcast::<gst::Pipeline>().unwrap(),
@@ -122,47 +125,67 @@ pub async fn stream_mjpeg_handler(
         let appsink = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
         appsink.set_caps(Some(&gst::Caps::builder("image/jpeg").build()));
 
-        appsink.set_callbacks(
-            gst_app::AppSinkCallbacks::builder()
-                .new_sample(move |appsink| {
-                    let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                    let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                    let data = Bytes::copy_from_slice(map.as_ref());
-                    // Envolver el frame en un boundary MJPEG
-                    // NOTA: no podemos usar async aquí, así que usamos un canal no-async global
-                    // Para evitar lifetimes, usamos un thread-local sender mediante once_cell o similar
-                    // Aquí, para mantenerlo simple, no enviamos desde el callback directamente.
-                    drop(data);
-                    Ok(gst::FlowSuccess::Ok)
-                })
-                .build(),
-        );
-
+        let bus = pipeline.bus();
         let _ = pipeline.set_state(gst::State::Playing);
+        eprintln!("[MJPEG] Pipeline set to Playing");
 
         // Bucle simple de lectura con timeout
         let appsink_clone = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
+        let mut frame_count: u64 = 0;
+        let mut last_log = std::time::Instant::now();
         loop {
+            // Revisa mensajes del bus rápidamente para registrar errores/EOS
+            if let Some(ref bus) = bus {
+                while let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(10)) {
+                    use gstreamer::MessageView;
+                    match msg.view() {
+                        MessageView::Error(e) => {
+                            eprintln!("[MJPEG] Bus Error from {:?}: {} ({:?})", msg.src().map(|s| s.path_string()), e.error(), e.debug());
+                            break;
+                        }
+                        MessageView::Eos(_) => {
+                            eprintln!("[MJPEG] Bus EOS received");
+                            break;
+                        }
+                        MessageView::StateChanged(s) => {
+                            if let Some(src) = msg.src() {
+                                if src.is::<gst::Pipeline>() {
+                                    eprintln!("[MJPEG] Pipeline state changed: {:?} -> {:?}", s.old(), s.current());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             match appsink_clone.pull_sample() {
                 Ok(sample) => {
                     if let Some(buffer) = sample.buffer() {
                         if let Ok(map) = buffer.map_readable() {
                             let data = Bytes::copy_from_slice(map.as_ref());
+                            frame_count += 1;
                             if tx.blocking_send(data).is_err() {
+                                eprintln!("[MJPEG] Client disconnected (send failed), stopping stream loop");
                                 break;
+                            }
+                            if last_log.elapsed() > std::time::Duration::from_secs(10) {
+                                eprintln!("[MJPEG] Frames sent in last 10s: ~{} ({} fps target)", frame_count, 10);
+                                frame_count = 0;
+                                last_log = std::time::Instant::now();
                             }
                         }
                     }
                 }
                 Err(err) => {
-                    eprintln!("appsink pull_sample error: {err}");
+                    eprintln!("[MJPEG] appsink pull_sample error: {err}");
                     break;
                 }
             }
         }
 
         let _ = pipeline.set_state(gst::State::Null);
+        eprintln!("[MJPEG] Pipeline set to Null (stopped)");
     });
 
     // Creamos un body streaming multipart/x-mixed-replace
