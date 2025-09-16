@@ -131,7 +131,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             println!("🔄 Reiniciando pipeline por error...");
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         } else {
-            println!("🕛 Medianoche alcanzada, creando nuevo archivo diario...");
+println!("🕛 Medianoche alcanzada, creando nuevo archivo diario...");
         }
     }
 }
