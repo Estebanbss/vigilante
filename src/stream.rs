@@ -243,7 +243,8 @@ pub fn start_hls_pipeline(camera_url: String, hls_dir: PathBuf) {
                 "rtspsrc location={camera_url} protocols=tcp latency=100 ",
                 "! rtph264depay ",
                 "! h264parse config-interval=1 ",
-                "! video/x-h264,stream-format=avc,alignment=au ",
+                // mpegtsmux requiere H.264 en byte-stream (Annex B). Forzamos caps adecuados.
+                "! video/x-h264,stream-format=byte-stream,alignment=au ",
                 "! mpegtsmux name=mux ",
                 "! video/mpegts,systemstream=true,packetsize=188 ",
                 "! hlssink2 target-duration=2 max-files=5 playlist-length=5 ",
