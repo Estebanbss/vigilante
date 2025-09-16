@@ -235,18 +235,15 @@ pub fn start_hls_pipeline(camera_url: String, hls_dir: PathBuf) {
     std::thread::spawn(move || {
         if let Err(e) = gst::init() { eprintln!("GStreamer init error: {e}"); return; }
 
-        // Nota: Insertamos un capsfilter explícito entre mpegtsmux y hlssink2 para evitar
-        // problemas de linking ("could not link mux to hlssink2-0") en algunas builds.
-        // Además, forzamos caps de H264 a avc/au para mejorar compatibilidad en HLS.
+        // En algunas builds de GStreamer en Raspberry Pi, hlssink2 no acepta directamente
+        // caps de video/mpegts desde mpegtsmux. En su lugar, alimentamos H264 elementary
+        // stream (byte-stream, AU) directamente a hlssink2, que internamente hace el mux TS.
         let pipeline_str = format!(
             concat!(
                 "rtspsrc location={camera_url} protocols=tcp latency=100 ",
                 "! rtph264depay ",
                 "! h264parse config-interval=1 ",
-                // mpegtsmux requiere H.264 en byte-stream (Annex B). Forzamos caps adecuados.
                 "! video/x-h264,stream-format=byte-stream,alignment=au ",
-                "! mpegtsmux name=mux ",
-                "! video/mpegts,systemstream=true,packetsize=188 ",
                 "! hlssink2 target-duration=2 max-files=5 playlist-length=5 ",
                 "location={segments} playlist-location={playlist}"
             ),
