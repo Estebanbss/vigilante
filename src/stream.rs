@@ -106,10 +106,10 @@ pub async fn stream_mjpeg_handler(
             return;
         }
 
-        // Pipeline MJPEG robusto: parseo H264, decodificación, conversión, control de framerate, y JPEG
-        // rtspsrc -> rtph264depay -> h264parse -> avdec_h264 -> videoconvert -> videorate -> caps(10fps) -> jpegenc -> queue(leaky) -> appsink
+        // Pipeline MJPEG de baja latencia: minimiza buffers y evita control de framerate
+        // rtspsrc -> rtph264depay -> h264parse -> avdec_h264 -> videoconvert -> queue(leaky) -> jpegenc -> queue(leaky) -> appsink
         let pipeline_str = format!(
-            "rtspsrc location={camera_url} protocols=tcp latency=100 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! videorate ! video/x-raw,framerate=10/1 ! jpegenc quality=100 ! queue leaky=downstream max-size-buffers=2 ! appsink name=sink sync=false max-buffers=5 drop=true"
+            "rtspsrc location={camera_url} protocols=tcp latency=50 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=100 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
         );
 
         eprintln!("[MJPEG] Launching pipeline: {pipeline_str}");
