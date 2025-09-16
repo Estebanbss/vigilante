@@ -106,10 +106,9 @@ pub async fn stream_mjpeg_handler(
             return;
         }
 
-        // Pipeline que decodifica automáticamente con decodebin y re-encoda a JPEG
-        // rtspsrc ! rtph264depay ! h264parse ! decodebin ! videoconvert ! jpegenc ! appsink
+        // Pipeline más simple y robusto para MJPEG
         let pipeline_str = format!(
-            "rtspsrc location={camera_url} protocols=tcp latency=100 ! rtph264depay ! h264parse ! decodebin ! videoconvert ! jpegenc quality=85 ! appsink name=sink emit-signals=true max-buffers=10 drop=true"
+            "rtspsrc location={camera_url} protocols=tcp latency=100 ! rtph264depay ! avdec_h264 ! videoconvert ! jpegenc quality=100 ! appsink name=sink emit-signals=true max-buffers=5 drop=true"
         );
 
         let pipeline = match gst::parse::launch(&pipeline_str) {
@@ -142,11 +141,11 @@ pub async fn stream_mjpeg_handler(
 
         let _ = pipeline.set_state(gst::State::Playing);
 
-        // Bucle simple de lectura: en lugar de callbacks, usamos pull_sample bloqueando
+        // Bucle simple de lectura con timeout
         let appsink_clone = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
         loop {
-            match appsink_clone.pull_sample() {
-                Ok(sample) => {
+            match appsink_clone.try_pull_sample(gst::ClockTime::from_seconds(1)) {
+                Ok(Some(sample)) => {
                     if let Some(buffer) = sample.buffer() {
                         if let Ok(map) = buffer.map_readable() {
                             let data = Bytes::copy_from_slice(map.as_ref());
@@ -155,6 +154,10 @@ pub async fn stream_mjpeg_handler(
                             }
                         }
                     }
+                }
+                Ok(None) => {
+                    // Timeout - continuar
+                    continue;
                 }
                 Err(err) => {
                     eprintln!("appsink pull_sample error: {err}");
