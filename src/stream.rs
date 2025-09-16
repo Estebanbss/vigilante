@@ -109,7 +109,7 @@ pub async fn stream_mjpeg_handler(
         // Pipeline que decodifica automáticamente con decodebin y re-encoda a JPEG
         // rtspsrc ! rtph264depay ! h264parse ! decodebin ! videoconvert ! jpegenc ! appsink
         let pipeline_str = format!(
-            "rtspsrc location={camera_url} protocols=tcp latency=100 ! rtph264depay ! h264parse ! decodebin ! videoconvert ! jpegenc quality=85 idct-method=fast ! appsink name=sink emit-signals=true max-buffers=10 drop=true"
+            "rtspsrc location={camera_url} protocols=tcp latency=100 ! rtph264depay ! h264parse ! decodebin ! videoconvert ! jpegenc quality=85 ! appsink name=sink emit-signals=true max-buffers=10 drop=true"
         );
 
         let pipeline = match gst::parse::launch(&pipeline_str) {
