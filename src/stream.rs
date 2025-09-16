@@ -106,170 +106,146 @@ pub async fn stream_mjpeg_handler(
             return;
         }
 
-        // Intentar primero decodificación por hardware (si existe en la Pi): v4l2h264dec
-        let pipeline_str_hw = format!(
-            "rtspsrc location={camera_url} protocols=tcp latency=50 ! rtph264depay ! h264parse ! v4l2h264dec ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=85 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
-        );
-        eprintln!("[MJPEG] Trying HW decode pipeline: {pipeline_str_hw}");
-        let pipeline = match gst::parse::launch(&pipeline_str_hw) {
-            Ok(e) => {
-                eprintln!("[MJPEG] Using HW decoder v4l2h264dec (1280x720 downscale)");
-                e.downcast::<gst::Pipeline>().unwrap()
-            }
-            Err(err_hw) => {
-                eprintln!("[MJPEG] HW decode not available ({err_hw}). Falling back to SW (avdec_h264)...");
-                let pipeline_str_sw = format!(
-                    "rtspsrc location={camera_url} protocols=tcp latency=50 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=85 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
-                );
-                eprintln!("[MJPEG] Launching SW pipeline: {pipeline_str_sw}");
-                match gst::parse::launch(&pipeline_str_sw) {
-                    Ok(e) => e.downcast::<gst::Pipeline>().unwrap(),
-                    Err(err_sw) => {
-                        eprintln!("[MJPEG] SW pipeline error: {err_sw}");
-                        return;
+        let mut attempt: u64 = 0;
+        'reconnect: loop {
+            attempt += 1;
+            // Intentar primero decodificación por hardware (si existe en la Pi): v4l2h264dec
+            let pipeline_str_hw = format!(
+                "rtspsrc location={camera_url} protocols=tcp latency=50 do-rtsp-keep-alive=true drop-on-latency=true ! rtph264depay ! h264parse ! v4l2h264dec ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=85 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
+            );
+            eprintln!("[MJPEG] (attempt #{attempt}) Trying HW decode pipeline: {pipeline_str_hw}");
+            let pipeline = match gst::parse::launch(&pipeline_str_hw) {
+                Ok(e) => {
+                    eprintln!("[MJPEG] Using HW decoder v4l2h264dec (1280x720 downscale)");
+                    e.downcast::<gst::Pipeline>().unwrap()
+                }
+                Err(err_hw) => {
+                    eprintln!("[MJPEG] HW decode not available ({err_hw}). Falling back to SW (avdec_h264)...");
+                    let pipeline_str_sw = format!(
+                        "rtspsrc location={camera_url} protocols=tcp latency=50 do-rtsp-keep-alive=true drop-on-latency=true ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=85 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
+                    );
+                    eprintln!("[MJPEG] Launching SW pipeline: {pipeline_str_sw}");
+                    match gst::parse::launch(&pipeline_str_sw) {
+                        Ok(e) => e.downcast::<gst::Pipeline>().unwrap(),
+                        Err(err_sw) => {
+                            eprintln!("[MJPEG] SW pipeline error: {err_sw}");
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            continue 'reconnect;
+                        }
                     }
                 }
-            }
-        };
+            };
 
-        let appsink = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
-        appsink.set_caps(Some(&gst::Caps::builder("image/jpeg").build()));
+            let appsink = match pipeline.by_name("sink").and_then(|e| e.downcast::<gst_app::AppSink>().ok()) {
+                Some(s) => s,
+                None => {
+                    eprintln!("[MJPEG] Failed to get appsink by name 'sink'");
+                    let _ = pipeline.set_state(gst::State::Null);
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue 'reconnect;
+                }
+            };
+            appsink.set_caps(Some(&gst::Caps::builder("image/jpeg").build()));
 
-        let bus = pipeline.bus();
+            let bus = pipeline.bus();
 
-        // Set pipeline to PLAYING and wait for state change to complete
-        match pipeline.set_state(gst::State::Playing) {
-            Ok(success) => {
-                eprintln!("[MJPEG] Pipeline set_state(Playing): {:?}", success);
-                // For live sources, NoPreroll is expected. If Async, wait a little for stabilization.
-                match success {
-                    gst::StateChangeSuccess::Success => {
-                        eprintln!("[MJPEG] Pipeline immediately in Playing state");
-                    }
-                    gst::StateChangeSuccess::Async => {
-                        eprintln!("[MJPEG] Async state change, waiting up to 10s...");
-                        let (result, state, pending) = pipeline.state(Some(gst::ClockTime::from_seconds(10)));
-                        match result {
-                            Ok(gst::StateChangeSuccess::Success) => {
-                                eprintln!("[MJPEG] State after async: {:?}, pending: {:?}", state, pending);
-                            }
-                            Ok(gst::StateChangeSuccess::NoPreroll) => {
-                                eprintln!("[MJPEG] NoPreroll (live source) after async — continuing");
-                            }
-                            Ok(gst::StateChangeSuccess::Async) => {
-                                eprintln!("[MJPEG] Still async after wait — continuing");
-                            }
-                            Err(e) => {
-                                eprintln!("[MJPEG] Error waiting for state change: {:?}. Will continue and try to pull samples anyway.", e);
-                            }
-                        }
-                    }
-                    gst::StateChangeSuccess::NoPreroll => {
-                        // Live pipelines often report NoPreroll when going to Playing — this is OK.
-                        eprintln!("[MJPEG] NoPreroll (live source) — continuing");
+            // Set pipeline to PLAYING and wait for state change to complete
+            match pipeline.set_state(gst::State::Playing) {
+                Ok(success) => {
+                    eprintln!("[MJPEG] Pipeline set_state(Playing): {:?}", success);
+                    if let gst::StateChangeSuccess::Async = success {
+                        eprintln!("[MJPEG] Async state change, waiting up to 5s...");
+                        let (_res, state, pending) = pipeline.state(Some(gst::ClockTime::from_seconds(5)));
+                        eprintln!("[MJPEG] State after wait: {:?}, pending: {:?}", state, pending);
                     }
                 }
-            }
-            Err(e) => {
-                eprintln!("[MJPEG] Pipeline set_state(Playing) failed: {:?}", e);
-                return;
-            }
-        }
-
-        // Wait a bit for the pipeline to stabilize
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        // Bucle simple de lectura con timeout
-        let appsink_clone = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
-        let mut frame_count: u64 = 0;
-        let mut last_log = std::time::Instant::now();
-        let mut first_frame_received = false;
-        
-        loop {
-            // Revisa mensajes del bus rápidamente para registrar errores/EOS
-            if let Some(ref bus) = bus {
-                while let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(10)) {
-                    use gstreamer::MessageView;
-                    match msg.view() {
-                        MessageView::Error(e) => {
-                            eprintln!("[MJPEG] Bus Error from {:?}: {} ({:?})", msg.src().map(|s| s.path_string()), e.error(), e.debug());
-                            let _ = pipeline.set_state(gst::State::Null);
-                            return;
-                        }
-                        MessageView::Eos(_) => {
-                            eprintln!("[MJPEG] Bus EOS received");
-                            let _ = pipeline.set_state(gst::State::Null);
-                            return;
-                        }
-                        MessageView::StateChanged(s) => {
-                            if let Some(src) = msg.src() {
-                                if src.is::<gst::Pipeline>() {
-                                    eprintln!("[MJPEG] Pipeline state changed: {:?} -> {:?}", s.old(), s.current());
-                                }
-                            }
-                        }
-                        MessageView::StreamStart(_) => {
-                            eprintln!("[MJPEG] Stream started");
-                        }
-                        MessageView::AsyncDone(_) => {
-                            eprintln!("[MJPEG] Async operation completed");
-                        }
-                        _ => {}
-                    }
+                Err(e) => {
+                    eprintln!("[MJPEG] Pipeline set_state(Playing) failed: {:?}", e);
+                    let _ = pipeline.set_state(gst::State::Null);
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    continue 'reconnect;
                 }
             }
 
-            // Try to pull a sample with a timeout
-            match appsink_clone.try_pull_sample(Some(gst::ClockTime::from_mseconds(1000))) {
-                Some(sample) => {
-                    if !first_frame_received {
-                        eprintln!("[MJPEG] First frame received successfully!");
-                        first_frame_received = true;
-                    }
-                    
-                    if let Some(buffer) = sample.buffer() {
-                        if let Ok(map) = buffer.map_readable() {
-                            let data = Bytes::copy_from_slice(map.as_ref());
-                            frame_count += 1;
-                            if tx.blocking_send(data).is_err() {
-                                eprintln!("[MJPEG] Client disconnected (send failed), stopping stream loop");
+            // Wait a bit for the pipeline to stabilize
+            std::thread::sleep(std::time::Duration::from_millis(300));
+
+            // Bucle simple de lectura con timeout
+            let appsink_clone = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
+            let mut frame_count: u64 = 0;
+            let mut last_log = std::time::Instant::now();
+            let mut first_frame_received = false;
+            let mut client_gone = false;
+            
+            loop {
+                // Revisa mensajes del bus rápidamente para registrar errores/EOS
+                if let Some(ref bus) = bus {
+                    while let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(10)) {
+                        use gstreamer::MessageView;
+                        match msg.view() {
+                            MessageView::Error(e) => {
+                                eprintln!("[MJPEG] Bus Error from {:?}: {} ({:?})", msg.src().map(|s| s.path_string()), e.error(), e.debug());
                                 break;
                             }
-                            if last_log.elapsed() > std::time::Duration::from_secs(10) {
-                                eprintln!("[MJPEG] Frames sent in last 10s: {} (pipeline active)", frame_count);
-                                frame_count = 0;
-                                last_log = std::time::Instant::now();
+                            MessageView::Eos(_) => {
+                                eprintln!("[MJPEG] Bus EOS received");
+                                break;
                             }
-                        }
-                    }
-                }
-                None => {
-                    if !first_frame_received {
-                        eprintln!("[MJPEG] No frame received yet, checking pipeline state...");
-                        let (result, state, pending) = pipeline.state(Some(gst::ClockTime::from_mseconds(200)));
-                        match result {
-                            Ok(gst::StateChangeSuccess::Success) | Ok(gst::StateChangeSuccess::Async) | Ok(gst::StateChangeSuccess::NoPreroll) => {
-                                eprintln!("[MJPEG] Current state: {:?}, pending: {:?}", state, pending);
-                                if state != gst::State::Playing && pending != gst::State::Playing {
-                                    eprintln!("[MJPEG] Pipeline not in Playing, attempting soft restart...");
-                                    let _ = pipeline.set_state(gst::State::Ready);
-                                    std::thread::sleep(std::time::Duration::from_millis(150));
-                                    let _ = pipeline.set_state(gst::State::Playing);
+                            MessageView::StateChanged(s) => {
+                                if let Some(src) = msg.src() {
+                                    if src.is::<gst::Pipeline>() {
+                                        eprintln!("[MJPEG] Pipeline state changed: {:?} -> {:?}", s.old(), s.current());
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                eprintln!("[MJPEG] Error getting pipeline state: {:?}", e);
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Try to pull a sample with a timeout
+                match appsink_clone.try_pull_sample(Some(gst::ClockTime::from_mseconds(1000))) {
+                    Some(sample) => {
+                        if !first_frame_received {
+                            eprintln!("[MJPEG] First frame received successfully!");
+                            first_frame_received = true;
+                        }
+                        if let Some(buffer) = sample.buffer() {
+                            if let Ok(map) = buffer.map_readable() {
+                                let data = Bytes::copy_from_slice(map.as_ref());
+                                frame_count += 1;
+                                if tx.blocking_send(data).is_err() {
+                                    eprintln!("[MJPEG] Client disconnected, stopping MJPEG thread");
+                                    client_gone = true;
+                                    break;
+                                }
+                                if last_log.elapsed() > std::time::Duration::from_secs(10) {
+                                    eprintln!("[MJPEG] Frames sent in last 10s: {} (pipeline active)", frame_count);
+                                    frame_count = 0;
+                                    last_log = std::time::Instant::now();
+                                }
                             }
                         }
                     }
-                    // Continue the loop to keep trying
-                    continue;
+                    None => {
+                        if !first_frame_received {
+                            eprintln!("[MJPEG] No frame yet. Will keep waiting...");
+                        }
+                        continue;
+                    }
                 }
             }
-        }
 
-        let _ = pipeline.set_state(gst::State::Null);
-        eprintln!("[MJPEG] Pipeline set to Null (stopped)");
+            let _ = pipeline.set_state(gst::State::Null);
+            if client_gone {
+                eprintln!("[MJPEG] Pipeline set to Null (client gone) — exiting");
+                break 'reconnect;
+            } else {
+                eprintln!("[MJPEG] Pipeline set to Null — reconnecting in 2s (attempt #{attempt})");
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                continue 'reconnect;
+            }
+        }
     });
 
     // Creamos un body streaming multipart/x-mixed-replace
