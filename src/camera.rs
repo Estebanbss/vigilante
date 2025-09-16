@@ -28,7 +28,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         // Pipeline para grabación continua en archivo diario
         let pipeline_str = format!(
             "rtspsrc location={} protocols=tcp latency=100 ! rtph264depay ! h264parse ! queue ! tee name=t \
-            t. ! queue ! mp4mux name=mux ! filesink location={} \
+            t. ! queue ! mp4mux name=mux ! filesink location={} sync=false append=false \
             t. ! queue ! h264parse ! appsink name=detector emit-signals=true",
             camera_url,
             shell_escape::escape(daily_path.to_string_lossy()).to_string()
@@ -80,15 +80,15 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                             }
                         }
                     }
+                    
+                    Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
-                            let pipeline_str = format!(
-                                "rtspsrc location={} protocols=tcp latency=100 ! rtph264depay ! h264parse ! queue ! tee name=t \
+        );
+        
+        // Get the bus to receive messages from the pipeline
         let bus = pipeline.bus().unwrap();
 
-                                camera_url,
-                                shell_escape::escape(daily_path.to_string_lossy()).to_string()
-                            );
         // Set the pipeline to "playing" state
         let _ = pipeline.set_state(gst::State::Playing);
 
