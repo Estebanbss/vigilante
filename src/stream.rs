@@ -139,15 +139,13 @@ pub async fn stream_mjpeg_handler(
         
         // Set pipeline to PLAYING and wait for state change to complete
         match pipeline.set_state(gst::State::Playing) {
-            gst::StateChangeReturn::Success => {
-                eprintln!("[MJPEG] Pipeline state change to Playing: Success");
-            }
-            gst::StateChangeReturn::Async => {
-                eprintln!("[MJPEG] Pipeline state change to Playing: Async, waiting...");
+            Ok(success) => {
+                eprintln!("[MJPEG] Pipeline state change to Playing: {:?}", success);
                 // Wait for the state change to complete with a timeout
-                match pipeline.state(Some(gst::ClockTime::from_seconds(10))) {
-                    Ok((state, pending)) => {
-                        eprintln!("[MJPEG] State after async change: {:?}, pending: {:?}", state, pending);
+                let (result, state, pending) = pipeline.state(Some(gst::ClockTime::from_seconds(10)));
+                match result {
+                    Ok(_) => {
+                        eprintln!("[MJPEG] State after change: {:?}, pending: {:?}", state, pending);
                         if state != gst::State::Playing {
                             eprintln!("[MJPEG] Warning: Pipeline not in Playing state after timeout");
                         }
@@ -158,12 +156,9 @@ pub async fn stream_mjpeg_handler(
                     }
                 }
             }
-            gst::StateChangeReturn::Failure => {
-                eprintln!("[MJPEG] Pipeline state change to Playing: Failed");
+            Err(e) => {
+                eprintln!("[MJPEG] Pipeline state change to Playing failed: {:?}", e);
                 return;
-            }
-            gst::StateChangeReturn::NoPreroll => {
-                eprintln!("[MJPEG] Pipeline state change to Playing: NoPreroll");
             }
         }
 
@@ -237,8 +232,9 @@ pub async fn stream_mjpeg_handler(
                 None => {
                     if !first_frame_received {
                         eprintln!("[MJPEG] No frame received yet, checking pipeline state...");
-                        match pipeline.state(Some(gst::ClockTime::from_mseconds(100))) {
-                            Ok((state, pending)) => {
+                        let (result, state, pending) = pipeline.state(Some(gst::ClockTime::from_mseconds(100)));
+                        match result {
+                            Ok(_) => {
                                 eprintln!("[MJPEG] Current state: {:?}, pending: {:?}", state, pending);
                                 if state != gst::State::Playing && pending != gst::State::Playing {
                                     eprintln!("[MJPEG] Pipeline not in playing state, attempting restart...");
