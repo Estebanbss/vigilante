@@ -106,19 +106,29 @@ pub async fn stream_mjpeg_handler(
             return;
         }
 
-        // Pipeline MJPEG de baja latencia: minimiza buffers y evita control de framerate
-        // rtspsrc -> rtph264depay -> h264parse -> avdec_h264 -> videoconvert -> queue(leaky) -> jpegenc -> queue(leaky) -> appsink
-        let pipeline_str = format!(
-            "rtspsrc location={camera_url} protocols=tcp latency=50 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=100 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
+        // Intentar primero decodificación por hardware (si existe en la Pi): v4l2h264dec
+        let pipeline_str_hw = format!(
+            "rtspsrc location={camera_url} protocols=tcp latency=50 ! rtph264depay ! h264parse ! v4l2h264dec ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=100 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
         );
-
-        eprintln!("[MJPEG] Launching pipeline: {pipeline_str}");
-
-        let pipeline = match gst::parse::launch(&pipeline_str) {
-            Ok(e) => e.downcast::<gst::Pipeline>().unwrap(),
-            Err(err) => {
-                eprintln!("Pipeline error: {err}");
-                return;
+        eprintln!("[MJPEG] Trying HW decode pipeline: {pipeline_str_hw}");
+        let pipeline = match gst::parse::launch(&pipeline_str_hw) {
+            Ok(e) => {
+                eprintln!("[MJPEG] Using HW decoder v4l2h264dec (1280x720 downscale)");
+                e.downcast::<gst::Pipeline>().unwrap()
+            }
+            Err(err_hw) => {
+                eprintln!("[MJPEG] HW decode not available ({err_hw}). Falling back to SW (avdec_h264)...");
+                let pipeline_str_sw = format!(
+                    "rtspsrc location={camera_url} protocols=tcp latency=50 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=100 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
+                );
+                eprintln!("[MJPEG] Launching SW pipeline: {pipeline_str_sw}");
+                match gst::parse::launch(&pipeline_str_sw) {
+                    Ok(e) => e.downcast::<gst::Pipeline>().unwrap(),
+                    Err(err_sw) => {
+                        eprintln!("[MJPEG] SW pipeline error: {err_sw}");
+                        return;
+                    }
+                }
             }
         };
 
@@ -225,11 +235,25 @@ pub fn start_hls_pipeline(camera_url: String, hls_dir: PathBuf) {
     std::thread::spawn(move || {
         if let Err(e) = gst::init() { eprintln!("GStreamer init error: {e}"); return; }
 
+        // Nota: Insertamos un capsfilter explícito entre mpegtsmux y hlssink2 para evitar
+        // problemas de linking ("could not link mux to hlssink2-0") en algunas builds.
+        // Además, forzamos caps de H264 a avc/au para mejorar compatibilidad en HLS.
         let pipeline_str = format!(
-            "rtspsrc location={camera_url} protocols=tcp latency=100 ! rtph264depay ! h264parse config-interval=1 ! mpegtsmux name=mux ! hlssink2 target-duration=2 max-files=5 playlist-length=5 location={segments} playlist-location={playlist}",
+            concat!(
+                "rtspsrc location={camera_url} protocols=tcp latency=100 ",
+                "! rtph264depay ",
+                "! h264parse config-interval=1 ",
+                "! video/x-h264,stream-format=avc,alignment=au ",
+                "! mpegtsmux name=mux ",
+                "! video/mpegts,systemstream=true,packetsize=188 ",
+                "! hlssink2 target-duration=2 max-files=5 playlist-length=5 ",
+                "location={segments} playlist-location={playlist}"
+            ),
             segments = shell_escape::escape(segments.to_string_lossy()).to_string(),
             playlist = shell_escape::escape(playlist.to_string_lossy()).to_string(),
         );
+
+        eprintln!("[HLS] Launching pipeline: {pipeline_str}");
 
         let pipeline = match gst::parse::launch(&pipeline_str) {
             Ok(e) => e.downcast::<gst::Pipeline>().unwrap(),
@@ -238,18 +262,27 @@ pub fn start_hls_pipeline(camera_url: String, hls_dir: PathBuf) {
 
         let bus = pipeline.bus();
         let _ = pipeline.set_state(gst::State::Playing);
+        eprintln!("[HLS] Pipeline set to Playing");
 
         if let Some(bus) = bus {
             for msg in bus.iter_timed(gst::ClockTime::NONE) {
                 use gstreamer::MessageView;
                 match msg.view() {
-                    MessageView::Eos(_) => { eprintln!("HLS EOS"); break; }
-                    MessageView::Error(e) => { eprintln!("HLS error: {}", e.error()); break; }
+                    MessageView::Eos(_) => { eprintln!("[HLS] EOS"); break; }
+                    MessageView::Error(e) => { eprintln!("[HLS] error from {:?}: {} ({:?})", msg.src().map(|s| s.path_string()), e.error(), e.debug()); break; }
+                    MessageView::StateChanged(s) => {
+                        if let Some(src) = msg.src() {
+                            if src.is::<gst::Pipeline>() {
+                                eprintln!("[HLS] Pipeline state: {:?} -> {:?}", s.old(), s.current());
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
         }
 
         let _ = pipeline.set_state(gst::State::Null);
+        eprintln!("[HLS] Pipeline set to Null (stopped)");
     });
 }
