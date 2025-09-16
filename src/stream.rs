@@ -144,20 +144,15 @@ pub async fn stream_mjpeg_handler(
         // Bucle simple de lectura con timeout
         let appsink_clone = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
         loop {
-            match appsink_clone.try_pull_sample(gst::ClockTime::from_seconds(1)) {
-                Ok(opt_sample) => {
-                    if let Some(sample) = opt_sample {
-                        if let Some(buffer) = sample.buffer() {
-                            if let Ok(map) = buffer.map_readable() {
-                                let data = Bytes::copy_from_slice(map.as_ref());
-                                if tx.blocking_send(data).is_err() {
-                                    break;
-                                }
+            match appsink_clone.pull_sample() {
+                Ok(sample) => {
+                    if let Some(buffer) = sample.buffer() {
+                        if let Ok(map) = buffer.map_readable() {
+                            let data = Bytes::copy_from_slice(map.as_ref());
+                            if tx.blocking_send(data).is_err() {
+                                break;
                             }
                         }
-                    } else {
-                        // Timeout - continuar
-                        continue;
                     }
                 }
                 Err(err) => {
