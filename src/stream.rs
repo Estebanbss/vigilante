@@ -249,6 +249,7 @@ pub fn start_hls_pipeline(camera_url: String, hls_dir: PathBuf) {
                 "! hlssink2 target-duration=2 max-files=5 playlist-length=5 ",
                 "location={segments} playlist-location={playlist}"
             ),
+            camera_url = camera_url,
             segments = shell_escape::escape(segments.to_string_lossy()).to_string(),
             playlist = shell_escape::escape(playlist.to_string_lossy()).to_string(),
         );
