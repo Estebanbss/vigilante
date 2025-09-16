@@ -1,0 +1,8 @@
+# Ignorar archivos sensibles y temporales
+.env
+target/
+*.log
+*.tmp
+.DS_Store
+.idea/
+.vscode/

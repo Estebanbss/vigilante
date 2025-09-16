@@ -1,0 +1,30 @@
+[package]
+name = "vigilante"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors"] }
+dotenvy = "0.15"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+async-stream = "0.3"
+futures = "0.3"
+rand = "0.8"
+uuid = { version = "1.8", features = ["v4", "fast-rng"] }
+fs2 = "0.4"
+tokio-util = { version = "0.7", features = ["io"] }
+bytes = "1"
+shell-escape = "0.1"
+quick-xml = "0.31"
+url = "2"
+
+# GStreamer dependencies unified to version 0.22
+gstreamer = "0.22"
+gstreamer-app = "0.22"
+gstreamer-video = "0.22"
+gstreamer-pbutils = "0.22"
