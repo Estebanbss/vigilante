@@ -12,13 +12,10 @@ use bytes::Bytes;
 // use futures::StreamExt;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use gstreamer_app as gst_app;
 // use std::pin::Pin;
 use std::sync::Arc;
 use std::path::PathBuf;
 use std::fs;
-use tokio::sync::mpsc;
-use tokio::task;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use serde::Deserialize;
@@ -95,164 +92,14 @@ pub async fn stream_mjpeg_handler(
         if let Err(_status) = check_auth(&headers, &state.proxy_token).await { return Err(StatusCode::UNAUTHORIZED); }
     }
 
-    // Creamos un canal para enviar los frames JPEG desde GStreamer al response stream
-    let (tx, mut rx) = mpsc::channel::<Bytes>(16);
-
-    let camera_url = state.camera_rtsp_url.clone();
-
-    task::spawn_blocking(move || {
-        if let Err(e) = gst::init() {
-            eprintln!("GStreamer init error: {e}");
-            return;
-        }
-
-        let mut attempt: u64 = 0;
-        'reconnect: loop {
-            attempt += 1;
-            // Intentar primero decodificación por hardware (si existe en la Pi): v4l2h264dec
-            let pipeline_str_hw = format!(
-                "rtspsrc location={camera_url} protocols=tcp latency=50 do-rtsp-keep-alive=true drop-on-latency=true ! rtph264depay ! h264parse ! v4l2h264dec ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=85 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
-            );
-            eprintln!("[MJPEG] (attempt #{attempt}) Trying HW decode pipeline: {pipeline_str_hw}");
-            let pipeline = match gst::parse::launch(&pipeline_str_hw) {
-                Ok(e) => {
-                    eprintln!("[MJPEG] Using HW decoder v4l2h264dec (1280x720 downscale)");
-                    e.downcast::<gst::Pipeline>().unwrap()
-                }
-                Err(err_hw) => {
-                    eprintln!("[MJPEG] HW decode not available ({err_hw}). Falling back to SW (avdec_h264)...");
-                    let pipeline_str_sw = format!(
-                        "rtspsrc location={camera_url} protocols=tcp latency=50 do-rtsp-keep-alive=true drop-on-latency=true ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=85 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
-                    );
-                    eprintln!("[MJPEG] Launching SW pipeline: {pipeline_str_sw}");
-                    match gst::parse::launch(&pipeline_str_sw) {
-                        Ok(e) => e.downcast::<gst::Pipeline>().unwrap(),
-                        Err(err_sw) => {
-                            eprintln!("[MJPEG] SW pipeline error: {err_sw}");
-                            std::thread::sleep(std::time::Duration::from_secs(2));
-                            continue 'reconnect;
-                        }
-                    }
-                }
-            };
-
-            let appsink = match pipeline.by_name("sink").and_then(|e| e.downcast::<gst_app::AppSink>().ok()) {
-                Some(s) => s,
-                None => {
-                    eprintln!("[MJPEG] Failed to get appsink by name 'sink'");
-                    let _ = pipeline.set_state(gst::State::Null);
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    continue 'reconnect;
-                }
-            };
-            appsink.set_caps(Some(&gst::Caps::builder("image/jpeg").build()));
-
-            let bus = pipeline.bus();
-
-            // Set pipeline to PLAYING and wait for state change to complete
-            match pipeline.set_state(gst::State::Playing) {
-                Ok(success) => {
-                    eprintln!("[MJPEG] Pipeline set_state(Playing): {:?}", success);
-                    if let gst::StateChangeSuccess::Async = success {
-                        eprintln!("[MJPEG] Async state change, waiting up to 5s...");
-                        let (_res, state, pending) = pipeline.state(Some(gst::ClockTime::from_seconds(5)));
-                        eprintln!("[MJPEG] State after wait: {:?}, pending: {:?}", state, pending);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[MJPEG] Pipeline set_state(Playing) failed: {:?}", e);
-                    let _ = pipeline.set_state(gst::State::Null);
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                    continue 'reconnect;
-                }
-            }
-
-            // Wait a bit for the pipeline to stabilize
-            std::thread::sleep(std::time::Duration::from_millis(300));
-
-            // Bucle simple de lectura con timeout
-            let appsink_clone = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
-            let mut frame_count: u64 = 0;
-            let mut last_log = std::time::Instant::now();
-            let mut first_frame_received = false;
-            let mut client_gone = false;
-            
-            loop {
-                // Revisa mensajes del bus rápidamente para registrar errores/EOS
-                if let Some(ref bus) = bus {
-                    while let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(10)) {
-                        use gstreamer::MessageView;
-                        match msg.view() {
-                            MessageView::Error(e) => {
-                                eprintln!("[MJPEG] Bus Error from {:?}: {} ({:?})", msg.src().map(|s| s.path_string()), e.error(), e.debug());
-                                break;
-                            }
-                            MessageView::Eos(_) => {
-                                eprintln!("[MJPEG] Bus EOS received");
-                                break;
-                            }
-                            MessageView::StateChanged(s) => {
-                                if let Some(src) = msg.src() {
-                                    if src.is::<gst::Pipeline>() {
-                                        eprintln!("[MJPEG] Pipeline state changed: {:?} -> {:?}", s.old(), s.current());
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Try to pull a sample with a timeout
-                match appsink_clone.try_pull_sample(Some(gst::ClockTime::from_mseconds(1000))) {
-                    Some(sample) => {
-                        if !first_frame_received {
-                            eprintln!("[MJPEG] First frame received successfully!");
-                            first_frame_received = true;
-                        }
-                        if let Some(buffer) = sample.buffer() {
-                            if let Ok(map) = buffer.map_readable() {
-                                let data = Bytes::copy_from_slice(map.as_ref());
-                                frame_count += 1;
-                                if tx.blocking_send(data).is_err() {
-                                    eprintln!("[MJPEG] Client disconnected, stopping MJPEG thread");
-                                    client_gone = true;
-                                    break;
-                                }
-                                if last_log.elapsed() > std::time::Duration::from_secs(10) {
-                                    eprintln!("[MJPEG] Frames sent in last 10s: {} (pipeline active)", frame_count);
-                                    frame_count = 0;
-                                    last_log = std::time::Instant::now();
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        if !first_frame_received {
-                            eprintln!("[MJPEG] No frame yet. Will keep waiting...");
-                        }
-                        continue;
-                    }
-                }
-            }
-
-            let _ = pipeline.set_state(gst::State::Null);
-            if client_gone {
-                eprintln!("[MJPEG] Pipeline set to Null (client gone) — exiting");
-                break 'reconnect;
-            } else {
-                eprintln!("[MJPEG] Pipeline set to Null — reconnecting in 2s (attempt #{attempt})");
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                continue 'reconnect;
-            }
-        }
-    });
+    // Suscribimos al broadcast de JPEGs producido por el pipeline principal
+    let mut rx = state.mjpeg_tx.subscribe();
 
     // Creamos un body streaming multipart/x-mixed-replace
     let boundary = "frame";
     let mut first = true;
     let stream = async_stream::stream! {
-        while let Some(jpeg) = rx.recv().await {
+        while let Ok(jpeg) = rx.recv().await {
             let mut chunk = Vec::with_capacity(jpeg.len() + 256);
             if first {
                 first = false;
@@ -276,67 +123,4 @@ pub async fn stream_mjpeg_handler(
     Ok(resp)
 }
 
-// Inicia un pipeline independiente para generar HLS en STORAGE_PATH/hls
-pub fn start_hls_pipeline(camera_url: String, hls_dir: PathBuf) {
-    // Crear directorio si no existe
-    if let Err(e) = fs::create_dir_all(&hls_dir) {
-        eprintln!("No se pudo crear directorio HLS: {}", e);
-        return;
-    }
-
-    let segments = hls_dir.join("segment-%05d.ts");
-    let playlist = hls_dir.join("stream.m3u8");
-
-    std::thread::spawn(move || {
-        if let Err(e) = gst::init() { eprintln!("GStreamer init error: {e}"); return; }
-
-        // En algunas builds de GStreamer en Raspberry Pi, hlssink2 no acepta directamente
-        // caps de video/mpegts desde mpegtsmux. En su lugar, alimentamos H264 elementary
-        // stream (byte-stream, AU) directamente a hlssink2, que internamente hace el mux TS.
-        let pipeline_str = format!(
-            concat!(
-                "rtspsrc location={camera_url} protocols=tcp latency=100 ",
-                "! rtph264depay ",
-                "! h264parse config-interval=1 ",
-                "! video/x-h264,stream-format=byte-stream,alignment=au ",
-                "! hlssink2 target-duration=2 max-files=5 playlist-length=5 ",
-                "location={segments} playlist-location={playlist}"
-            ),
-            camera_url = camera_url,
-            segments = segments.to_string_lossy(),
-            playlist = playlist.to_string_lossy(),
-        );
-
-        eprintln!("[HLS] Launching pipeline: {pipeline_str}");
-
-        let pipeline = match gst::parse::launch(&pipeline_str) {
-            Ok(e) => e.downcast::<gst::Pipeline>().unwrap(),
-            Err(err) => { eprintln!("HLS pipeline error: {err}"); return; }
-        };
-
-        let bus = pipeline.bus();
-        let _ = pipeline.set_state(gst::State::Playing);
-        eprintln!("[HLS] Pipeline set to Playing");
-
-        if let Some(bus) = bus {
-            for msg in bus.iter_timed(gst::ClockTime::NONE) {
-                use gstreamer::MessageView;
-                match msg.view() {
-                    MessageView::Eos(_) => { eprintln!("[HLS] EOS"); break; }
-                    MessageView::Error(e) => { eprintln!("[HLS] error from {:?}: {} ({:?})", msg.src().map(|s| s.path_string()), e.error(), e.debug()); break; }
-                    MessageView::StateChanged(s) => {
-                        if let Some(src) = msg.src() {
-                            if src.is::<gst::Pipeline>() {
-                                eprintln!("[HLS] Pipeline state: {:?} -> {:?}", s.old(), s.current());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let _ = pipeline.set_state(gst::State::Null);
-        eprintln!("[HLS] Pipeline set to Null (stopped)");
-    });
-}
+// HLS ahora es generado dentro del pipeline principal (camera.rs)

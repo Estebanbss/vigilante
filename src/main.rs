@@ -14,12 +14,14 @@ mod camera;
 mod ptz;
 
 use storage::{get_storage_info, list_recordings, delete_recording, stream_recording, start_cleanup_task, get_log_file};
-use stream::{stream_hls_handler, stream_hls_index, stream_webrtc_handler, stream_mjpeg_handler, start_hls_pipeline};
+use stream::{stream_hls_handler, stream_hls_index, stream_webrtc_handler, stream_mjpeg_handler};
 use camera::{start_camera_pipeline};
 use ptz::{pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, ptz_stop};
 
 // Dependencias de GStreamer
 use gstreamer as gst;
+use bytes::Bytes;
+use tokio::sync::broadcast;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -28,6 +30,7 @@ pub struct AppState {
     pub proxy_token: String,
     pub storage_path: PathBuf,
     pub pipeline: Arc<Mutex<Option<gst::Pipeline>>>,
+    pub mjpeg_tx: broadcast::Sender<Bytes>,
 }
 
 #[tokio::main]
@@ -49,12 +52,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let storage_path_buf = PathBuf::from(&storage_path);
 
+    let (mjpeg_tx, _mjpeg_rx) = broadcast::channel::<Bytes>(32);
+
     let state = Arc::new(AppState {
         camera_rtsp_url: camera_rtsp_url.clone(),
         camera_onvif_url: camera_onvif_url.clone(),
         proxy_token: proxy_token.clone(),
         storage_path: storage_path_buf.clone(),
         pipeline: Arc::new(Mutex::new(None)),
+        mjpeg_tx,
     });
 
     // Iniciar la tarea de limpieza de almacenamiento en segundo plano
@@ -63,11 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Iniciar el pipeline de la cámara para la grabación 24/7 y detección de eventos
     tokio::spawn(start_camera_pipeline(camera_rtsp_url, state.clone()));
 
-    // Iniciar pipeline HLS independiente (live)
-    {
-        let hls_dir = state.storage_path.join("hls");
-        start_hls_pipeline(state.camera_rtsp_url.clone(), hls_dir);
-    }
+    // HLS ahora se genera dentro del pipeline principal en camera.rs mediante un branch del tee
 
     let app = Router::new()
         .route("/hls", get(stream_hls_index))
