@@ -108,7 +108,7 @@ pub async fn stream_mjpeg_handler(
 
         // Intentar primero decodificación por hardware (si existe en la Pi): v4l2h264dec
         let pipeline_str_hw = format!(
-            "rtspsrc location={camera_url} protocols=tcp latency=50 ! rtph264depay ! h264parse ! v4l2h264dec ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=100 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
+            "rtspsrc location={camera_url} protocols=tcp latency=50 ! rtph264depay ! h264parse ! v4l2h264dec ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=85 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
         );
         eprintln!("[MJPEG] Trying HW decode pipeline: {pipeline_str_hw}");
         let pipeline = match gst::parse::launch(&pipeline_str_hw) {
@@ -119,7 +119,7 @@ pub async fn stream_mjpeg_handler(
             Err(err_hw) => {
                 eprintln!("[MJPEG] HW decode not available ({err_hw}). Falling back to SW (avdec_h264)...");
                 let pipeline_str_sw = format!(
-                    "rtspsrc location={camera_url} protocols=tcp latency=50 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=100 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
+                    "rtspsrc location={camera_url} protocols=tcp latency=50 ! rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! jpegenc quality=85 ! queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0 ! appsink name=sink sync=false max-buffers=1 drop=true"
                 );
                 eprintln!("[MJPEG] Launching SW pipeline: {pipeline_str_sw}");
                 match gst::parse::launch(&pipeline_str_sw) {
@@ -136,13 +136,46 @@ pub async fn stream_mjpeg_handler(
         appsink.set_caps(Some(&gst::Caps::builder("image/jpeg").build()));
 
         let bus = pipeline.bus();
-        let _ = pipeline.set_state(gst::State::Playing);
-        eprintln!("[MJPEG] Pipeline set to Playing");
+        
+        // Set pipeline to PLAYING and wait for state change to complete
+        match pipeline.set_state(gst::State::Playing) {
+            gst::StateChangeReturn::Success => {
+                eprintln!("[MJPEG] Pipeline state change to Playing: Success");
+            }
+            gst::StateChangeReturn::Async => {
+                eprintln!("[MJPEG] Pipeline state change to Playing: Async, waiting...");
+                // Wait for the state change to complete with a timeout
+                match pipeline.state(Some(gst::ClockTime::from_seconds(10))) {
+                    Ok((state, pending)) => {
+                        eprintln!("[MJPEG] State after async change: {:?}, pending: {:?}", state, pending);
+                        if state != gst::State::Playing {
+                            eprintln!("[MJPEG] Warning: Pipeline not in Playing state after timeout");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[MJPEG] Error waiting for state change: {:?}", e);
+                        return;
+                    }
+                }
+            }
+            gst::StateChangeReturn::Failure => {
+                eprintln!("[MJPEG] Pipeline state change to Playing: Failed");
+                return;
+            }
+            gst::StateChangeReturn::NoPreroll => {
+                eprintln!("[MJPEG] Pipeline state change to Playing: NoPreroll");
+            }
+        }
+
+        // Wait a bit for the pipeline to stabilize
+        std::thread::sleep(std::time::Duration::from_millis(500));
 
         // Bucle simple de lectura con timeout
         let appsink_clone = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
         let mut frame_count: u64 = 0;
         let mut last_log = std::time::Instant::now();
+        let mut first_frame_received = false;
+        
         loop {
             // Revisa mensajes del bus rápidamente para registrar errores/EOS
             if let Some(ref bus) = bus {
@@ -151,11 +184,13 @@ pub async fn stream_mjpeg_handler(
                     match msg.view() {
                         MessageView::Error(e) => {
                             eprintln!("[MJPEG] Bus Error from {:?}: {} ({:?})", msg.src().map(|s| s.path_string()), e.error(), e.debug());
-                            break;
+                            let _ = pipeline.set_state(gst::State::Null);
+                            return;
                         }
                         MessageView::Eos(_) => {
                             eprintln!("[MJPEG] Bus EOS received");
-                            break;
+                            let _ = pipeline.set_state(gst::State::Null);
+                            return;
                         }
                         MessageView::StateChanged(s) => {
                             if let Some(src) = msg.src() {
@@ -164,13 +199,25 @@ pub async fn stream_mjpeg_handler(
                                 }
                             }
                         }
+                        MessageView::StreamStart(_) => {
+                            eprintln!("[MJPEG] Stream started");
+                        }
+                        MessageView::AsyncDone(_) => {
+                            eprintln!("[MJPEG] Async operation completed");
+                        }
                         _ => {}
                     }
                 }
             }
 
-            match appsink_clone.pull_sample() {
-                Ok(sample) => {
+            // Try to pull a sample with a timeout
+            match appsink_clone.try_pull_sample(Some(gst::ClockTime::from_mseconds(1000))) {
+                Some(sample) => {
+                    if !first_frame_received {
+                        eprintln!("[MJPEG] First frame received successfully!");
+                        first_frame_received = true;
+                    }
+                    
                     if let Some(buffer) = sample.buffer() {
                         if let Ok(map) = buffer.map_readable() {
                             let data = Bytes::copy_from_slice(map.as_ref());
@@ -180,16 +227,33 @@ pub async fn stream_mjpeg_handler(
                                 break;
                             }
                             if last_log.elapsed() > std::time::Duration::from_secs(10) {
-                                eprintln!("[MJPEG] Frames sent in last 10s: ~{} ({} fps target)", frame_count, 10);
+                                eprintln!("[MJPEG] Frames sent in last 10s: {} (pipeline active)", frame_count);
                                 frame_count = 0;
                                 last_log = std::time::Instant::now();
                             }
                         }
                     }
                 }
-                Err(err) => {
-                    eprintln!("[MJPEG] appsink pull_sample error: {err}");
-                    break;
+                None => {
+                    if !first_frame_received {
+                        eprintln!("[MJPEG] No frame received yet, checking pipeline state...");
+                        match pipeline.state(Some(gst::ClockTime::from_mseconds(100))) {
+                            Ok((state, pending)) => {
+                                eprintln!("[MJPEG] Current state: {:?}, pending: {:?}", state, pending);
+                                if state != gst::State::Playing && pending != gst::State::Playing {
+                                    eprintln!("[MJPEG] Pipeline not in playing state, attempting restart...");
+                                    let _ = pipeline.set_state(gst::State::Ready);
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                    let _ = pipeline.set_state(gst::State::Playing);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[MJPEG] Error getting pipeline state: {:?}", e);
+                            }
+                        }
+                    }
+                    // Continue the loop to keep trying
+                    continue;
                 }
             }
         }
@@ -203,15 +267,20 @@ pub async fn stream_mjpeg_handler(
     let mut first = true;
     let stream = async_stream::stream! {
         while let Some(jpeg) = rx.recv().await {
-            let mut chunk = Vec::with_capacity(jpeg.len() + 128);
+            let mut chunk = Vec::with_capacity(jpeg.len() + 256);
             if first {
                 first = false;
+                // Send initial boundary for multipart stream
+                chunk.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+            } else {
+                chunk.extend_from_slice(format!("\r\n--{}\r\n", boundary).as_bytes());
             }
-            chunk.extend_from_slice(format!("--{}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", boundary, jpeg.len()).as_bytes());
+            chunk.extend_from_slice(format!("Content-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n", jpeg.len()).as_bytes());
             chunk.extend_from_slice(&jpeg);
-            chunk.extend_from_slice(b"\r\n");
             yield Ok::<Bytes, std::io::Error>(Bytes::from(chunk));
         }
+        // Send closing boundary when stream ends
+        yield Ok::<Bytes, std::io::Error>(Bytes::from(format!("\r\n--{}--\r\n", boundary)));
     };
 
     let mut resp = Response::new(Body::from_stream(stream));
