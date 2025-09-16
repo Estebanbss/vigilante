@@ -248,8 +248,8 @@ pub fn start_hls_pipeline(camera_url: String, hls_dir: PathBuf) {
                 "location={segments} playlist-location={playlist}"
             ),
             camera_url = camera_url,
-            segments = shell_escape::escape(segments.to_string_lossy()).to_string(),
-            playlist = shell_escape::escape(playlist.to_string_lossy()).to_string(),
+            segments = segments.to_string_lossy(),
+            playlist = playlist.to_string_lossy(),
         );
 
         eprintln!("[HLS] Launching pipeline: {pipeline_str}");
