@@ -31,6 +31,7 @@ pub struct AppState {
     pub storage_path: PathBuf,
     pub pipeline: Arc<Mutex<Option<gst::Pipeline>>>,
     pub mjpeg_tx: broadcast::Sender<Bytes>,
+    pub enable_hls: bool,
 }
 
 #[tokio::main]
@@ -44,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proxy_token = env::var("PROXY_TOKEN")?;
     let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let storage_path = env::var("STORAGE_PATH")?;
+    let enable_hls = env::var("ENABLE_HLS").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -61,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage_path: storage_path_buf.clone(),
         pipeline: Arc::new(Mutex::new(None)),
         mjpeg_tx,
+        enable_hls,
     });
 
     // Iniciar la tarea de limpieza de almacenamiento en segundo plano

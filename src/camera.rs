@@ -27,13 +27,33 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         println!("📹 Iniciando grabación diaria: {} (hasta medianoche: {:?})", daily_filename, duration_until_midnight);
         
         // Pipeline para grabación continua en archivo diario
-        // Single RTSP source with tee to: recording(mp4), detector(appsink), mjpeg(appsink), and HLS
-        let hls_dir = state.storage_path.join("hls");
-        if let Err(e) = std::fs::create_dir_all(&hls_dir) {
-            eprintln!("❌ No se pudo crear el directorio HLS: {}", e);
-        }
-        let segments = hls_dir.join("segment-%05d.ts");
-        let playlist = hls_dir.join("stream.m3u8");
+        // Single RTSP source with tee to: recording(mp4), detector(appsink), mjpeg(appsink), and optional HLS
+        let daily_s = daily_path.to_string_lossy();
+        let enable_hls = state.enable_hls;
+        let (hls_part, _created): (String, bool) = if enable_hls {
+            let hls_dir = state.storage_path.join("hls");
+            let mut created = false;
+            if let Err(e) = std::fs::create_dir_all(&hls_dir) {
+                eprintln!("❌ No se pudo crear el directorio HLS: {}", e);
+            } else {
+                created = true;
+            }
+            let segments = hls_dir.join("segment-%05d.ts");
+            let playlist = hls_dir.join("stream.m3u8");
+            let segments_s = segments.to_string_lossy();
+            let playlist_s = playlist.to_string_lossy();
+            (
+                format!(
+                    concat!(
+                        " t. ! queue ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au ",
+                        "! hlssink2 target-duration=2 max-files=5 playlist-length=5 location=\"{segments}\" playlist-location=\"{playlist}\""
+                    ),
+                    segments = segments_s,
+                    playlist = playlist_s,
+                ),
+                created,
+            )
+        } else { (String::new(), false) };
 
         let pipeline_str = format!(
             concat!(
@@ -41,20 +61,17 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 "! rtph264depay ! h264parse name=h264 ",
                 "! tee name=t ",
                 // recording branch
-                "t. ! queue ! mp4mux name=mux ! filesink location={daily} sync=false append=false ",
+                "t. ! queue ! mp4mux name=mux ! filesink location=\"{daily}\" sync=false append=false ",
                 // detector branch
                 "t. ! queue ! h264parse ! appsink name=detector emit-signals=true ",
                 // mjpeg branch: decode->scale->jpeg->appsink
                 "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ",
-                "! jpegenc quality=85 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true ",
-                // hls branch: use elementary stream for hlssink2
-                "t. ! queue ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au ",
-                "! hlssink2 target-duration=2 max-files=5 playlist-length=5 location={segments} playlist-location={playlist}"
+                "! jpegenc quality=85 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true",
+                "{hls_part}"
             ),
             camera_url = camera_url,
-            daily = shell_escape::escape(daily_path.to_string_lossy()).to_string(),
-            segments = shell_escape::escape(segments.to_string_lossy()).to_string(),
-            playlist = shell_escape::escape(playlist.to_string_lossy()).to_string(),
+            daily = daily_s,
+            hls_part = hls_part,
         );
 
         println!("📷 Recording pipeline: {}", pipeline_str);
