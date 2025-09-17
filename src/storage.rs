@@ -308,7 +308,7 @@ pub async fn stream_recording_tail(
     let stream = async_stream::stream! {
         let mut buf = vec![0u8; 64 * 1024]; // 64KB
         let mut sent_header = false;
-        let mut header_end: Option<u64> = None; // offset del fin de 'moov'
+    let mut _header_end: Option<u64> = None; // offset del fin de 'moov'
 
         loop {
             // Leer si hay nuevos datos
@@ -359,7 +359,7 @@ pub async fn stream_recording_tail(
                             }
 
                             if let Some(end) = found_moov_end {
-                                header_end = Some(end as u64);
+                                _header_end = Some(end as u64);
                                 // Enviar exactamente hasta el final de moov
                                 let mut header_buf = vec![0u8; end];
                                 if let Err(e) = file.seek(std::io::SeekFrom::Start(0)).await { 
@@ -433,12 +433,15 @@ pub async fn stream_recording_tail(
     let mut resp = Response::new(Body::from_stream(stream));
     let headers = resp.headers_mut();
     headers.insert(axum::http::header::CONTENT_TYPE, "video/mp4".parse().unwrap());
+    headers.insert(axum::http::header::CONTENT_DISPOSITION, "inline; filename=live.mp4".parse().unwrap());
     headers.insert(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate".parse().unwrap());
     headers.insert(axum::http::header::PRAGMA, "no-cache".parse().unwrap());
     headers.insert(axum::http::header::EXPIRES, "0".parse().unwrap());
     // Importante: agregar headers para streaming
     headers.insert(axum::http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
     headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+    headers.insert("X-Accel-Buffering", "no".parse().unwrap()); // nginx: desactiva buffering
+    headers.insert("Cache-Control", "no-transform".parse().unwrap()); // evita proxies que reescriben
     headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
     headers.insert("Connection", "keep-alive".parse().unwrap());
     Ok(resp)
