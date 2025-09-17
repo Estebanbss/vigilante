@@ -69,11 +69,13 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
     let pipeline_str = format!(
             concat!(
                 "rtspsrc location={camera_url} protocols=tcp do-rtsp-keep-alive=true latency=100 retry=5 timeout=20000000000 ",
-                "! rtph264depay ! h264parse config-interval=1 ! video/x-h264,stream-format=avc,alignment=au ",
+                "! rtph264depay ! h264parse config-interval=1 ",
                 "! tee name=t ",
-                // recording branch: usar H.264 directo del RTSP sin re-encodear
-                "t. ! queue ! h264parse config-interval=1 ! video/x-h264,stream-format=avc,alignment=au ",
-                "! mp4mux name=mux streamable=true faststart=true fragment-duration=3000 fragment-mode=first-moov-then-finalise moov-recovery-file=/tmp/moov_recovery.mov ",
+                // recording branch: decodificar y re-encodear para garantizar pixel format correcto
+                "t. ! queue ! decodebin ! videoconvert ! video/x-raw,format=I420 ",
+                "! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=30 ",
+                "! video/x-h264,profile=baseline,stream-format=avc ",
+                "! mp4mux name=mux streamable=true faststart=true fragment-duration=3000 fragment-mode=first-moov-then-finalise ",
                 "! filesink location=\"{daily}\" sync=false append=false ",
                 // detector branch: decodificar a GRAY8 reducido para análisis rápido
                 "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=640,height=360 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",

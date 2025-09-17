@@ -312,19 +312,17 @@ pub async fn stream_recording_tail(
             // Leer si hay nuevos datos
             let len = match tokio::fs::metadata(&full_path).await { Ok(m)=> m.len(), Err(_)=> 0 };
             if len > pos {
-                // Hay datos nuevos
-                if let Err(e) = file.seek(std::io::SeekFrom::Start(pos)).await { 
-                    eprintln!("seek err: {}", e); 
-                    break; 
-                }
-                
                 // Para el encabezado inicial, enviar todo lo disponible
                 if !sent_header && len >= 1024 {
                     let header_size = std::cmp::min(len, 256 * 1024) as usize; // Primeros 256KB
                     let mut header_buf = vec![0u8; header_size];
+                    if let Err(e) = file.seek(std::io::SeekFrom::Start(0)).await { 
+                        eprintln!("header seek err: {}", e); 
+                        break; 
+                    }
                     match file.read_exact(&mut header_buf).await {
                         Ok(_) => {
-                            pos += header_size as u64;
+                            pos = header_size as u64;
                             yield Ok::<Bytes, std::io::Error>(Bytes::from(header_buf));
                             sent_header = true;
                             println!("📤 Enviado header MP4: {} bytes", header_size);
@@ -338,11 +336,14 @@ pub async fn stream_recording_tail(
                 }
                 
                 // Para datos después del header, esperar fragmentos completos
-                if sent_header {
-                    // Solo enviar si hay suficientes datos nuevos (evitar fragmentos parciales)
+                if sent_header && len > pos {
                     let available = len - pos;
                     if available >= 32 * 1024 { // Esperar al menos 32KB antes de enviar
                         let to_read = std::cmp::min(buf.len() as u64, available) as usize;
+                        if let Err(e) = file.seek(std::io::SeekFrom::Start(pos)).await { 
+                            eprintln!("seek err: {}", e); 
+                            break; 
+                        }
                         match file.read_exact(&mut buf[..to_read]).await {
                             Ok(_) => {
                                 pos += to_read as u64;
@@ -362,7 +363,7 @@ pub async fn stream_recording_tail(
                         // No hay suficientes datos, esperar
                         tokio::time::sleep(Duration::from_millis(1000)).await;
                     }
-                } else {
+                } else if !sent_header {
                     // Esperando que se acumule el header
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
