@@ -14,6 +14,7 @@ use chrono::{DateTime, Utc};
 use tokio::{fs::File, time::sleep};
 use tokio_util::io::ReaderStream;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use bytes::Bytes;
 
 // Estructura para la respuesta estándar de la API
 #[derive(Serialize)]
@@ -314,7 +315,7 @@ pub async fn stream_recording_tail(
                 while pos < len {
                     let to_read = std::cmp::min(buf.len() as u64, len - pos) as usize;
                     match file.read_exact(&mut buf[..to_read]).await {
-                        Ok(()) => {
+                        Ok(_) => {
                             pos += to_read as u64;
                             yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buf[..to_read]));
                         }

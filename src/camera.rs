@@ -118,9 +118,9 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                     // Obtener dimensiones desde caps
                     let caps = sample.caps().ok_or(gst::FlowError::Error)?;
                     let s = caps.structure(0).ok_or(gst::FlowError::Error)?;
-                    let width: i32 = s.get("width").ok_or(gst::FlowError::Error)?;
-                    let height: i32 = s.get("height").ok_or(gst::FlowError::Error)?;
-                    let _format: &str = s.get::<&str>("format").ok_or(gst::FlowError::Error)?;
+                    let width: i32 = s.get("width").unwrap_or(640);
+                    let height: i32 = s.get("height").unwrap_or(360);
+                    let _format: &str = s.get::<&str>("format").unwrap_or("GRAY8");
 
                     let frame = map.as_ref(); // GRAY8 plano
 
