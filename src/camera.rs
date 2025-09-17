@@ -11,8 +11,16 @@ use chrono::{Local};
 pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
     loop {
         let now = chrono::Local::now();
+        // Crear carpeta por día con formato DD-MM-YY (ej: 17-09-25)
+        let day_dir_name = now.format("%d-%m-%y").to_string();
+        let day_dir = state.storage_path.join(&day_dir_name);
+        if let Err(e) = std::fs::create_dir_all(&day_dir) {
+            eprintln!("❌ No se pudo crear la carpeta diaria {}: {}", day_dir.display(), e);
+        }
+
+        // Archivo diario con nombre YYYY-MM-DD.mp4 dentro de la carpeta del día
         let daily_filename = format!("{}.mp4", now.format("%Y-%m-%d"));
-        let daily_path = state.storage_path.join(&daily_filename);
+        let daily_path = day_dir.join(&daily_filename);
         
         // Calcular cuánto tiempo falta para medianoche
         let next_midnight = (now + chrono::Duration::days(1))
@@ -55,15 +63,16 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             )
         } else { (String::new(), false) };
 
-        let pipeline_str = format!(
+    let pipeline_str = format!(
             concat!(
                 "rtspsrc location={camera_url} protocols=tcp do-rtsp-keep-alive=true latency=100 ",
                 "! rtph264depay ! h264parse name=h264 ",
                 "! tee name=t ",
                 // recording branch
-                "t. ! queue ! mp4mux name=mux ! filesink location=\"{daily}\" sync=false append=false ",
-                // detector branch
-                "t. ! queue ! h264parse ! appsink name=detector emit-signals=true ",
+        // mp4mux en modo 'streamable' para poder reproducir mientras escribe
+        "t. ! queue ! mp4mux name=mux streamable=true faststart=true ! filesink location=\"{daily}\" sync=false append=false ",
+        // detector branch: decodificar a GRAY8 reducido para análisis rápido
+        "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=640,height=360 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
                 // mjpeg branch: decode->scale->jpeg->appsink
                 "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ",
                 "! jpegenc quality=85 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true",
@@ -93,31 +102,78 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
         // Set appsink callbacks to analyze frames
         let state_for_cb = state.clone();
+        use std::sync::{Mutex as StdMutex};
+        use std::time::{Instant};
+        let prev_frame: Arc<StdMutex<Option<Vec<u8>>>> = Arc::new(StdMutex::new(None));
+        let last_event_time: Arc<StdMutex<Option<Instant>>> = Arc::new(StdMutex::new(None));
+        let prev_frame_cb = prev_frame.clone();
+        let last_event_time_cb = last_event_time.clone();
         appsink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |appsink| {
                     let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                     let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
                     let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                    
-                    // Simulate event detection
-                    // In a real scenario, you would use a machine learning model to detect motion or people here
-                    let has_movement = (map.len() % 1000) == 0; // A simple placeholder for now
-                    let has_person = (map.len() % 5000) == 0; // A simple placeholder for now
-                    
-                    if has_movement || has_person {
+
+                    // Obtener dimensiones desde caps
+                    let caps = sample.caps().ok_or(gst::FlowError::Error)?;
+                    let s = caps.structure(0).ok_or(gst::FlowError::Error)?;
+                    let width: i32 = s.get("width").ok_or(gst::FlowError::Error)?;
+                    let height: i32 = s.get("height").ok_or(gst::FlowError::Error)?;
+                    let _format: &str = s.get::<&str>("format").ok_or(gst::FlowError::Error)?;
+
+                    let frame = map.as_ref(); // GRAY8 plano
+
+                    // Motion detection simple: diferencia absoluta promedio contra frame previo
+                    let mut has_movement = false;
+                    if frame.len() == (width as usize * height as usize) {
+                        let mut prev_guard = prev_frame_cb.lock().unwrap();
+                        if let Some(prev) = prev_guard.as_ref() {
+                            let mut acc: u64 = 0;
+                            // muestreo: cada 4 pixeles para reducir costo
+                            let mut i = 0usize;
+                            let mut count = 0u64;
+                            let len = frame.len();
+                            while i < len {
+                                let d = frame[i].abs_diff(prev[i]) as u64;
+                                acc += d;
+                                count += 1;
+                                i += 4; // sample step
+                            }
+                            if count > 0 {
+                                let mean = (acc as f64) / (count as f64);
+                                // umbral empírico
+                                has_movement = mean > 8.0;
+                            }
+                        }
+                        // actualiza previo (copia)
+                        *prev_guard = Some(frame.to_vec());
+                    }
+
+                    // Anti-spam: mínimo 2s entre eventos
+                    let mut should_log = false;
+                    if has_movement {
+                        let mut last_guard = last_event_time_cb.lock().unwrap();
+                        let now_i = Instant::now();
+                        if let Some(last) = *last_guard {
+                            if now_i.duration_since(last).as_millis() > 2000 { should_log = true; *last_guard = Some(now_i); }
+                        } else { should_log = true; *last_guard = Some(now_i); }
+                    }
+
+                    if should_log {
                         let now = Local::now();
+                        // Carpeta del día (DD-MM-YY) y archivo de log (YYYY-MM-DD-log.txt)
+                        let day_dir_name = now.format("%d-%m-%y").to_string();
+                        let day_dir = state_for_cb.storage_path.join(&day_dir_name);
+                        if let Err(e) = std::fs::create_dir_all(&day_dir) {
+                            eprintln!("❌ No se pudo crear la carpeta diaria {}: {}", day_dir.display(), e);
+                        }
                         let log_filename = now.format("%Y-%m-%d-log.txt").to_string();
-                        let log_path = state_for_cb.storage_path.join(&log_filename);
+                        let log_path = day_dir.join(&log_filename);
                         
                         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
                             let timestamp = now.format("%H:%M:%S.%3f").to_string();
-                            if has_movement {
-                                writeln!(file, "{} - se detectó movimiento", timestamp).ok();
-                            }
-                            if has_person {
-                                writeln!(file, "{} - se detectó una persona", timestamp).ok();
-                            }
+                            writeln!(file, "{} - se detectó movimiento", timestamp).ok();
                         }
                     }
                     

@@ -13,6 +13,7 @@ use fs2;
 use chrono::{DateTime, Utc};
 use tokio::{fs::File, time::sleep};
 use tokio_util::io::ReaderStream;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 // Estructura para la respuesta estándar de la API
 #[derive(Serialize)]
@@ -80,6 +81,10 @@ pub struct ListRecordingsParams {
     pub limit: Option<u64>,
     pub date: Option<String>,
 }
+
+// Auth helper via query param (?token=) to ease VLC/players
+#[derive(Deserialize, Default)]
+pub struct TokenQuery { pub token: Option<String> }
 
 // Función auxiliar recursiva para obtener grabaciones de todos los subdirectorios
 fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
@@ -201,10 +206,12 @@ pub async fn delete_recording(
 pub async fn stream_recording(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
     Path(file_path): Path<String>,
 ) -> Result<Response, StatusCode> {
-    if let Err(_status) = check_auth(&headers, &state.proxy_token).await {
-        return Err(StatusCode::UNAUTHORIZED);
+    // Auth: acepta header Authorization o query ?token=
+    if q.token.as_deref() != Some(&state.proxy_token) {
+        if let Err(_status) = check_auth(&headers, &state.proxy_token).await { return Err(StatusCode::UNAUTHORIZED); }
     }
     
     let candidate = PathBuf::from(&state.storage_path).join(&file_path);
@@ -249,9 +256,17 @@ pub async fn get_log_file(
         })).into_response();
     }
 
+    // Nuevo esquema: logs dentro de carpeta del día DD-MM-YY
     let file_name = format!("{}-log.txt", date);
-    let full_path = PathBuf::from(&state.storage_path).join(&file_name);
-    
+    // Convertir YYYY-MM-DD -> DD-MM-YY
+    let day_dir = match chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") {
+        Ok(d) => state.storage_path.join(d.format("%d-%m-%y").to_string()),
+        Err(_) => state.storage_path.clone(),
+    };
+    let full_path_new = day_dir.join(&file_name);
+    // Compat: fallback a raíz si no existe
+    let full_path = if full_path_new.exists() { full_path_new } else { state.storage_path.join(&file_name) };
+
     match tokio::fs::read_to_string(&full_path).await {
         Ok(content) => (StatusCode::OK, content).into_response(),
         Err(e) => {
@@ -263,6 +278,68 @@ pub async fn get_log_file(
             }
         }
     }
+}
+
+// Stream que "sigue" creciendo el archivo para verlo en tiempo real
+pub async fn stream_recording_tail(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Path(file_path): Path<String>,
+) -> Result<Response, StatusCode> {
+    // Auth: acepta header Authorization o query ?token=
+    if q.token.as_deref() != Some(&state.proxy_token) {
+        if let Err(_status) = check_auth(&headers, &state.proxy_token).await { return Err(StatusCode::UNAUTHORIZED); }
+    }
+
+    let candidate = PathBuf::from(&state.storage_path).join(&file_path);
+    let full_path = candidate.canonicalize().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let root = state.storage_path.canonicalize().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !full_path.starts_with(&root) { return Err(StatusCode::FORBIDDEN); }
+
+    // Abrir archivo y crear stream que sigue leyendo mientras crece
+    let mut file = File::open(&full_path).await.map_err(|_| StatusCode::NOT_FOUND)?;
+
+    // Posición inicial: desde el principio (para incluir moov/ftyp) y que el reproductor pueda decodificar
+    let mut pos: u64 = 0;
+
+    let stream = async_stream::stream! {
+        let mut buf = vec![0u8; 64 * 1024]; // 64KB
+        loop {
+            // Leer si hay nuevos datos
+            let len = match tokio::fs::metadata(&full_path).await { Ok(m)=> m.len(), Err(_)=> 0 };
+            if len > pos {
+                // Hay datos nuevos, leer en bloques
+                if let Err(e) = file.seek(std::io::SeekFrom::Start(pos)).await { eprintln!("seek err: {}", e); break; }
+                while pos < len {
+                    let to_read = std::cmp::min(buf.len() as u64, len - pos) as usize;
+                    match file.read_exact(&mut buf[..to_read]).await {
+                        Ok(()) => {
+                            pos += to_read as u64;
+                            yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buf[..to_read]));
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                            // Se alcanzó fin temporal, salir a esperar
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("read err: {}", e);
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // No hay nuevos datos; dormir un poco
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    };
+
+    let mut resp = Response::new(Body::from_stream(stream));
+    let headers = resp.headers_mut();
+    headers.insert(axum::http::header::CONTENT_TYPE, "video/mp4".parse().unwrap());
+    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    Ok(resp)
 }
 
 
