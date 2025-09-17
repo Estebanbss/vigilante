@@ -306,32 +306,69 @@ pub async fn stream_recording_tail(
 
     let stream = async_stream::stream! {
         let mut buf = vec![0u8; 64 * 1024]; // 64KB
+        let mut sent_header = false;
+        
         loop {
             // Leer si hay nuevos datos
             let len = match tokio::fs::metadata(&full_path).await { Ok(m)=> m.len(), Err(_)=> 0 };
             if len > pos {
-                // Hay datos nuevos, leer en bloques
-                if let Err(e) = file.seek(std::io::SeekFrom::Start(pos)).await { eprintln!("seek err: {}", e); break; }
-                while pos < len {
-                    let to_read = std::cmp::min(buf.len() as u64, len - pos) as usize;
-                    match file.read_exact(&mut buf[..to_read]).await {
+                // Hay datos nuevos
+                if let Err(e) = file.seek(std::io::SeekFrom::Start(pos)).await { 
+                    eprintln!("seek err: {}", e); 
+                    break; 
+                }
+                
+                // Para el encabezado inicial, enviar todo lo disponible
+                if !sent_header && len >= 1024 {
+                    let header_size = std::cmp::min(len, 256 * 1024) as usize; // Primeros 256KB
+                    let mut header_buf = vec![0u8; header_size];
+                    match file.read_exact(&mut header_buf).await {
                         Ok(_) => {
-                            pos += to_read as u64;
-                            yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buf[..to_read]));
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                            // Se alcanzó fin temporal, salir a esperar
-                            break;
+                            pos += header_size as u64;
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from(header_buf));
+                            sent_header = true;
+                            println!("📤 Enviado header MP4: {} bytes", header_size);
                         }
                         Err(e) => {
-                            eprintln!("read err: {}", e);
+                            eprintln!("header read err: {}", e);
                             break;
                         }
                     }
+                    continue;
+                }
+                
+                // Para datos después del header, esperar fragmentos completos
+                if sent_header {
+                    // Solo enviar si hay suficientes datos nuevos (evitar fragmentos parciales)
+                    let available = len - pos;
+                    if available >= 32 * 1024 { // Esperar al menos 32KB antes de enviar
+                        let to_read = std::cmp::min(buf.len() as u64, available) as usize;
+                        match file.read_exact(&mut buf[..to_read]).await {
+                            Ok(_) => {
+                                pos += to_read as u64;
+                                yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buf[..to_read]));
+                                println!("📤 Enviado fragmento: {} bytes (pos: {})", to_read, pos);
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                                // Se alcanzó fin temporal, salir a esperar
+                                break;
+                            }
+                            Err(e) => {
+                                eprintln!("read err: {}", e);
+                                break;
+                            }
+                        }
+                    } else {
+                        // No hay suficientes datos, esperar
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                    }
+                } else {
+                    // Esperando que se acumule el header
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             } else {
                 // No hay nuevos datos; dormir un poco
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                tokio::time::sleep(Duration::from_millis(1000)).await;
             }
         }
     };
@@ -340,6 +377,9 @@ pub async fn stream_recording_tail(
     let headers = resp.headers_mut();
     headers.insert(axum::http::header::CONTENT_TYPE, "video/mp4".parse().unwrap());
     headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    // Importante: agregar headers para streaming
+    headers.insert(axum::http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
     Ok(resp)
 }
 
