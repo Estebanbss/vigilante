@@ -376,10 +376,14 @@ pub async fn stream_recording_tail(
     let mut resp = Response::new(Body::from_stream(stream));
     let headers = resp.headers_mut();
     headers.insert(axum::http::header::CONTENT_TYPE, "video/mp4".parse().unwrap());
-    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate".parse().unwrap());
+    headers.insert(axum::http::header::PRAGMA, "no-cache".parse().unwrap());
+    headers.insert(axum::http::header::EXPIRES, "0".parse().unwrap());
     // Importante: agregar headers para streaming
     headers.insert(axum::http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
     headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    headers.insert("Connection", "keep-alive".parse().unwrap());
     Ok(resp)
 }
 
