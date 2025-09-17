@@ -15,6 +15,7 @@ use tokio::{fs::File, time::sleep};
 use tokio_util::io::ReaderStream;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use bytes::Bytes;
+use std::convert::TryInto;
 
 // Estructura para la respuesta estándar de la API
 #[derive(Serialize)]
@@ -301,76 +302,131 @@ pub async fn stream_recording_tail(
     // Abrir archivo y crear stream que sigue leyendo mientras crece
     let mut file = File::open(&full_path).await.map_err(|_| StatusCode::NOT_FOUND)?;
 
-    // Posición inicial: desde el principio (para incluir moov/ftyp) y que el reproductor pueda decodificar
+    // Posición inicial: desde el principio (para incluir ftyp+moov) y que el reproductor pueda decodificar
     let mut pos: u64 = 0;
 
     let stream = async_stream::stream! {
         let mut buf = vec![0u8; 64 * 1024]; // 64KB
         let mut sent_header = false;
-        
+        let mut header_end: Option<u64> = None; // offset del fin de 'moov'
+
         loop {
             // Leer si hay nuevos datos
             let len = match tokio::fs::metadata(&full_path).await { Ok(m)=> m.len(), Err(_)=> 0 };
-            if len > pos {
-                // Para el encabezado inicial, enviar todo lo disponible
-                if !sent_header && len >= 1024 {
-                    let header_size = std::cmp::min(len, 256 * 1024) as usize; // Primeros 256KB
-                    let mut header_buf = vec![0u8; header_size];
-                    if let Err(e) = file.seek(std::io::SeekFrom::Start(0)).await { 
-                        eprintln!("header seek err: {}", e); 
-                        break; 
+
+            if !sent_header {
+                // Esperar hasta que exista un moov completo al inicio del archivo
+                if len >= 16 {
+                    // escanear hasta 4MB o tamaño del archivo
+                    let to_scan = std::cmp::min(len, 4 * 1024 * 1024) as usize;
+                    let mut scan_buf = vec![0u8; to_scan];
+                    if let Err(e) = file.seek(std::io::SeekFrom::Start(0)).await {
+                        eprintln!("header seek err: {}", e);
+                        break;
                     }
-                    match file.read_exact(&mut header_buf).await {
+                    match file.read_exact(&mut scan_buf).await {
                         Ok(_) => {
-                            pos = header_size as u64;
-                            yield Ok::<Bytes, std::io::Error>(Bytes::from(header_buf));
-                            sent_header = true;
-                            println!("📤 Enviado header MP4: {} bytes", header_size);
+                            // Parsear cajas MP4 hasta encontrar 'moov' completa
+                            let mut off: usize = 0;
+                            let mut found_moov_end: Option<usize> = None;
+                            while off + 8 <= scan_buf.len() {
+                                let size32 = u32::from_be_bytes([
+                                    scan_buf[off], scan_buf[off+1], scan_buf[off+2], scan_buf[off+3]
+                                ]);
+                                let box_type = &scan_buf[off+4..off+8];
+                                let mut box_size: usize = size32 as usize;
+                                let mut header_len = 8usize;
+                                if size32 == 1 {
+                                    // extended size (64-bit)
+                                    if off + 16 > scan_buf.len() { break; }
+                                    let size64: u64 = u64::from_be_bytes(scan_buf[off+8..off+16].try_into().unwrap());
+                                    box_size = size64 as usize;
+                                    header_len = 16;
+                                } else if size32 == 0 {
+                                    // box hasta fin de archivo, no podemos determinar tamaño aún
+                                    break;
+                                }
+                                if box_size < header_len || off + box_size > scan_buf.len() {
+                                    // caja incompleta aún
+                                    break;
+                                }
+
+                                if box_type == b"moov" {
+                                    found_moov_end = Some(off + box_size);
+                                    break;
+                                }
+                                off += box_size;
+                            }
+
+                            if let Some(end) = found_moov_end {
+                                header_end = Some(end as u64);
+                                // Enviar exactamente hasta el final de moov
+                                let mut header_buf = vec![0u8; end];
+                                if let Err(e) = file.seek(std::io::SeekFrom::Start(0)).await { 
+                                    eprintln!("header re-seek err: {}", e); 
+                                    break; 
+                                }
+                                match file.read_exact(&mut header_buf).await {
+                                    Ok(_) => {
+                                        pos = end as u64;
+                                        sent_header = true;
+                                        println!("📤 Enviado header MP4 (ftyp+moov): {} bytes", end);
+                                        yield Ok::<Bytes, std::io::Error>(Bytes::from(header_buf));
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("header send read err: {}", e);
+                                        // esperar más datos
+                                    }
+                                }
+                            } else {
+                                // moov aún no completo, esperar un poco
+                                tokio::time::sleep(Duration::from_millis(300)).await;
+                                continue;
+                            }
                         }
                         Err(e) => {
+                            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                                tokio::time::sleep(Duration::from_millis(300)).await;
+                                continue;
+                            }
                             eprintln!("header read err: {}", e);
                             break;
                         }
                     }
+                } else {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
                     continue;
                 }
-                
-                // Para datos después del header, esperar fragmentos completos
-                if sent_header && len > pos {
-                    let available = len - pos;
-                    if available >= 32 * 1024 { // Esperar al menos 32KB antes de enviar
-                        let to_read = std::cmp::min(buf.len() as u64, available) as usize;
-                        if let Err(e) = file.seek(std::io::SeekFrom::Start(pos)).await { 
-                            eprintln!("seek err: {}", e); 
-                            break; 
-                        }
-                        match file.read_exact(&mut buf[..to_read]).await {
-                            Ok(_) => {
-                                pos += to_read as u64;
-                                yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buf[..to_read]));
-                                println!("📤 Enviado fragmento: {} bytes (pos: {})", to_read, pos);
-                            }
-                            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                                // Se alcanzó fin temporal, salir a esperar
-                                break;
-                            }
-                            Err(e) => {
-                                eprintln!("read err: {}", e);
-                                break;
-                            }
-                        }
-                    } else {
-                        // No hay suficientes datos, esperar
-                        tokio::time::sleep(Duration::from_millis(1000)).await;
+            } else if len > pos {
+                // Para datos después del header, esperar fragmentos razonables
+                let available = len - pos;
+                if available >= 32 * 1024 { // Esperar al menos 32KB antes de enviar
+                    let to_read = std::cmp::min(buf.len() as u64, available) as usize;
+                    if let Err(e) = file.seek(std::io::SeekFrom::Start(pos)).await { 
+                        eprintln!("seek err: {}", e); 
+                        break; 
                     }
-                } else if !sent_header {
-                    // Esperando que se acumule el header
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    match file.read_exact(&mut buf[..to_read]).await {
+                        Ok(_) => {
+                            pos += to_read as u64;
+                            println!("📤 Enviado fragmento: {} bytes (pos: {})", to_read, pos);
+                            yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buf[..to_read]));
+                            continue;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                            // Se alcanzó fin temporal, esperar
+                        }
+                        Err(e) => {
+                            eprintln!("read err: {}", e);
+                            break;
+                        }
+                    }
                 }
-            } else {
-                // No hay nuevos datos; dormir un poco
-                tokio::time::sleep(Duration::from_millis(1000)).await;
             }
+
+            // No hay nuevos datos o aún no listo: dormir un poco
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     };
 
