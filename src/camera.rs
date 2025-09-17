@@ -33,6 +33,9 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         let duration_until_midnight = (next_midnight - now).to_std().unwrap_or(std::time::Duration::from_secs(24 * 60 * 60));
         
         println!("📹 Iniciando grabación diaria: {} (hasta medianoche: {:?})", daily_filename, duration_until_midnight);
+        println!("📁 Carpeta de grabación: {}", day_dir.display());
+        println!("🎥 Archivo MP4: {}", daily_path.display());
+        println!("📡 URL RTSP: {}", camera_url);
         
         // Pipeline para grabación continua en archivo diario
         // Single RTSP source with tee to: recording(mp4), detector(appsink), mjpeg(appsink), and optional HLS
@@ -65,14 +68,14 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
     let pipeline_str = format!(
             concat!(
-                "rtspsrc location={camera_url} protocols=tcp do-rtsp-keep-alive=true latency=100 ",
-                "! rtph264depay ! h264parse name=h264 ",
+                "rtspsrc location={camera_url} protocols=tcp do-rtsp-keep-alive=true latency=100 retry=5 timeout=20000000000 ",
+                "! rtph264depay ! h264parse config-interval=1 name=h264 ",
                 "! tee name=t ",
-                // recording branch
-        // mp4mux en modo 'streamable' para poder reproducir mientras escribe
-        "t. ! queue ! mp4mux name=mux streamable=true faststart=true ! filesink location=\"{daily}\" sync=false append=false ",
-        // detector branch: decodificar a GRAY8 reducido para análisis rápido
-        "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=640,height=360 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
+                // recording branch: fragmentado para navegación en tiempo real
+                "t. ! queue ! mp4mux name=mux streamable=true faststart=true fragment-duration=2000 fragment-mode=first-moov-then-finalise ",
+                "! filesink location=\"{daily}\" sync=false append=false ",
+                // detector branch: decodificar a GRAY8 reducido para análisis rápido
+                "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=640,height=360 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
                 // mjpeg branch: decode->scale->jpeg->appsink
                 "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ",
                 "! jpegenc quality=85 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true",
@@ -84,10 +87,15 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         );
 
         println!("📷 Recording pipeline: {}", pipeline_str);
+        println!("🔄 Creando pipeline GStreamer...");
         let pipeline = match gst::parse::launch(&pipeline_str) {
-            Ok(element) => element.downcast::<Pipeline>().unwrap(),
+            Ok(element) => {
+                println!("✅ Pipeline creado exitosamente");
+                element.downcast::<Pipeline>().unwrap()
+            },
             Err(err) => {
                 eprintln!("❌ Error al crear el pipeline: {}", err);
+                eprintln!("🔍 Verificando conexión RTSP...");
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 continue;
             }
@@ -205,10 +213,38 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         let bus = pipeline.bus().unwrap();
 
         // Set the pipeline to "playing" state
-        let _ = pipeline.set_state(gst::State::Playing);
+        println!("▶️ Iniciando pipeline...");
+        match pipeline.set_state(gst::State::Playing) {
+            Ok(_) => println!("✅ Pipeline iniciado correctamente"),
+            Err(e) => {
+                eprintln!("❌ Error al iniciar pipeline: {}", e);
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        }
 
     // Store the pipeline in the shared state
     *state.pipeline.lock().await = Some(pipeline.clone());
+
+        println!("🎬 Grabación activa - esperando datos...");
+        
+        // Verificar que el archivo está creciendo después de unos segundos
+        tokio::spawn({
+            let daily_path = daily_path.clone();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                if let Ok(metadata) = std::fs::metadata(&daily_path) {
+                    let size = metadata.len();
+                    if size > 0 {
+                        println!("✅ Archivo MP4 está creciendo: {} bytes", size);
+                    } else {
+                        eprintln!("⚠️ Archivo MP4 sigue vacío después de 10s - posible problema RTSP");
+                    }
+                } else {
+                    eprintln!("❌ No se puede leer el archivo MP4");
+                }
+            }
+        });
 
         // Esperar hasta medianoche o hasta que haya un error
         let start_time = std::time::Instant::now();
@@ -224,9 +260,25 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                         break;
                     }
                     MessageView::Error(err) => {
-                        eprintln!("❌ Error del pipeline: {}, reiniciando...", err.error());
+                        eprintln!("❌ Error del pipeline: {}", err.error());
+                        eprintln!("🔍 Debug info: {:?}", err.debug());
                         should_restart = true;
                         break;
+                    }
+                    MessageView::Warning(warn) => {
+                        eprintln!("⚠️ Warning del pipeline: {}", warn.error());
+                        eprintln!("🔍 Debug info: {:?}", warn.debug());
+                    }
+                    MessageView::StateChanged(state_change) => {
+                        if let Some(src) = state_change.src().and_then(|s| s.downcast_ref::<gst::Element>()) {
+                            if src.name().starts_with("rtspsrc") {
+                                println!("🔄 RTSP state: {:?} -> {:?}", 
+                                    state_change.old(), state_change.current());
+                            }
+                        }
+                    }
+                    MessageView::StreamStart(_) => {
+                        println!("🎬 Stream iniciado correctamente");
                     }
                     _ => (),
                 },
@@ -240,6 +292,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         }
 
         // Detener el pipeline actual
+        println!("🛑 Deteniendo pipeline...");
         let _ = pipeline.set_state(gst::State::Null);
         
         if should_restart {
