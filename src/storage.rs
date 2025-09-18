@@ -34,6 +34,7 @@ pub async fn get_storage_info(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    println!("🎯 Handler: get_storage_info");
 
     match fs2::statvfs(&state.storage_path) {
         Ok(stats) => {
@@ -120,6 +121,7 @@ pub async fn list_recordings(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListRecordingsParams>,
 ) -> impl IntoResponse {
+    println!("🎯 Handler: list_recordings -> date={:?}, page={:?}, limit={:?}", params.date, params.page, params.limit);
 
     // Obtenemos todas las grabaciones de forma recursiva
     let mut all_recordings = get_recordings_recursively(&state.storage_path);
@@ -148,6 +150,7 @@ pub async fn delete_recording(
     State(state): State<Arc<AppState>>,
     Path(file_path): Path<String>,
 ) -> impl IntoResponse {
+    println!("🎯 Handler: delete_recording -> {}", file_path);
     
     let candidate = PathBuf::from(&state.storage_path).join(&file_path);
     // Canonicalize to avoid .. traversal and ensure it's within storage root
@@ -190,6 +193,7 @@ pub async fn stream_recording(
     headers: HeaderMap,
     Path(file_path): Path<String>,
 ) -> Result<Response, StatusCode> {
+    println!("🎯 Handler: stream_recording -> {}", file_path);
     // Autenticación ya validada por middleware global
     
     let candidate = PathBuf::from(&state.storage_path).join(&file_path);
@@ -278,6 +282,7 @@ pub async fn get_log_file(
     State(state): State<Arc<AppState>>,
     Path(date): Path<String>,
 ) -> impl IntoResponse {
+    println!("🎯 Handler: get_log_file -> {}", date);
 
     // Nuevo esquema: logs dentro de carpeta del día DD-MM-YY
     let file_name = format!("{}-log.txt", date);
@@ -309,6 +314,7 @@ pub async fn stream_recording_tail(
     State(state): State<Arc<AppState>>,
     Path(file_path): Path<String>,
 ) -> Result<Response, StatusCode> {
+    println!("🎯 Handler: stream_recording_tail -> {}", file_path);
     // Autenticación ya validada por middleware global
 
     let candidate = PathBuf::from(&state.storage_path).join(&file_path);

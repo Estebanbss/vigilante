@@ -48,16 +48,25 @@ pub async fn require_auth_middleware(
 -> Response {
     // Permite preflight CORS sin auth (deja que CorsLayer maneje y añada headers)
     if req.method() == Method::OPTIONS {
+        println!("🛫 CORS preflight bypass: {} {}", req.method(), req.uri().path());
         return next.run(req).await;
     }
 
     let headers = req.headers();
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
     match check_auth(headers, &state.proxy_token).await {
-        Ok(()) => next.run(req).await,
-        Err(status) => Response::builder()
-            .status(status)
-            .body(Body::from("Unauthorized"))
-            .unwrap(),
+        Ok(()) => {
+            println!("✅ Auth OK (middleware): {} {}", method, path);
+            next.run(req).await
+        }
+        Err(status) => {
+            println!("❌ Auth FAIL (middleware): {} {} -> {}", method, path, status.as_u16());
+            Response::builder()
+                .status(status)
+                .body(Body::from("Unauthorized"))
+                .unwrap()
+        }
     }
 }
 
@@ -77,9 +86,17 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let app_state = Arc::<AppState>::from_ref(state);
         let headers = &parts.headers;
+        let method = parts.method.clone();
+        let path = parts.uri.path().to_string();
         match check_auth(headers, &app_state.proxy_token).await {
-            Ok(()) => Ok(RequireAuth),
-            Err(_) => Err((StatusCode::UNAUTHORIZED, "Unauthorized")),
+            Ok(()) => {
+                println!("🔐 Auth OK (extractor): {} {}", method, path);
+                Ok(RequireAuth)
+            }
+            Err(_) => {
+                println!("🚫 Auth FAIL (extractor): {} {}", method, path);
+                Err((StatusCode::UNAUTHORIZED, "Unauthorized"))
+            }
         }
     }
 }
