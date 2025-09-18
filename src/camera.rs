@@ -73,8 +73,11 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 "! tee name=t ",
                 // recording branch: MP4 optimizado para streaming en vivo
                 "t. ! queue ! decodebin ! videoconvert ! video/x-raw,format=I420 ",
-                "! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=30 ",
-                "! video/x-h264,profile=baseline,stream-format=avc ",
+                // Encoder H.264 sin B-frames, baja latencia y GOP corto
+                "! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=30 intra-refresh=false b-adapt=0 bframes=0 threads=2 ",
+                // Asegurar SPS/PPS y alineación por unidad de acceso en formato 'avc' (no Annex-B)
+                "! h264parse config-interval=-1 disable-passthrough=true ! video/x-h264,stream-format=avc,alignment=au,profile=baseline ",
+                // MP4 fragmentado compatible con streaming progresivo
                 "! mp4mux name=mux streamable=true faststart=true fragment-duration=1000 fragment-mode=dash-or-mss ",
                 "! filesink location=\"{daily}\" sync=false append=false ",
                 // detector branch: decodificar a GRAY8 reducido para análisis rápido

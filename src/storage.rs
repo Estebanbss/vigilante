@@ -15,7 +15,7 @@ use tokio::{fs::File, time::sleep};
 use tokio_util::io::ReaderStream;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use bytes::Bytes;
-use std::convert::TryInto;
+// use std::convert::TryInto; // not used
 
 // Estructura para la respuesta estándar de la API
 #[derive(Serialize)]
