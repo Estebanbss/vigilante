@@ -36,12 +36,17 @@ pub async fn check_auth(headers: &HeaderMap, token: &str) -> Result<(), StatusCo
 
     // Si el encabezado no existe, rechaza la solicitud.
     let auth_header = match auth_header_value {
-        Some(value) => value.to_str().unwrap_or(""),
+        Some(value) => value.to_str().unwrap_or("").trim(),
         None => {
             let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
             let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
             let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
-            eprintln!("❌ Auth missing: UA='{}' CF-Connecting-IP='{}' X-Forwarded-For='{}'", ua, cfip, xff);
+            let expected_bearer_masked = mask_auth_header(&format!("Bearer {}", token));
+            let expected_raw_masked = mask_token(token);
+            eprintln!(
+                "❌ Falta encabezado Authorization | header_esperado_bearer='{}' header_esperado_raw='{}' | UA='{}' CF-IP='{}' XFF='{}'",
+                expected_bearer_masked, expected_raw_masked, ua, cfip, xff
+            );
             return Err(StatusCode::UNAUTHORIZED);
         }
     };
@@ -56,15 +61,27 @@ pub async fn check_auth(headers: &HeaderMap, token: &str) -> Result<(), StatusCo
         let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
         let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
         let provided = mask_auth_header(auth_header);
-        let expected = mask_auth_header(&expected_bearer);
-        eprintln!("❌ Auth invalid: provided='{}' expected~='{}' UA='{}' CF-Connecting-IP='{}' X-Forwarded-For='{}'", provided, expected, ua, cfip, xff);
+        let expected_b = mask_auth_header(&expected_bearer);
+        let expected_r = mask_token(token);
+        let scheme = if auth_header.starts_with("Bearer ") { "Bearer" } else { "Raw/Other" };
+        eprintln!(
+            "❌ Authorization inválido: esquema={} | header_proporcionado='{}' header_esperado_bearer='{}' header_esperado_raw='{}' | UA='{}' CF-IP='{}' XFF='{}'",
+            scheme, provided, expected_b, expected_r, ua, cfip, xff
+        );
         Err(StatusCode::UNAUTHORIZED)
     } else {
-        // Log mínimo en éxito para trazabilidad
+        // Log detallado en éxito para validar que coincide con .env
         let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
         let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
         let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
-        println!("🔑 Auth header accepted: UA='{}' CF-Connecting-IP='{}' X-Forwarded-For='{}'", ua, cfip, xff);
+        let provided = mask_auth_header(auth_header);
+        let expected_b = mask_auth_header(&expected_bearer);
+        let expected_r = mask_token(token);
+        let matched = if auth_header == expected_bearer { "Bearer" } else { "Raw" };
+        println!(
+            "🔑 Authorization OK: coincide={} | header_proporcionado='{}' header_esperado_bearer='{}' header_esperado_raw='{}' | UA='{}' CF-IP='{}' XFF='{}'",
+            matched, provided, expected_b, expected_r, ua, cfip, xff
+        );
         Ok(())
     }
 }

@@ -63,7 +63,7 @@ pub async fn stream_hls_index(
 
 pub async fn stream_webrtc_handler(
     RequireAuth: RequireAuth,
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     println!("🎯 Handler: stream_webrtc_handler");
     // Placeholder para la lógica de GStreamer
