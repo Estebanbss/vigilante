@@ -224,26 +224,77 @@ pub async fn stream_recording(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Abrir el archivo de forma asíncrona
-    let file = match File::open(&full_path).await {
-        Ok(file) => file,
-        Err(_) => return Err(StatusCode::NOT_FOUND),
+    // Tamaño del archivo para rangos
+    let meta = match tokio::fs::metadata(&full_path).await { Ok(m)=> m, Err(_)=> return Err(StatusCode::NOT_FOUND) };
+    let file_size = meta.len();
+
+    // Soporte para Range: bytes=START-END
+    let range_hdr = headers.get(axum::http::header::RANGE).and_then(|v| v.to_str().ok());
+    let (status, start, end) = if let Some(r) = range_hdr {
+        // Parseo simple del primer rango
+        if !r.starts_with("bytes=") { return Err(StatusCode::RANGE_NOT_SATISFIABLE); }
+        let spec = &r[6..];
+        let mut parts = spec.splitn(2, '-');
+        let a = parts.next().unwrap_or("");
+        let b = parts.next().unwrap_or("");
+        let (start, end) = if a.is_empty() {
+            // Sufijo: bytes=-N (últimos N bytes)
+            let n: u64 = b.parse().unwrap_or(0);
+            if n == 0 { (0, file_size.saturating_sub(1)) } else {
+                let s = file_size.saturating_sub(n);
+                (s, file_size.saturating_sub(1))
+            }
+        } else {
+            let s: u64 = a.parse().unwrap_or(0);
+            let e: u64 = if b.is_empty() { file_size.saturating_sub(1) } else { b.parse().unwrap_or(0) };
+            (s, e.min(file_size.saturating_sub(1)))
+        };
+        if start > end || start >= file_size { return Err(StatusCode::RANGE_NOT_SATISFIABLE); }
+        (StatusCode::PARTIAL_CONTENT, start, end)
+    } else {
+        (StatusCode::OK, 0u64, file_size.saturating_sub(1))
     };
 
-    // Crear un stream para el cuerpo de la respuesta
-    let stream = ReaderStream::new(file);
+    // Abrir y posicionar
+    let mut file = match File::open(&full_path).await { Ok(f)=> f, Err(_)=> return Err(StatusCode::NOT_FOUND) };
+    if start > 0 { if let Err(_) = file.seek(std::io::SeekFrom::Start(start)).await { return Err(StatusCode::INTERNAL_SERVER_ERROR); } }
 
-    // Preparar los headers para la respuesta
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(axum::http::header::CONTENT_TYPE, "video/mp4".parse().unwrap());
-    headers.insert(axum::http::header::CONTENT_DISPOSITION, "inline".parse().unwrap());
+    // Construir stream limitado al rango solicitado
+    let total_len = end.saturating_sub(start).saturating_add(1);
+    let stream = async_stream::stream! {
+        let mut remaining = total_len;
+        let mut buf = vec![0u8; 64 * 1024];
+        while remaining > 0 {
+            let to_read = std::cmp::min(buf.len() as u64, remaining) as usize;
+            match file.read_exact(&mut buf[..to_read]).await {
+                Ok(_) => {
+                    remaining -= to_read as u64;
+                    yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buf[..to_read]));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // Archivo terminó inesperadamente; salir
+                    break;
+                }
+                Err(e) => {
+                    eprintln!("stream read err: {}", e);
+                    break;
+                }
+            }
+        }
+    };
 
-    // Devolver la respuesta con el stream
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::from_stream(stream))
-        .unwrap()
-    )
+    let mut resp = Response::new(Body::from_stream(stream));
+    let h = resp.headers_mut();
+    h.insert(axum::http::header::CONTENT_TYPE, "video/mp4".parse().unwrap());
+    h.insert(axum::http::header::CONTENT_DISPOSITION, "inline".parse().unwrap());
+    h.insert(axum::http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    h.insert(axum::http::header::CONTENT_LENGTH, total_len.to_string().parse().unwrap());
+    if status == StatusCode::PARTIAL_CONTENT {
+        let cr = format!("bytes {}-{}/{}", start, end, file_size);
+        h.insert(axum::http::header::CONTENT_RANGE, cr.parse().unwrap());
+    }
+    *resp.status_mut() = status;
+    Ok(resp)
 }
 
 pub async fn get_log_file(

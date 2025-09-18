@@ -56,8 +56,12 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             (
                 format!(
                     concat!(
-                        " t. ! queue ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au ",
-                        "! hlssink2 target-duration=2 max-files=5 playlist-length=5 location=\"{segments}\" playlist-location=\"{playlist}\""
+                        // HLS con video desde tee
+                        " t. ! queue ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au ! hlsmux.video ",
+                        // HLS con audio desde tee_audio  
+                        " tee_audio. ! queue ! aacparse ! hlsmux.audio ",
+                        // HLS sink con video y audio
+                        " mpegtsmux name=hlsmux ! hlssink2 target-duration=2 max-files=5 playlist-length=5 location=\"{segments}\" playlist-location=\"{playlist}\""
                     ),
                     segments = segments_s,
                     playlist = playlist_s,
@@ -68,21 +72,33 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
     let pipeline_str = format!(
             concat!(
-                "rtspsrc location={camera_url} protocols=tcp do-rtsp-keep-alive=true latency=100 retry=5 timeout=20000000000 ",
-                "! rtph264depay ! h264parse config-interval=1 ",
+                "rtspsrc location={camera_url} protocols=tcp do-rtsp-keep-alive=true latency=100 retry=5 timeout=20000000000 name=src ",
+                // Video path: src.src_0 (video pad)
+                "src.src_0 ! rtph264depay ! h264parse config-interval=1 ",
                 "! tee name=t ",
-                // recording branch: MP4 optimizado para streaming en vivo
+                // Audio path: decodificar a PCM, tee a AAC (MP4/HLS) y Opus (WebM live)
+                "src.src_1 ! rtppcmadepay ! alawdec ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ",
+                "! tee name=ta ",
+                // Rama AAC para MP4/HLS
+                "ta. ! queue ! voaacenc bitrate=128000 ! aacparse ! tee name=tee_audio ",
+                // Rama Opus/WebM para audio live
+                "ta. ! queue ! opusenc bitrate=64000 ! webmmux streamable=true name=webma ",
+                "! appsink name=audio_webm_sink sync=false max-buffers=50 drop=true ",
+                // recording branch: MP4 con video Y audio
                 "t. ! queue ! decodebin ! videoconvert ! video/x-raw,format=I420 ",
                 // Encoder H.264 sin B-frames, baja latencia y GOP corto
                 "! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=30 intra-refresh=false b-adapt=0 bframes=0 threads=2 ",
                 // Asegurar SPS/PPS y alineación por unidad de acceso en formato 'avc' (no Annex-B)
                 "! h264parse config-interval=-1 disable-passthrough=true ! video/x-h264,stream-format=avc,alignment=au,profile=baseline ",
+                "! mux.video_0 ",
+                // Audio para MP4 recording
+                "tee_audio. ! queue ! mux.audio_0 ",
                 // MP4 fragmentado compatible con streaming progresivo
-                "! mp4mux name=mux streamable=true faststart=true fragment-duration=1000 fragment-mode=dash-or-mss ",
+                "mp4mux name=mux streamable=true faststart=true fragment-duration=1000 fragment-mode=dash-or-mss ",
                 "! filesink location=\"{daily}\" sync=false append=false ",
                 // detector branch: decodificar a GRAY8 reducido para análisis rápido
                 "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=640,height=360 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
-                // mjpeg branch: decode->scale->jpeg->appsink
+                // mjpeg branch: decode->scale->jpeg->appsink (solo video)
                 "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ",
                 "! jpegenc quality=85 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true",
                 "{hls_part}"
@@ -209,6 +225,24 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                         let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                         let data = Bytes::copy_from_slice(map.as_ref());
                         let _ = tx.send(data); // best-effort broadcast
+                        Ok(gst::FlowSuccess::Ok)
+                    })
+                    .build(),
+            );
+        }
+
+        // AUDIO appsink (webm chunks): publish to broadcast channel
+        if let Some(audio_sink) = pipeline.by_name("audio_webm_sink") {
+            let audio_sink = audio_sink.downcast::<gst_app::AppSink>().unwrap();
+            let txa = state.audio_webm_tx.clone();
+            audio_sink.set_callbacks(
+                gst_app::AppSinkCallbacks::builder()
+                    .new_sample(move |s| {
+                        let sample = s.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                        let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                        let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                        let data = Bytes::copy_from_slice(map.as_ref());
+                        let _ = txa.send(data);
                         Ok(gst::FlowSuccess::Ok)
                     })
                     .build(),

@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="es">
+     <head>
+          <meta charset="UTF-8" />
+          <meta
+               name="viewport"
+               content="width=device-width, initial-scale=1.0"
+          />
+          <title>Vigilante - Panel de Control</title>
+          <!-- hls.js para reproducir HLS con audio en navegadores que no soportan nativamente -->
+          <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+          <style>
+               body {
+                    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+                    margin: 0;
+                    padding: 20px;
+                    background: linear-gradient(
+                         135deg,
+                         #667eea 0%,
+                         #764ba2 100%
+                    );
+                    min-height: 100vh;
+                    color: #333;
+               }
+
+               .container {
+                    max-width: 1200px;
+                    margin: 0 auto;
+                    background: rgba(255, 255, 255, 0.95);
+                    border-radius: 15px;
+                    padding: 30px;
+                    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+               }
+
+               h1 {
+                    text-align: center;
+                    color: #2c3e50;
+                    margin-bottom: 30px;
+                    font-size: 2.5em;
+                    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+               }
+
+               .section {
+                    margin-bottom: 30px;
+                    padding: 20px;
+                    border-radius: 10px;
+                    background: rgba(255, 255, 255, 0.9);
+                    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+               }
+
+               .section h2 {
+                    color: #34495e;
+                    border-bottom: 3px solid #3498db;
+                    padding-bottom: 10px;
+                    margin-bottom: 20px;
+               }
+
+               .status {
+                    display: inline-block;
+                    padding: 8px 16px;
+                    border-radius: 20px;
+                    font-weight: bold;
+                    margin: 10px 0;
+               }
+
+               .status.online {
+                    background: #27ae60;
+                    color: white;
+               }
+               .status.offline {
+                    background: #e74c3c;
+                    color: white;
+               }
+
+               .btn {
+                    background: linear-gradient(45deg, #3498db, #2980b9);
+                    color: white;
+                    border: none;
+                    padding: 12px 24px;
+                    border-radius: 25px;
+                    cursor: pointer;
+                    font-size: 16px;
+                    margin: 5px;
+                    transition: all 0.3s ease;
+                    box-shadow: 0 4px 15px rgba(52, 152, 219, 0.3);
+               }
+
+               .btn:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 6px 20px rgba(52, 152, 219, 0.4);
+               }
+               .btn.danger {
+                    background: linear-gradient(45deg, #e74c3c, #c0392b);
+               }
+               .btn.danger:hover {
+                    box-shadow: 0 6px 20px rgba(231, 76, 60, 0.4);
+               }
+
+               .video-container {
+                    margin: 20px 0;
+                    text-align: center;
+               }
+               video,
+               img {
+                    max-width: 100%;
+                    border-radius: 10px;
+                    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+               }
+
+               .recording-list {
+                    display: grid;
+                    gap: 10px;
+               }
+               .recording-item {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    padding: 15px;
+                    background: rgba(52, 152, 219, 0.1);
+                    border-radius: 8px;
+                    border-left: 4px solid #3498db;
+               }
+
+               .recording-info {
+                    flex-grow: 1;
+               }
+               .recording-info h3 {
+                    margin: 0 0 5px 0;
+                    color: #2c3e50;
+               }
+               .recording-info p {
+                    margin: 0;
+                    color: #7f8c8d;
+                    font-size: 14px;
+               }
+
+               .storage-info {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    gap: 20px;
+                    margin-top: 20px;
+               }
+               .storage-card {
+                    background: rgba(46, 204, 113, 0.1);
+                    padding: 20px;
+                    border-radius: 10px;
+                    text-align: center;
+                    border-left: 4px solid #27ae60;
+               }
+               .storage-card h3 {
+                    margin: 0 0 10px 0;
+                    color: #27ae60;
+               }
+               .storage-card p {
+                    margin: 0;
+                    font-size: 24px;
+                    font-weight: bold;
+                    color: #2c3e50;
+               }
+
+               .progress-bar {
+                    width: 100%;
+                    height: 20px;
+                    background: #ecf0f1;
+                    border-radius: 10px;
+                    overflow: hidden;
+                    margin: 10px 0;
+               }
+               .progress-fill {
+                    height: 100%;
+                    background: linear-gradient(45deg, #27ae60, #2ecc71);
+                    transition: width 0.3s ease;
+               }
+
+               .token-input {
+                    margin: 20px 0;
+                    padding: 10px;
+                    border: 2px solid #3498db;
+                    border-radius: 5px;
+                    font-size: 16px;
+                    width: 100%;
+                    max-width: 400px;
+               }
+
+               .error {
+                    background: #ffeaa7;
+                    color: #d63031;
+                    padding: 10px;
+                    border-radius: 5px;
+                    margin: 10px 0;
+                    border-left: 4px solid #d63031;
+               }
+               .success {
+                    background: #55efc4;
+                    color: #00b894;
+                    padding: 10px;
+                    border-radius: 5px;
+                    margin: 10px 0;
+                    border-left: 4px solid #00b894;
+               }
+
+               @media (max-width: 768px) {
+                    .container {
+                         padding: 20px;
+                    }
+                    .recording-item {
+                         flex-direction: column;
+                         align-items: flex-start;
+                    }
+                    .storage-info {
+                         grid-template-columns: 1fr;
+                    }
+               }
+          </style>
+     </head>
+     <body>
+          <div class="container">
+               <h1>🎥 Vigilante - Panel de Control</h1>
+
+               <div class="section">
+                    <h2>🔑 Configuración</h2>
+                    <label for="token">Token de autenticación:</label><br />
+                    <input
+                         type="text"
+                         id="token"
+                         class="token-input"
+                         placeholder="Ingresa tu token de API"
+                         value="PrincessGoesToTheOnTheRun1"
+                    />
+               </div>
+
+               <div class="section">
+                    <h2>📊 Estado del Servidor</h2>
+                    <div id="server-status">
+                         <span class="status offline">Verificando...</span>
+                    </div>
+                    <button class="btn" onclick="checkServerStatus()">
+                         Verificar Estado
+                    </button>
+               </div>
+
+               <div class="section">
+                    <h2>💾 Información de Almacenamiento</h2>
+                    <button class="btn" onclick="getStorageInfo()">
+                         Actualizar Info
+                    </button>
+                    <div id="storage-info" class="storage-info"></div>
+               </div>
+
+               <div class="section">
+                    <h2>🎬 Grabaciones Disponibles</h2>
+                    <button class="btn" onclick="listRecordings()">
+                         Listar Grabaciones
+                    </button>
+                    <div id="recordings-list" class="recording-list"></div>
+               </div>
+
+               <div class="section">
+                    <h2>📺 Stream en Vivo (MJPEG + Audio)</h2>
+                    <button class="btn" onclick="startLiveStream()">
+                         ▶️ Iniciar
+                    </button>
+                    <button class="btn danger" onclick="stopLiveStream()">
+                         ⏹️ Detener
+                    </button>
+                    <div class="video-container">
+                         <img
+                              id="live-stream"
+                              style="display: none"
+                              alt="Stream en vivo"
+                         />
+                         <audio
+                              id="live-audio"
+                              controls
+                              style="display: none"
+                         ></audio>
+                         <div id="live-info"></div>
+                    </div>
+               </div>
+
+               <div class="section">
+                    <h2>📺 Reproductor de Video</h2>
+                    <div class="video-container">
+                         <video
+                              id="video-player"
+                              controls
+                              style="display: none"
+                         >
+                              Tu navegador no soporta el elemento video.
+                         </video>
+                         <div id="video-info"></div>
+                    </div>
+               </div>
+
+               <div class="section">
+                    <h2>📝 Logs del Sistema</h2>
+                    <button class="btn" onclick="getLogs()">
+                         Ver Logs de Hoy
+                    </button>
+                    <pre
+                         id="logs-container"
+                         style="
+                              background: #f8f9fa;
+                              padding: 15px;
+                              border-radius: 5px;
+                              max-height: 300px;
+                              overflow-y: auto;
+                              display: none;
+                         "
+                    ></pre>
+               </div>
+          </div>
+
+          <script>
+               const API_BASE = "https://stream.estebanbss.dev";
+
+               function getToken() {
+                    return document.getElementById("token").value;
+               }
+
+               function showMessage(message, type = "success") {
+                    const container = document.createElement("div");
+                    container.className = type;
+                    container.textContent = message;
+                    container.style.position = "fixed";
+                    container.style.top = "20px";
+                    container.style.right = "20px";
+                    container.style.zIndex = "1000";
+                    container.style.maxWidth = "300px";
+                    document.body.appendChild(container);
+                    setTimeout(
+                         () => document.body.removeChild(container),
+                         5000
+                    );
+               }
+
+               async function makeRequest(endpoint, options = {}) {
+                    const token = getToken();
+                    const url = `${API_BASE}${endpoint}`;
+
+                    const requestOptions = {
+                         ...options,
+                         headers: {
+                              Authorization: token,
+                              ...options.headers,
+                         },
+                    };
+
+                    try {
+                         const response = await fetch(url, requestOptions);
+                         if (!response.ok) {
+                              throw new Error(
+                                   `HTTP ${response.status}: ${response.statusText}`
+                              );
+                         }
+                         return await response.json();
+                    } catch (error) {
+                         console.error("Error en la petición:", error);
+                         showMessage(`Error: ${error.message}`, "error");
+                         throw error;
+                    }
+               }
+
+               async function checkServerStatus() {
+                    try {
+                         const data = await makeRequest("/api/storage");
+                         document.getElementById("server-status").innerHTML =
+                              '<span class="status online">🟢 Servidor Online</span>';
+                         showMessage("Servidor funcionando correctamente");
+                    } catch (error) {
+                         document.getElementById("server-status").innerHTML =
+                              '<span class="status offline">🔴 Servidor Offline</span>';
+                    }
+               }
+
+               async function getStorageInfo() {
+                    try {
+                         const data = await makeRequest("/api/storage");
+                         const container =
+                              document.getElementById("storage-info");
+                         const totalGB = (
+                              data.total_space_bytes /
+                              (1024 * 1024 * 1024)
+                         ).toFixed(2);
+                         const usedGB = (
+                              data.used_space_bytes /
+                              (1024 * 1024 * 1024)
+                         ).toFixed(2);
+                         const freeGB = (totalGB - usedGB).toFixed(2);
+                         const usedPercent = (
+                              (data.used_space_bytes / data.total_space_bytes) *
+                              100
+                         ).toFixed(1);
+
+                         container.innerHTML = `
+                    <div class="storage-card">
+                        <h3>💾 Total</h3>
+                        <p>${totalGB} GB</p>
+                    </div>
+                    <div class="storage-card">
+                        <h3>📁 Usado</h3>
+                        <p>${usedGB} GB</p>
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: ${usedPercent}%"></div>
+                        </div>
+                        <small>${usedPercent}% utilizado</small>
+                    </div>
+                    <div class="storage-card">
+                        <h3>🆓 Libre</h3>
+                        <p>${freeGB} GB</p>
+                    </div>
+                `;
+                         showMessage(
+                              "Información de almacenamiento actualizada"
+                         );
+                    } catch (error) {
+                         console.error(
+                              "Error obteniendo info de almacenamiento:",
+                              error
+                         );
+                    }
+               }
+
+               async function listRecordings() {
+                    try {
+                         const data = await makeRequest("/api/storage/list");
+                         const container =
+                              document.getElementById("recordings-list");
+                         if (data.length === 0) {
+                              container.innerHTML =
+                                   "<p>No hay grabaciones disponibles</p>";
+                              return;
+                         }
+                         container.innerHTML = data
+                              .map(
+                                   (recording) => `
+                    <div class="recording-item">
+                        <div class="recording-info">
+                            <h3>${recording.name}</h3>
+                            <p>Tamaño: ${(
+                                 recording.size /
+                                 (1024 * 1024)
+                            ).toFixed(2)} MB</p>
+                            <p>Modificado: ${new Date(
+                                 recording.last_modified
+                            ).toLocaleString()}</p>
+                        </div>
+                        <div>
+                            <button class="btn" onclick="playRecording('${
+                                 recording.path
+                            }')">▶️ Reproducir</button>
+                            <button class="btn danger" onclick="deleteRecording('${
+                                 recording.path
+                            }')">🗑️ Eliminar</button>
+                        </div>
+                    </div>
+                `
+                              )
+                              .join("");
+                         showMessage(`Encontradas ${data.length} grabaciones`);
+                    } catch (error) {
+                         console.error("Error listando grabaciones:", error);
+                    }
+               }
+
+               async function playRecording(fullPath) {
+                    // Extraer el path relativo removiendo el prefijo del storage
+                    // fullPath: /media/teban/KINGSTON1/18-09-25/2025-09-18.mp4
+                    // relativePath: 18-09-25/2025-09-18.mp4
+                    const storagePrefix = "/media/teban/KINGSTON1/";
+                    const relativePath = fullPath.startsWith(storagePrefix)
+                         ? fullPath.substring(storagePrefix.length)
+                         : fullPath;
+
+                    const token = getToken();
+                    const videoUrl = `${API_BASE}/api/recordings/stream/${relativePath}?token=${token}`;
+                    const video = document.getElementById("video-player");
+                    const info = document.getElementById("video-info");
+                    video.src = videoUrl;
+                    video.style.display = "block";
+                    info.innerHTML = `<p>Reproduciendo: ${relativePath}</p>`;
+                    video.load();
+                    video.play();
+                    showMessage("Iniciando reproducción...");
+               }
+
+               async function deleteRecording(path) {
+                    if (
+                         !confirm(
+                              `¿Estás seguro de que quieres eliminar "${path}"?`
+                         )
+                    )
+                         return;
+                    try {
+                         await makeRequest(`/api/storage/delete${path}`, {
+                              method: "GET",
+                         });
+                         showMessage("Grabación eliminada correctamente");
+                         listRecordings();
+                    } catch (error) {
+                         console.error("Error eliminando grabación:", error);
+                    }
+               }
+
+               async function startLiveStream() {
+                    const img = document.getElementById("live-stream");
+                    const audio = document.getElementById("live-audio");
+                    const info = document.getElementById("live-info");
+                    const token = getToken();
+
+                    // Video MJPEG
+                    img.src = `${API_BASE}/api/live/mjpeg`;
+                    img.style.display = "block";
+                    info.innerHTML = "<p>🔴 Conectando video...</p>";
+                    img.onload = () => {
+                         info.innerHTML = "<p>🟢 Video activo</p>";
+                    };
+                    img.onerror = () => {
+                         info.innerHTML = "<p>❌ Error video</p>";
+                    };
+
+                    // Audio via MediaSource (audio/webm;codecs=opus)
+                    info.innerHTML += "<p>🔴 Conectando audio...</p>";
+                    const mediaSource = new MediaSource();
+                    audio.src = URL.createObjectURL(mediaSource);
+                    audio.style.display = "block";
+                    mediaSource.addEventListener("sourceopen", async () => {
+                         const mime = 'audio/webm; codecs="opus"';
+                         if (!MediaSource.isTypeSupported(mime)) {
+                              info.innerHTML +=
+                                   "<p>❌ audio/webm no soportado</p>";
+                              return;
+                         }
+                         const sb = mediaSource.addSourceBuffer(mime);
+                         sb.mode = "sequence";
+                         const queue = [];
+                         let updating = false;
+                         function feed() {
+                              if (updating || queue.length === 0) return;
+                              updating = true;
+                              const chunk = queue.shift();
+                              sb.appendBuffer(chunk);
+                         }
+                         sb.addEventListener("updateend", () => {
+                              updating = false;
+                              feed();
+                         });
+                         try {
+                              const resp = await fetch(
+                                   `${API_BASE}/api/live/audio`,
+                                   { headers: { Authorization: token } }
+                              );
+                              if (!resp.ok || !resp.body)
+                                   throw new Error("Audio HTTP " + resp.status);
+                              const reader = resp.body.getReader();
+                              (async function pump() {
+                                   const { done, value } = await reader.read();
+                                   if (done) {
+                                        try {
+                                             mediaSource.endOfStream();
+                                        } catch (_) {}
+                                        return;
+                                   }
+                                   if (value) {
+                                        queue.push(value.buffer);
+                                        feed();
+                                   }
+                                   pump();
+                              })();
+                              audio.play().catch(() => {});
+                              info.innerHTML += "<p>🟢 Audio activo</p>";
+                         } catch (e) {
+                              console.error(e);
+                              info.innerHTML += "<p>❌ Error audio</p>";
+                         }
+                    });
+               }
+
+               function stopLiveStream() {
+                    const img = document.getElementById("live-stream");
+                    const audio = document.getElementById("live-audio");
+                    const info = document.getElementById("live-info");
+                    img.src = "";
+                    img.style.display = "none";
+                    try {
+                         audio.pause();
+                    } catch (_) {}
+                    audio.removeAttribute("src");
+                    audio.load();
+                    audio.style.display = "none";
+                    info.innerHTML = "<p>⏹️ Stream detenido</p>";
+                    showMessage("Stream detenido");
+               }
+
+               async function getLogs() {
+                    try {
+                         const today = new Date().toISOString().split("T")[0];
+                         const response = await fetch(
+                              `${API_BASE}/api/recordings/log/${today}`,
+                              {
+                                   headers: {
+                                        Authorization: getToken(),
+                                   },
+                              }
+                         );
+                         if (!response.ok)
+                              throw new Error(
+                                   `HTTP ${response.status}: ${response.statusText}`
+                              );
+                         const logs = await response.text();
+                         const container =
+                              document.getElementById("logs-container");
+                         container.textContent =
+                              logs || "No hay logs disponibles para hoy";
+                         container.style.display = "block";
+                         showMessage("Logs cargados correctamente");
+                    } catch (error) {
+                         console.error("Error obteniendo logs:", error);
+                         showMessage(
+                              `Error cargando logs: ${error.message}`,
+                              "error"
+                         );
+                    }
+               }
+
+               // Inicializar
+               document.addEventListener("DOMContentLoaded", () => {
+                    checkServerStatus();
+                    getStorageInfo();
+               });
+
+               // Actualizar estado cada 30 segundos
+               setInterval(checkServerStatus, 30000);
+          </script>
+     </body>
+</html>

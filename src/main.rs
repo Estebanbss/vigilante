@@ -14,7 +14,7 @@ mod camera;
 mod ptz;
 
 use storage::{get_storage_info, list_recordings, delete_recording, stream_recording, start_cleanup_task, get_log_file, stream_recording_tail};
-use stream::{stream_hls_handler, stream_hls_index, stream_webrtc_handler, stream_mjpeg_handler};
+use stream::{stream_hls_handler, stream_hls_index, stream_webrtc_handler, stream_mjpeg_handler, stream_audio_handler};
 use camera::{start_camera_pipeline};
 use ptz::{pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, ptz_stop};
 
@@ -31,6 +31,7 @@ pub struct AppState {
     pub storage_path: PathBuf,
     pub pipeline: Arc<Mutex<Option<gst::Pipeline>>>,
     pub mjpeg_tx: broadcast::Sender<Bytes>,
+    pub audio_webm_tx: broadcast::Sender<Bytes>,
     pub enable_hls: bool,
 }
 
@@ -55,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage_path_buf = PathBuf::from(&storage_path);
 
     let (mjpeg_tx, _mjpeg_rx) = broadcast::channel::<Bytes>(32);
+    let (audio_webm_tx, _audio_rx) = broadcast::channel::<Bytes>(32);
 
     let state = Arc::new(AppState {
         camera_rtsp_url: camera_rtsp_url.clone(),
@@ -63,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage_path: storage_path_buf.clone(),
         pipeline: Arc::new(Mutex::new(None)),
         mjpeg_tx,
+    audio_webm_tx,
         enable_hls,
     });
 
@@ -78,7 +81,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/hls", get(stream_hls_index))
         .route("/hls/*path", get(stream_hls_handler))
         .route("/webrtc/*path", get(stream_webrtc_handler))
-        .route("/api/live/mjpeg", get(stream_mjpeg_handler))
+    .route("/api/live/mjpeg", get(stream_mjpeg_handler))
+    .route("/api/live/audio", get(stream_audio_handler))
         .route("/api/storage", get(get_storage_info))
         .route("/api/storage/list", get(list_recordings))
         .route("/api/storage/delete/*path", get(delete_recording))

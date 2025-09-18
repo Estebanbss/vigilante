@@ -27,12 +27,11 @@ pub async fn stream_hls_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(path): Path<String>,
-    Query(q): Query<TokenQuery>,
+    Query(_q): Query<TokenQuery>,
 ) -> impl IntoResponse {
-    // Auth: acepta header Authorization o query ?token=
-    let authorized = q.token.as_deref() == Some(&state.proxy_token);
-    if !authorized {
-        if let Err(_) = check_auth(&headers, &state.proxy_token).await { return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(); }
+    // Auth: solo header Authorization
+    if let Err(_) = check_auth(&headers, &state.proxy_token).await { 
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(); 
     }
 
     // Sirve archivos HLS desde STORAGE_PATH/hls
@@ -61,11 +60,16 @@ pub async fn stream_hls_handler(
 pub async fn stream_hls_index(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
+    Query(_q): Query<TokenQuery>,
 ) -> impl IntoResponse {
+    // Auth: solo header Authorization
+    if let Err(_) = check_auth(&headers, &state.proxy_token).await { 
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(); 
+    }
+    
     // Reutiliza la misma lógica, sirviendo el playlist por defecto
     let path = Path("".to_string());
-    stream_hls_handler(State(state), headers, path, Query(q)).await
+    stream_hls_handler(State(state), headers, path, Query(_q)).await
 }
 
 pub async fn stream_webrtc_handler(
@@ -85,11 +89,11 @@ pub async fn stream_webrtc_handler(
 pub async fn stream_mjpeg_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
+    Query(_q): Query<TokenQuery>,
 ) -> Result<Response, StatusCode> {
-    // Auth: acepta header Authorization o query ?token=
-    if q.token.as_deref() != Some(&state.proxy_token) {
-        if let Err(_status) = check_auth(&headers, &state.proxy_token).await { return Err(StatusCode::UNAUTHORIZED); }
+    // Auth: solo header Authorization
+    if let Err(_status) = check_auth(&headers, &state.proxy_token).await { 
+        return Err(StatusCode::UNAUTHORIZED); 
     }
 
     // Suscribimos al broadcast de JPEGs producido por el pipeline principal
@@ -123,4 +127,31 @@ pub async fn stream_mjpeg_handler(
     Ok(resp)
 }
 
+// Live audio endpoint over chunked HTTP (WebM Opus)
+// GET /api/live/audio
+pub async fn stream_audio_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(_q): Query<TokenQuery>,
+) -> Result<Response, StatusCode> {
+    // Auth: solo header Authorization
+    if let Err(_status) = check_auth(&headers, &state.proxy_token).await { 
+        return Err(StatusCode::UNAUTHORIZED); 
+    }
+
+    // Suscripción al canal de audio
+    let mut rx = state.audio_webm_tx.subscribe();
+
+    let stream = async_stream::stream! {
+        while let Ok(chunk) = rx.recv().await {
+            yield Ok::<Bytes, std::io::Error>(chunk);
+        }
+    };
+
+    let mut resp = Response::new(Body::from_stream(stream));
+    let headers = resp.headers_mut();
+    headers.insert(axum::http::header::CONTENT_TYPE, "audio/webm; codecs=opus".parse().unwrap());
+    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    Ok(resp)
+}
 // HLS ahora es generado dentro del pipeline principal (camera.rs)

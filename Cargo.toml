@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 tower-http = { version = "0.5", features = ["cors"] }
@@ -28,3 +28,5 @@ gstreamer = "0.22"
 gstreamer-app = "0.22"
 gstreamer-video = "0.22"
 gstreamer-pbutils = "0.22"
+gstreamer-webrtc = "0.22"
+gstreamer-sdp = "0.22"
