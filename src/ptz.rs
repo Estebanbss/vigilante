@@ -1,8 +1,7 @@
-use crate::auth::check_auth;
 use crate::AppState;
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::IntoResponse,
     Json,
 };
@@ -258,8 +257,7 @@ use axum::response::Response;
 fn ok() -> Response { (StatusCode::OK, Json(ApiResponse{ status: "success".into(), message: "ok".into()})).into_response() }
 fn err(msg: String) -> Response { (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse{ status: "error".into(), message: msg})).into_response() }
 
-pub async fn pan_left(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await { return (status, Json(ApiResponse{ status:"error".into(), message:"Unauthorized".into()})).into_response(); }
+pub async fn pan_left(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     println!("🎮 API Call: pan_left");
     match ptz_continuous_move(&state.camera_onvif_url, -0.5, 0.0, None).await { 
         Ok(_) => {
@@ -272,8 +270,7 @@ pub async fn pan_left(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         }
     }
 }
-pub async fn pan_right(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await { return (status, Json(ApiResponse{ status:"error".into(), message:"Unauthorized".into()})).into_response(); }
+pub async fn pan_right(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     println!("🎮 API Call: pan_right");
     match ptz_continuous_move(&state.camera_onvif_url, 0.5, 0.0, None).await { 
         Ok(_) => {
@@ -286,8 +283,7 @@ pub async fn pan_right(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         }
     }
 }
-pub async fn tilt_up(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await { return (status, Json(ApiResponse{ status:"error".into(), message:"Unauthorized".into()})).into_response(); }
+pub async fn tilt_up(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     println!("🎮 API Call: tilt_up");
     match ptz_continuous_move(&state.camera_onvif_url, 0.0, 0.5, None).await { 
         Ok(_) => {
@@ -300,8 +296,7 @@ pub async fn tilt_up(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
         }
     }
 }
-pub async fn tilt_down(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await { return (status, Json(ApiResponse{ status:"error".into(), message:"Unauthorized".into()})).into_response(); }
+pub async fn tilt_down(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     println!("🎮 API Call: tilt_down");
     match ptz_continuous_move(&state.camera_onvif_url, 0.0, -0.5, None).await { 
         Ok(_) => {
@@ -314,8 +309,7 @@ pub async fn tilt_down(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         }
     }
 }
-pub async fn zoom_in(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await { return (status, Json(ApiResponse{ status:"error".into(), message:"Unauthorized".into()})).into_response(); }
+pub async fn zoom_in(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     println!("🎮 API Call: zoom_in");
     match ptz_continuous_move(&state.camera_onvif_url, 0.0, 0.0, Some(0.5)).await { 
         Ok(_) => {
@@ -328,8 +322,7 @@ pub async fn zoom_in(State(state): State<Arc<AppState>>, headers: HeaderMap) -> 
         }
     }
 }
-pub async fn zoom_out(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await { return (status, Json(ApiResponse{ status:"error".into(), message:"Unauthorized".into()})).into_response(); }
+pub async fn zoom_out(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     println!("🎮 API Call: zoom_out");
     match ptz_continuous_move(&state.camera_onvif_url, 0.0, 0.0, Some(-0.5)).await { 
         Ok(_) => {
@@ -342,8 +335,7 @@ pub async fn zoom_out(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         }
     }
 }
-pub async fn ptz_stop(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await { return (status, Json(ApiResponse{ status:"error".into(), message:"Unauthorized".into()})).into_response(); }
+pub async fn ptz_stop(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     println!("🎮 API Call: ptz_stop");
     match ptz_stop_all(&state.camera_onvif_url).await { 
         Ok(_) => {

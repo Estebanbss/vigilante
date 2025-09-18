@@ -1,7 +1,7 @@
-use crate::{auth::check_auth, AppState};
+use crate::AppState;
 use axum::{
     extract::{State, Path},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 // use axum::response::sse::{Sse, Event};
@@ -23,14 +23,8 @@ use tokio_util::io::ReaderStream;
 
 pub async fn stream_hls_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(path): Path<String>,
 ) -> impl IntoResponse {
-    // Auth: solo header Authorization
-    if let Err(_) = check_auth(&headers, &state.proxy_token).await { 
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(); 
-    }
-
     // Sirve archivos HLS desde STORAGE_PATH/hls
     let mut rel = path.trim_start_matches('/').to_string();
     if rel.is_empty() { rel = "stream.m3u8".to_string(); }
@@ -56,27 +50,16 @@ pub async fn stream_hls_handler(
 // Alias para /hls sin path, devuelve stream.m3u8
 pub async fn stream_hls_index(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Response {
-    // Auth: solo header Authorization
-    if let Err(_) = check_auth(&headers, &state.proxy_token).await { 
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(); 
-    }
-    
     // Reutiliza la misma lógica, sirviendo el playlist por defecto
     let path = Path("".to_string());
-    let res = stream_hls_handler(State(state), headers, path).await;
+    let res = stream_hls_handler(State(state), path).await;
     axum::response::IntoResponse::into_response(res)
 }
 
 pub async fn stream_webrtc_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await {
-        return (status, "Unauthorized").into_response();
-    }
-    
     // Placeholder para la lógica de GStreamer
     (StatusCode::OK, "WebRTC stream handler is working!").into_response()
 }
@@ -85,13 +68,7 @@ pub async fn stream_webrtc_handler(
 // GET /api/live/mjpeg
 pub async fn stream_mjpeg_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    // Auth: solo header Authorization
-    if let Err(_status) = check_auth(&headers, &state.proxy_token).await { 
-        return Err(StatusCode::UNAUTHORIZED); 
-    }
-
     // Suscribimos al broadcast de JPEGs producido por el pipeline principal
     let mut rx = state.mjpeg_tx.subscribe();
 
@@ -127,13 +104,7 @@ pub async fn stream_mjpeg_handler(
 // GET /api/live/audio
 pub async fn stream_audio_handler(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    // Auth: solo header Authorization
-    if let Err(_status) = check_auth(&headers, &state.proxy_token).await { 
-        return Err(StatusCode::UNAUTHORIZED); 
-    }
-
     // Suscripción al canal de audio
     let mut rx = state.audio_webm_tx.subscribe();
 
