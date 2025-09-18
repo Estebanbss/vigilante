@@ -71,11 +71,11 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 "rtspsrc location={camera_url} protocols=tcp do-rtsp-keep-alive=true latency=100 retry=5 timeout=20000000000 ",
                 "! rtph264depay ! h264parse config-interval=1 ",
                 "! tee name=t ",
-                // recording branch: decodificar y re-encodear para garantizar pixel format correcto
+                // recording branch: MP4 optimizado para streaming en vivo
                 "t. ! queue ! decodebin ! videoconvert ! video/x-raw,format=I420 ",
                 "! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=30 ",
                 "! video/x-h264,profile=baseline,stream-format=avc ",
-                "! mp4mux name=mux streamable=true faststart=true fragment-duration=3000 fragment-mode=first-moov-then-finalise ",
+                "! mp4mux name=mux streamable=true faststart=true fragment-duration=1000 fragment-mode=dash-or-mss ",
                 "! filesink location=\"{daily}\" sync=false append=false ",
                 // detector branch: decodificar a GRAY8 reducido para análisis rápido
                 "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=640,height=360 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",

@@ -315,79 +315,34 @@ pub async fn stream_recording_tail(
             let len = match tokio::fs::metadata(&full_path).await { Ok(m)=> m.len(), Err(_)=> 0 };
 
             if !sent_header {
-                // Esperar hasta que exista un moov completo al inicio del archivo
-                if len >= 16 {
-                    // escanear hasta 4MB o tamaño del archivo
-                    let to_scan = std::cmp::min(len, 4 * 1024 * 1024) as usize;
-                    let mut scan_buf = vec![0u8; to_scan];
+                // Esperar a que el archivo tenga suficiente tamaño para contener metadatos
+                if len >= 1024 * 1024 { // Esperar al menos 1MB antes de intentar
+                    // Con faststart=true, el moov debería estar al inicio
+                    // Leer los primeros 2MB para asegurar tener ftyp+moov
+                    let header_size = std::cmp::min(len, 2 * 1024 * 1024) as usize;
+                    let mut header_buf = vec![0u8; header_size];
+                    
                     if let Err(e) = file.seek(std::io::SeekFrom::Start(0)).await {
                         eprintln!("header seek err: {}", e);
                         break;
                     }
-                    match file.read_exact(&mut scan_buf).await {
+                    match file.read_exact(&mut header_buf).await {
                         Ok(_) => {
-                            // Parsear cajas MP4 hasta encontrar 'moov' completa
-                            let mut off: usize = 0;
-                            let mut found_moov_end: Option<usize> = None;
-                            while off + 8 <= scan_buf.len() {
-                                let size32 = u32::from_be_bytes([
-                                    scan_buf[off], scan_buf[off+1], scan_buf[off+2], scan_buf[off+3]
-                                ]);
-                                let box_type = &scan_buf[off+4..off+8];
-                                let mut box_size: usize = size32 as usize;
-                                let mut header_len = 8usize;
-                                if size32 == 1 {
-                                    // extended size (64-bit)
-                                    if off + 16 > scan_buf.len() { break; }
-                                    let size64: u64 = u64::from_be_bytes(scan_buf[off+8..off+16].try_into().unwrap());
-                                    box_size = size64 as usize;
-                                    header_len = 16;
-                                } else if size32 == 0 {
-                                    // box hasta fin de archivo, no podemos determinar tamaño aún
-                                    break;
-                                }
-                                if box_size < header_len || off + box_size > scan_buf.len() {
-                                    // caja incompleta aún
-                                    break;
-                                }
-
-                                if box_type == b"moov" {
-                                    found_moov_end = Some(off + box_size);
-                                    break;
-                                }
-                                off += box_size;
-                            }
-
-                            if let Some(end) = found_moov_end {
-                                _header_end = Some(end as u64);
-                                // Enviar exactamente hasta el final de moov
-                                let mut header_buf = vec![0u8; end];
-                                if let Err(e) = file.seek(std::io::SeekFrom::Start(0)).await { 
-                                    eprintln!("header re-seek err: {}", e); 
-                                    break; 
-                                }
-                                match file.read_exact(&mut header_buf).await {
-                                    Ok(_) => {
-                                        pos = end as u64;
-                                        sent_header = true;
-                                        println!("📤 Enviado header MP4 (ftyp+moov): {} bytes", end);
-                                        yield Ok::<Bytes, std::io::Error>(Bytes::from(header_buf));
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        eprintln!("header send read err: {}", e);
-                                        // esperar más datos
-                                    }
-                                }
+                            // Verificar que al menos tenga ftyp y algo de moov
+                            if header_buf.len() >= 8 && &header_buf[4..8] == b"ftyp" {
+                                pos = header_size as u64;
+                                sent_header = true;
+                                println!("📤 Enviado header MP4: {} bytes", header_size);
+                                yield Ok::<Bytes, std::io::Error>(Bytes::from(header_buf));
+                                continue;
                             } else {
-                                // moov aún no completo, esperar un poco
-                                tokio::time::sleep(Duration::from_millis(300)).await;
+                                tokio::time::sleep(Duration::from_millis(500)).await;
                                 continue;
                             }
                         }
                         Err(e) => {
                             if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                                tokio::time::sleep(Duration::from_millis(300)).await;
+                                tokio::time::sleep(Duration::from_millis(500)).await;
                                 continue;
                             }
                             eprintln!("header read err: {}", e);
@@ -395,7 +350,7 @@ pub async fn stream_recording_tail(
                         }
                     }
                 } else {
-                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
             } else if len > pos {
@@ -437,8 +392,7 @@ pub async fn stream_recording_tail(
     headers.insert(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate".parse().unwrap());
     headers.insert(axum::http::header::PRAGMA, "no-cache".parse().unwrap());
     headers.insert(axum::http::header::EXPIRES, "0".parse().unwrap());
-    // Importante: agregar headers para streaming
-    headers.insert(axum::http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    // Importante: headers para streaming (sin Accept-Ranges para evitar skips del moov)
     headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
     headers.insert("X-Accel-Buffering", "no".parse().unwrap()); // nginx: desactiva buffering
     headers.insert("Cache-Control", "no-transform".parse().unwrap()); // evita proxies que reescriben
