@@ -1,4 +1,4 @@
-use crate::AppState;
+use crate::{AppState, auth::RequireAuth};
 use axum::{
     extract::{State, Path},
     http::StatusCode,
@@ -22,6 +22,7 @@ use tokio_util::io::ReaderStream;
 // Token en query ya no se usa; autenticación por header global
 
 pub async fn stream_hls_handler(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(path): Path<String>,
 ) -> impl IntoResponse {
@@ -49,15 +50,17 @@ pub async fn stream_hls_handler(
 
 // Alias para /hls sin path, devuelve stream.m3u8
 pub async fn stream_hls_index(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Response {
     // Reutiliza la misma lógica, sirviendo el playlist por defecto
     let path = Path("".to_string());
-    let res = stream_hls_handler(State(state), path).await;
+    let res = stream_hls_handler(RequireAuth, State(state), path).await;
     axum::response::IntoResponse::into_response(res)
 }
 
 pub async fn stream_webrtc_handler(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // Placeholder para la lógica de GStreamer
@@ -67,6 +70,7 @@ pub async fn stream_webrtc_handler(
 // Simple MJPEG live endpoint (separado de la grabación)
 // GET /api/live/mjpeg
 pub async fn stream_mjpeg_handler(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, StatusCode> {
     // Suscribimos al broadcast de JPEGs producido por el pipeline principal
@@ -103,6 +107,7 @@ pub async fn stream_mjpeg_handler(
 // Live audio endpoint over chunked HTTP (WebM Opus)
 // GET /api/live/audio
 pub async fn stream_audio_handler(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, StatusCode> {
     // Suscripción al canal de audio

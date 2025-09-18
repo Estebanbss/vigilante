@@ -4,6 +4,8 @@ use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
 use crate::AppState;
+use axum::extract::{FromRef, FromRequestParts};
+use axum::http::request::Parts;
 
 /// Comprueba la validez del token de autenticación en los encabezados de la petición.
 ///
@@ -56,5 +58,28 @@ pub async fn require_auth_middleware(
             .status(status)
             .body(Body::from("Unauthorized"))
             .unwrap(),
+    }
+}
+
+/// Extractor que exige Authorization en cada handler que lo use.
+/// Esto añade una segunda capa de protección además del middleware global.
+#[derive(Debug, Clone, Copy)]
+pub struct RequireAuth;
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for RequireAuth
+where
+    Arc<AppState>: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let app_state = Arc::<AppState>::from_ref(state);
+        let headers = &parts.headers;
+        match check_auth(headers, &app_state.proxy_token).await {
+            Ok(()) => Ok(RequireAuth),
+            Err(_) => Err((StatusCode::UNAUTHORIZED, "Unauthorized")),
+        }
     }
 }

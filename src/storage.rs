@@ -1,4 +1,4 @@
-use crate::AppState;
+use crate::{AppState, auth::RequireAuth};
 use axum::{
     extract::{Path, State, Query},
     http::{HeaderMap, StatusCode},
@@ -31,6 +31,7 @@ pub struct StorageInfo {
 }
 
 pub async fn get_storage_info(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
 
@@ -115,6 +116,7 @@ fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
 }
 
 pub async fn list_recordings(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListRecordingsParams>,
 ) -> impl IntoResponse {
@@ -142,6 +144,7 @@ pub async fn list_recordings(
 }
 
 pub async fn delete_recording(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(file_path): Path<String>,
 ) -> impl IntoResponse {
@@ -182,6 +185,7 @@ pub async fn delete_recording(
 }
 
 pub async fn stream_recording(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(file_path): Path<String>,
@@ -270,6 +274,7 @@ pub async fn stream_recording(
 }
 
 pub async fn get_log_file(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(date): Path<String>,
 ) -> impl IntoResponse {
@@ -300,6 +305,7 @@ pub async fn get_log_file(
 
 // Stream que "sigue" creciendo el archivo para verlo en tiempo real
 pub async fn stream_recording_tail(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(file_path): Path<String>,
 ) -> Result<Response, StatusCode> {
