@@ -34,7 +34,7 @@ pub async fn get_storage_info(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    println!("🎯 Handler: get_storage_info");
+    println!("🎯 Handler: .00i0n0fo");
 
     match fs2::statvfs(&state.storage_path) {
         Ok(stats) => {

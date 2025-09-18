@@ -13,6 +13,24 @@ use axum::http::request::Parts;
 /// - "Bearer <token>"
 /// - "<token>" (solo el token crudo)
 pub async fn check_auth(headers: &HeaderMap, token: &str) -> Result<(), StatusCode> {
+    // Helper: mask token to avoid leaking secrets in logs
+    fn mask_token(tok: &str) -> String {
+        if tok.is_empty() { return "".into(); }
+        let n = tok.chars().count();
+        if n <= 4 { return "*".repeat(n); }
+        let prefix: String = tok.chars().take(3).collect();
+        let suffix: String = tok.chars().rev().take(2).collect::<String>().chars().rev().collect();
+        format!("{}{}{}", prefix, "*".repeat(n.saturating_sub(5)), suffix)
+    }
+    fn mask_auth_header(val: &str) -> String {
+        let bearer = "Bearer ";
+        if let Some(rest) = val.strip_prefix(bearer) {
+            format!("{}{}", bearer, mask_token(rest))
+        } else {
+            mask_token(val)
+        }
+    }
+
     // Busca el encabezado "Authorization".
     let auth_header_value = headers.get(header::AUTHORIZATION);
 
@@ -20,7 +38,10 @@ pub async fn check_auth(headers: &HeaderMap, token: &str) -> Result<(), StatusCo
     let auth_header = match auth_header_value {
         Some(value) => value.to_str().unwrap_or(""),
         None => {
-            eprintln!("❌ Solicitud rechazada: Encabezado de autenticación ausente.");
+            let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+            let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
+            let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
+            eprintln!("❌ Auth missing: UA='{}' CF-Connecting-IP='{}' X-Forwarded-For='{}'", ua, cfip, xff);
             return Err(StatusCode::UNAUTHORIZED);
         }
     };
@@ -31,9 +52,19 @@ pub async fn check_auth(headers: &HeaderMap, token: &str) -> Result<(), StatusCo
 
     // Compara el token del encabezado con los formatos aceptados.
     if auth_header != expected_bearer && auth_header != expected_raw {
-        eprintln!("❌ Solicitud rechazada: Token de autenticación inválido.");
+        let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+        let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let provided = mask_auth_header(auth_header);
+        let expected = mask_auth_header(&expected_bearer);
+        eprintln!("❌ Auth invalid: provided='{}' expected~='{}' UA='{}' CF-Connecting-IP='{}' X-Forwarded-For='{}'", provided, expected, ua, cfip, xff);
         Err(StatusCode::UNAUTHORIZED)
     } else {
+        // Log mínimo en éxito para trazabilidad
+        let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+        let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
+        println!("🔑 Auth header accepted: UA='{}' CF-Connecting-IP='{}' X-Forwarded-For='{}'", ua, cfip, xff);
         Ok(())
     }
 }
@@ -61,7 +92,10 @@ pub async fn require_auth_middleware(
             next.run(req).await
         }
         Err(status) => {
-            println!("❌ Auth FAIL (middleware): {} {} -> {}", method, path, status.as_u16());
+            let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+            let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
+            let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
+            println!("❌ Auth FAIL (middleware): {} {} -> {} | UA='{}' CF-IP='{}' XFF='{}'", method, path, status.as_u16(), ua, cfip, xff);
             Response::builder()
                 .status(status)
                 .body(Body::from("Unauthorized"))
@@ -88,13 +122,16 @@ where
         let headers = &parts.headers;
         let method = parts.method.clone();
         let path = parts.uri.path().to_string();
-        match check_auth(headers, &app_state.proxy_token).await {
+    match check_auth(headers, &app_state.proxy_token).await {
             Ok(()) => {
-                println!("🔐 Auth OK (extractor): {} {}", method, path);
+        println!("🔐 Auth OK (extractor): {} {}", method, path);
                 Ok(RequireAuth)
             }
             Err(_) => {
-                println!("🚫 Auth FAIL (extractor): {} {}", method, path);
+        let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+        let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
+        println!("🚫 Auth FAIL (extractor): {} {} | UA='{}' CF-IP='{}' XFF='{}'", method, path, ua, cfip, xff);
                 Err((StatusCode::UNAUTHORIZED, "Unauthorized"))
             }
         }
