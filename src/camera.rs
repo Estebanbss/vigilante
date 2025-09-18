@@ -73,11 +73,11 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
     let pipeline_str = format!(
             concat!(
                 "rtspsrc location={camera_url} protocols=tcp do-rtsp-keep-alive=true latency=100 retry=5 timeout=20000000000 name=src ",
-                // Video path: src.src_0 (video pad)
-                "src.src_0 ! rtph264depay ! h264parse config-interval=1 ",
+                // Video path: seleccionar por caps desde rtspsrc
+                "src. ! queue ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! h264parse config-interval=1 ",
                 "! tee name=t ",
-                // Audio path: decodificar a PCM, tee a AAC (MP4/HLS) y Opus (WebM live)
-                "src.src_1 ! rtppcmadepay ! alawdec ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ",
+                // Audio path: seleccionar por caps (PCMA)
+                "src. ! queue ! application/x-rtp,media=audio,encoding-name=PCMA ! rtppcmadepay ! alawdec ! audioconvert ! audioresample ! audio/x-raw,rate=48000,channels=2 ",
                 "! tee name=ta ",
                 // Rama AAC para MP4/HLS
                 "ta. ! queue ! voaacenc bitrate=128000 ! aacparse ! tee name=tee_audio ",
