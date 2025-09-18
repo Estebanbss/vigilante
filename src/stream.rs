@@ -61,7 +61,7 @@ pub async fn stream_hls_index(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(_q): Query<TokenQuery>,
-) -> impl IntoResponse {
+) -> Response {
     // Auth: solo header Authorization
     if let Err(_) = check_auth(&headers, &state.proxy_token).await { 
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(); 
@@ -69,7 +69,8 @@ pub async fn stream_hls_index(
     
     // Reutiliza la misma lógica, sirviendo el playlist por defecto
     let path = Path("".to_string());
-    stream_hls_handler(State(state), headers, path, Query(_q)).await
+    let res = stream_hls_handler(State(state), headers, path, Query(_q)).await;
+    axum::response::IntoResponse::into_response(res)
 }
 
 pub async fn stream_webrtc_handler(

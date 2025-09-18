@@ -12,7 +12,6 @@ use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 use fs2;
 use chrono::{DateTime, Utc};
 use tokio::{fs::File, time::sleep};
-use tokio_util::io::ReaderStream;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use bytes::Bytes;
 // use std::convert::TryInto; // not used
