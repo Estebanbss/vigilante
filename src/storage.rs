@@ -1,4 +1,3 @@
-use crate::auth::check_auth;
 use crate::AppState;
 use axum::{
     extract::{Path, State, Query},
@@ -33,14 +32,7 @@ pub struct StorageInfo {
 
 pub async fn get_storage_info(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await {
-        return (status, Json(ApiResponse {
-            status: "error".to_string(),
-            message: "Unauthorized".to_string(),
-        })).into_response();
-    }
 
     match fs2::statvfs(&state.storage_path) {
         Ok(stats) => {
@@ -84,8 +76,7 @@ pub struct ListRecordingsParams {
 }
 
 // Auth helper via query param (?token=) to ease VLC/players
-#[derive(Deserialize, Default)]
-pub struct TokenQuery { pub token: Option<String> }
+// Autenticación via middleware global; no se acepta token por query
 
 // Función auxiliar recursiva para obtener grabaciones de todos los subdirectorios
 fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
@@ -125,15 +116,8 @@ fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
 
 pub async fn list_recordings(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Query(params): Query<ListRecordingsParams>,
 ) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await {
-        return (status, Json(ApiResponse {
-            status: "error".to_string(),
-            message: "Unauthorized".to_string(),
-        })).into_response();
-    }
 
     // Obtenemos todas las grabaciones de forma recursiva
     let mut all_recordings = get_recordings_recursively(&state.storage_path);
@@ -159,15 +143,8 @@ pub async fn list_recordings(
 
 pub async fn delete_recording(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(file_path): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await {
-        return (status, Json(ApiResponse {
-            status: "error".to_string(),
-            message: "Unauthorized".to_string(),
-        })).into_response();
-    }
     
     let candidate = PathBuf::from(&state.storage_path).join(&file_path);
     // Canonicalize to avoid .. traversal and ensure it's within storage root
@@ -207,13 +184,9 @@ pub async fn delete_recording(
 pub async fn stream_recording(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
     Path(file_path): Path<String>,
 ) -> Result<Response, StatusCode> {
-    // Auth: acepta header Authorization o query ?token=
-    if q.token.as_deref() != Some(&state.proxy_token) {
-        if let Err(_status) = check_auth(&headers, &state.proxy_token).await { return Err(StatusCode::UNAUTHORIZED); }
-    }
+    // Autenticación ya validada por middleware global
     
     let candidate = PathBuf::from(&state.storage_path).join(&file_path);
     // Canonicalize to avoid .. traversal and ensure it's within storage root
@@ -298,15 +271,8 @@ pub async fn stream_recording(
 
 pub async fn get_log_file(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(date): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(status) = check_auth(&headers, &state.proxy_token).await {
-        return (status, Json(ApiResponse {
-            status: "error".to_string(),
-            message: "Unauthorized".to_string(),
-        })).into_response();
-    }
 
     // Nuevo esquema: logs dentro de carpeta del día DD-MM-YY
     let file_name = format!("{}-log.txt", date);
@@ -335,14 +301,9 @@ pub async fn get_log_file(
 // Stream que "sigue" creciendo el archivo para verlo en tiempo real
 pub async fn stream_recording_tail(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
     Path(file_path): Path<String>,
 ) -> Result<Response, StatusCode> {
-    // Auth: acepta header Authorization o query ?token=
-    if q.token.as_deref() != Some(&state.proxy_token) {
-        if let Err(_status) = check_auth(&headers, &state.proxy_token).await { return Err(StatusCode::UNAUTHORIZED); }
-    }
+    // Autenticación ya validada por middleware global
 
     let candidate = PathBuf::from(&state.storage_path).join(&file_path);
     let full_path = candidate.canonicalize().map_err(|_| StatusCode::BAD_REQUEST)?;
