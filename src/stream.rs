@@ -1,6 +1,6 @@
 use crate::{auth::check_auth, AppState};
 use axum::{
-    extract::{State, Path, Query},
+    extract::{State, Path},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -18,16 +18,13 @@ use std::sync::Arc;
 // use std::fs;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
-use serde::Deserialize;
 
-#[derive(Deserialize, Default)]
-pub struct TokenQuery { pub token: Option<String> }
+// Token en query ya no se usa; autenticación por header global
 
 pub async fn stream_hls_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(path): Path<String>,
-    Query(_q): Query<TokenQuery>,
 ) -> impl IntoResponse {
     // Auth: solo header Authorization
     if let Err(_) = check_auth(&headers, &state.proxy_token).await { 
@@ -60,7 +57,6 @@ pub async fn stream_hls_handler(
 pub async fn stream_hls_index(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(_q): Query<TokenQuery>,
 ) -> Response {
     // Auth: solo header Authorization
     if let Err(_) = check_auth(&headers, &state.proxy_token).await { 
@@ -69,7 +65,7 @@ pub async fn stream_hls_index(
     
     // Reutiliza la misma lógica, sirviendo el playlist por defecto
     let path = Path("".to_string());
-    let res = stream_hls_handler(State(state), headers, path, Query(_q)).await;
+    let res = stream_hls_handler(State(state), headers, path).await;
     axum::response::IntoResponse::into_response(res)
 }
 
@@ -90,7 +86,6 @@ pub async fn stream_webrtc_handler(
 pub async fn stream_mjpeg_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(_q): Query<TokenQuery>,
 ) -> Result<Response, StatusCode> {
     // Auth: solo header Authorization
     if let Err(_status) = check_auth(&headers, &state.proxy_token).await { 
@@ -133,7 +128,6 @@ pub async fn stream_mjpeg_handler(
 pub async fn stream_audio_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(_q): Query<TokenQuery>,
 ) -> Result<Response, StatusCode> {
     // Auth: solo header Authorization
     if let Err(_status) = check_auth(&headers, &state.proxy_token).await { 

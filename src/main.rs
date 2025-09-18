@@ -17,6 +17,7 @@ use storage::{get_storage_info, list_recordings, delete_recording, stream_record
 use stream::{stream_hls_handler, stream_hls_index, stream_webrtc_handler, stream_mjpeg_handler, stream_audio_handler};
 use camera::{start_camera_pipeline};
 use ptz::{pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, ptz_stop};
+use axum::middleware::from_fn_with_state;
 
 // Dependencias de GStreamer
 use gstreamer as gst;
@@ -97,8 +98,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/ptz/zoom/in", post(zoom_in))
         .route("/api/ptz/zoom/out", post(zoom_out))
         .route("/api/ptz/stop", post(ptz_stop))
-        .layer(cors)
-        .with_state(state);
+    .layer(cors)
+    // Middleware global de autenticación para TODAS las rutas
+    .layer(from_fn_with_state(state.clone(), auth::require_auth_middleware))
+    .with_state(state);
 
     let addr: SocketAddr = listen_addr.parse()?;
     println!("🚀 API y Streamer escuchando en http://{}", addr);
