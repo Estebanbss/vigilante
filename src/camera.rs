@@ -13,9 +13,17 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         let now = chrono::Local::now();
         // Crear carpeta por día con formato DD-MM-YY (ej: 17-09-25)
         let day_dir_name = now.format("%d-%m-%y").to_string();
-        let day_dir = state.storage_path.join(&day_dir_name);
+        let mut day_dir = state.storage_path.join(&day_dir_name);
+        
+        // Intentar crear el directorio, si falla usar /tmp como fallback
         if let Err(e) = std::fs::create_dir_all(&day_dir) {
-            eprintln!("❌ No se pudo crear la carpeta diaria {}: {}", day_dir.display(), e);
+            eprintln!("❌ No se pudo crear la carpeta {}: {}. Usando /tmp como fallback", day_dir.display(), e);
+            day_dir = std::path::PathBuf::from("/tmp").join("vigilante").join(&day_dir_name);
+            if let Err(e) = std::fs::create_dir_all(&day_dir) {
+                eprintln!("❌ Tampoco se pudo crear el directorio fallback {}: {}", day_dir.display(), e);
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                continue;
+            }
         }
 
         // Archivo diario con nombre YYYY-MM-DD.mp4 dentro de la carpeta del día
@@ -38,20 +46,10 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             println!("📡 URL RTSP: {}", camera_url);
 
             // Pipeline para grabación continua en archivo diario
-            // Single RTSP source with tee to: recording(mp4), detector(appsink), mjpeg(appsink), and optional HLS
+            // Single RTSP source with tee to: recording(mp4), detector(appsink), mjpeg(appsink)
             let daily_s = daily_path.to_string_lossy();
-            let enable_hls = state.enable_hls;
-            let (segments_s, playlist_s) = if enable_hls {
-                let hls_dir = state.storage_path.join("hls");
-                if let Err(e) = std::fs::create_dir_all(&hls_dir) {
-                    eprintln!("❌ No se pudo crear el directorio HLS: {}", e);
-                }
-                let segments = hls_dir.join("segment-%05d.ts");
-                let playlist = hls_dir.join("stream.m3u8");
-                (segments.to_string_lossy().to_string(), playlist.to_string_lossy().to_string())
-            } else {
-                (String::new(), String::new())
-            };
+            let enable_hls = false; // Deshabilitado para simplificar
+            let (segments_s, playlist_s) = (String::new(), String::new());
 
             let pipeline_str = format!(
                 concat!(
@@ -63,16 +61,10 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                     "t. ! queue leaky=downstream max-size-buffers=1 ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=640,height=360 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
                     "t. ! queue leaky=downstream max-size-buffers=10 max-size-time=300000000 ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! videorate ! video/x-raw,framerate=15/1 ! jpegenc quality=90 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true ",
                     "t. ! queue leaky=downstream max-size-buffers=5 max-size-time=200000000 ! videoconvert ! videoscale ! video/x-raw,width=854,height=480 ! videorate ! video/x-raw,framerate=10/1 ! jpegenc quality=70 ! appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true ",
-                    "{}",
                     "tee_audio. ! queue leaky=downstream ! voaacenc bitrate=64000 ! aacparse ! mux.audio_0 ",
                     "tee_audio. ! queue leaky=downstream ! opusenc bitrate=32000 ! webmmux streamable=true ! appsink name=audio_webm_sink sync=false max-buffers=50 drop=true"
                 ),
-                camera_url, daily_s,
-                if enable_hls && !segments_s.is_empty() && !playlist_s.is_empty() {
-                    format!("t. ! queue leaky=downstream ! videoconvert ! x264enc bitrate=1000 ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au ! hlssink2 target-duration=2 max-files=5 playlist-length=5 location=\"{}\" playlist-location=\"{}\" ", segments_s, playlist_s)
-                } else {
-                    String::new()
-                }
+                camera_url, daily_s
             );            println!("📷 Recording pipeline: {}", pipeline_str);
             println!("🔄 Creando pipeline GStreamer...");
             let pipeline = match gst::parse::launch(&pipeline_str) {
@@ -201,10 +193,13 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                             let now = Local::now();
                             // Carpeta del día (DD-MM-YY) y archivo de log (YYYY-MM-DD-log.txt)
                             let day_dir_name = now.format("%d-%m-%y").to_string();
-                            let day_dir = state_for_cb.storage_path.join(&day_dir_name);
-                            if let Err(e) = std::fs::create_dir_all(&day_dir) {
-                                eprintln!("❌ No se pudo crear la carpeta diaria {}: {}", day_dir.display(), e);
+                            let mut day_dir = state_for_cb.storage_path.join(&day_dir_name);
+                            
+                            // Usar el mismo fallback que para las grabaciones
+                            if !day_dir.exists() {
+                                day_dir = std::path::PathBuf::from("/tmp").join("vigilante").join(&day_dir_name);
                             }
+                            
                             let log_filename = now.format("%Y-%m-%d-log.txt").to_string();
                             let log_path = day_dir.join(&log_filename);
                             if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
