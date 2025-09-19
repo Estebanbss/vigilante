@@ -95,8 +95,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 // detector branch: decodificar a GRAY8 reducido para análisis rápido
                 "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=640,height=360 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
                 // mjpeg branch: decode->scale->jpeg->appsink (solo video)
-                "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ",
-                "! jpegenc quality=85 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true",
+                "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! jpegenc quality=100 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true",
                 "{hls_part}"
             ),
             camera_url = camera_url,
