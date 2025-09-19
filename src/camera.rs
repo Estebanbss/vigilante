@@ -117,10 +117,9 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             let pipeline_weak = pipeline.downgrade();
             rtspsrc.connect_pad_added(move |src, pad| {
                 let Some(pipeline) = pipeline_weak.upgrade() else { return; };
-                let pad_caps = pad.current_caps().or_else(|| pad.query_caps(None)).ok();
+                let pad_caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
                 let caps_str = pad_caps
-                    .as_ref()
-                    .and_then(|c| c.structure(0))
+                    .structure(0)
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
@@ -153,7 +152,13 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 let audioconvert = gst::ElementFactory::make("audioconvert").build().unwrap();
                 let audioresample = gst::ElementFactory::make("audioresample").build().unwrap();
                 let capsfilter = gst::ElementFactory::make("capsfilter").build().unwrap();
-                capsfilter.set_property("caps", &gst::Caps::builder("audio/x-raw").field("rate", 48000i32).field("channels", 2i32).build()).ok();
+                let _ = capsfilter.set_property(
+                    "caps",
+                    &gst::Caps::builder("audio/x-raw")
+                        .field("rate", 48000i32)
+                        .field("channels", 2i32)
+                        .build(),
+                );
                 let tee = gst::ElementFactory::make("tee").name(&format!("tee_audio_dyn_{}", name)).build().unwrap();
 
                 // Rama AAC para MP4
@@ -202,8 +207,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
                 // link a mux.audio_0
                 if let Some(mux) = pipeline.by_name("mux") {
-                    if let Some(sinkpad) = mux.static_pad("audio_0") {
-                        if let Some(srcpad) = aacparse.static_pad("src") { srcpad.link(&sinkpad).ok(); }
+                    if let Some(sinkpad) = mux.request_pad_simple("audio_0") {
+                        if let Some(srcpad) = aacparse.static_pad("src") { let _ = srcpad.link(&sinkpad); }
                     }
                 }
 
