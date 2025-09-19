@@ -68,7 +68,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
     let pipeline_str = format!(
             concat!(
-                "rtspsrc location={camera_url} protocols=tcp do-rtsp-keep-alive=true latency=100 retry=5 timeout=20000000000 name=src ",
+                "rtspsrc location={camera_url} protocols=tcp do-rtsp-keep-alive=true latency=300 retry=5 timeout=20000000000 drop-on-latency=true name=src ",
                 // Video path: seleccionar por caps desde rtspsrc
                 "src. ! queue ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! h264parse config-interval=1 ",
                 "! tee name=t ",
@@ -177,13 +177,15 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 let appqueue = gst::ElementFactory::make("queue").build().unwrap();
 
                 // Agregar y linkear
-                let elements: Vec<&gst::Element> = [
+                let mut elements: Vec<&gst::Element> = vec![
                     &queue, &depay,
-                    alawdec.as_ref(), mulawdec.as_ref(), opusdec.as_ref(),
                     &audioconvert, &audioresample, &capsfilter, &tee,
                     &qa1, &voaacenc, &aacparse,
                     &qa2, &opusenc, &webmmux, &appqueue,
-                ].into_iter().flatten().collect();
+                ];
+                if let Some(ref d) = alawdec { elements.push(d); }
+                if let Some(ref d) = mulawdec { elements.push(d); }
+                if let Some(ref d) = opusdec { elements.push(d); }
 
                 pipeline.add_many(&elements).ok();
                 gst::Element::link_many(&[&queue, &depay]).ok();
