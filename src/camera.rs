@@ -58,18 +58,18 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                     "uridecodebin3 uri={} name=src ",
                     "tee name=t ",
                     "tee name=tee_audio ",
-                    "t. ! queue ! videoconvert ! x264enc bitrate=2000 ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au ! mux.video_0 ",
+                    "t. ! queue leaky=downstream ! videoconvert ! x264enc bitrate=2000 ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au ! mux.video_0 ",
                     "mp4mux name=mux streamable=true faststart=true fragment-duration=1000 fragment-mode=dash-or-mss ! filesink location=\"{}\" sync=false append=false ",
                     "t. ! queue leaky=downstream max-size-buffers=1 ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=640,height=360 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
                     "t. ! queue leaky=downstream max-size-buffers=10 max-size-time=300000000 ! videoconvert ! videoscale ! video/x-raw,width=1920,height=1080 ! videorate ! video/x-raw,framerate=15/1 ! jpegenc quality=90 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true ",
                     "t. ! queue leaky=downstream max-size-buffers=5 max-size-time=200000000 ! videoconvert ! videoscale ! video/x-raw,width=854,height=480 ! videorate ! video/x-raw,framerate=10/1 ! jpegenc quality=70 ! appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true ",
                     "{}",
-                    "tee_audio. ! queue ! voaacenc bitrate=128000 ! aacparse ! mux.audio_0 ",
-                    "tee_audio. ! queue ! opusenc bitrate=64000 ! webmmux streamable=true ! appsink name=audio_webm_sink sync=false max-buffers=50 drop=true"
+                    "tee_audio. ! queue leaky=downstream ! voaacenc bitrate=128000 ! aacparse ! mux.audio_0 ",
+                    "tee_audio. ! queue leaky=downstream ! opusenc bitrate=64000 ! webmmux streamable=true ! appsink name=audio_webm_sink sync=false max-buffers=50 drop=true"
                 ),
                 camera_url, daily_s,
                 if enable_hls && !segments_s.is_empty() && !playlist_s.is_empty() {
-                    format!("t. ! queue ! videoconvert ! x264enc bitrate=2000 ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au ! hlssink2 target-duration=2 max-files=5 playlist-length=5 location=\"{}\" playlist-location=\"{}\" ", segments_s, playlist_s)
+                    format!("t. ! queue leaky=downstream ! videoconvert ! x264enc bitrate=2000 ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au ! hlssink2 target-duration=2 max-files=5 playlist-length=5 location=\"{}\" playlist-location=\"{}\" ", segments_s, playlist_s)
                 } else {
                     String::new()
                 }
