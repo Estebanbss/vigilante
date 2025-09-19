@@ -55,7 +55,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
             let pipeline_str = format!(
                 concat!(
-                    "rtspsrc location={} latency=300 drop-on-latency=true do-retransmission=false ! decodebin3 name=src ",
+                    "uridecodebin3 uri={} name=src ",
                     "tee name=t ",
                     "tee name=tee_audio ",
                     "t. ! queue ! videoconvert ! x264enc bitrate=2000 ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au ! mux.video_0 ",
@@ -119,7 +119,15 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                         }
                     }
                 } else {
-                    eprintln!("⚠️ Pad no reconocido: {} -> ignorando", caps_str);
+                    eprintln!("⚠️ Pad no reconocido: {} -> conectando a fakesink para evitar not-linked", caps_str);
+                    let q = gst::ElementFactory::make("queue").name(&format!("q_unknown_{}", name)).build().unwrap();
+                    let fs = gst::ElementFactory::make("fakesink").name(&format!("fs_unknown_{}", name)).build().unwrap();
+                    fs.set_property_from_str("sync", "false");
+                    fs.set_property_from_str("async", "false");
+                    pipeline.add_many(&[&q, &fs]).ok();
+                    gst::Element::link_many(&[&q, &fs]).ok();
+                    let _ = pad.link(&q.static_pad("sink").unwrap());
+                    for e in [&q, &fs] { e.sync_state_with_parent().ok(); }
                 }
             });
         }            // Get the appsink element for event detection
