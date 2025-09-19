@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 
-// Token en query ya no se usa; autenticación por header global
+// Autenticación: por header Authorization global y opcionalmente por query `?token=` en rutas de streaming si STREAM_TOKEN_IN_QUERY=true
 
 pub async fn stream_hls_handler(
     RequireAuth: RequireAuth,

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::AppState;
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
+use axum::http::Uri;
 
 /// Comprueba la validez del token de autenticación en los encabezados de la petición.
 ///
@@ -102,7 +103,50 @@ pub async fn require_auth_middleware(
 
     let headers = req.headers();
     let method = req.method().clone();
-    let path = req.uri().path().to_string();
+    let uri: Uri = req.uri().clone();
+    let path = uri.path().to_string();
+
+    // Si está habilitado permitir token por query y es una ruta de streaming, intenta validar `?token=`
+    let is_stream_route = path.starts_with("/api/live/") || path.starts_with("/hls") || path.starts_with("/webrtc/");
+    if state.allow_query_token_streams && is_stream_route {
+        // 1) Intentar con query propia
+        if let Some(q) = uri.query() {
+            // busca token=... (decodificado)
+            let tok_opt = url::form_urlencoded::parse(q.as_bytes())
+                .find(|(k, _)| k == "token")
+                .map(|(_, v)| v.into_owned());
+            if let Some(tok) = tok_opt {
+                if tok == state.proxy_token {
+                    println!("✅ Auth OK (query token): {} {}", method, path);
+                    return next.run(req).await;
+                } else {
+                    println!("🚫 Token query inválido en {} {}", method, path);
+                }
+            }
+        }
+
+        // 2) Fallback: intentar extraer token de Referer (útil para /hls/*.ts referenciados por el .m3u8 con token)
+        if let Some(referer) = headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
+            if let Ok(url) = url::Url::parse(referer) {
+                if let Some(q) = url.query() {
+                    let tok_opt = url::form_urlencoded::parse(q.as_bytes())
+                        .find(|(k, _)| k == "token")
+                        .map(|(_, v)| v.into_owned());
+                    if let Some(tok) = tok_opt {
+                        if tok == state.proxy_token {
+                            println!("✅ Auth OK (referer token): {} {} <- {}", method, path, referer);
+                            return next.run(req).await;
+                        } else {
+                            println!("🚫 Token referer inválido en {} {}", method, path);
+                        }
+                    }
+                }
+            }
+        }
+
+        // si falla query/referer, continúa a validar header normal
+    }
+
     match check_auth(headers, &state.proxy_token).await {
         Ok(()) => {
             println!("✅ Auth OK (middleware): {} {}", method, path);
@@ -139,6 +183,42 @@ where
         let headers = &parts.headers;
         let method = parts.method.clone();
         let path = parts.uri.path().to_string();
+
+        // Igual que el middleware: aceptar token en query para rutas de stream si está habilitado
+        let is_stream_route = path.starts_with("/api/live/") || path.starts_with("/hls") || path.starts_with("/webrtc/");
+        if app_state.allow_query_token_streams && is_stream_route {
+            // 1) Intentar con query propia
+            if let Some(q) = parts.uri.query() {
+                let tok_opt = url::form_urlencoded::parse(q.as_bytes())
+                    .find(|(k, _)| k == "token")
+                    .map(|(_, v)| v.into_owned());
+                if let Some(tok) = tok_opt {
+                    if tok == app_state.proxy_token {
+                        println!("🔐 Auth OK (extractor query token): {} {}", method, path);
+                        return Ok(RequireAuth);
+                    } else {
+                        println!("🚫 Token query inválido (extractor) en {} {}", method, path);
+                    }
+                }
+            }
+            // 2) Intentar con Referer
+            if let Some(referer) = parts.headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
+                if let Ok(url) = url::Url::parse(referer) {
+                    if let Some(q) = url.query() {
+                        let tok_opt = url::form_urlencoded::parse(q.as_bytes())
+                            .find(|(k, _)| k == "token")
+                            .map(|(_, v)| v.into_owned());
+                        if let Some(tok) = tok_opt {
+                            if tok == app_state.proxy_token {
+                                println!("🔐 Auth OK (extractor referer token): {} {} <- {}", method, path, referer);
+                                return Ok(RequireAuth);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
     match check_auth(headers, &app_state.proxy_token).await {
             Ok(()) => {
         println!("🔐 Auth OK (extractor): {} {}", method, path);

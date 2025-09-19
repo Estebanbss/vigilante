@@ -41,6 +41,11 @@ CAMERA_ONVIF_URL=http://usuario:password@IP:PUERTO/onvif/ptz
 PROXY_TOKEN=mi_token_seguro
 LISTEN_ADDR=0.0.0.0:8080
 STORAGE_PATH=/ruta/al/almacenamiento
+ENABLE_HLS=true
+# Para players que no envían headers (por ejemplo, etiquetas <img> o HLS sub-requests)
+# permite pasar el token como query (?token=...). Por defecto es false.
+# STREAM_TOKEN_IN_QUERY=true|false
+STREAM_TOKEN_IN_QUERY=true
 ```
 
 ## Ejecutar
@@ -49,8 +54,8 @@ cargo run
 ```
 
 ## Endpoints
-Autenticación: Header `Authorization: Bearer ${PROXY_TOKEN}`
-También se acepta `?token=${PROXY_TOKEN}` en URLs de streaming (compatibilidad con players).
+Autenticación por defecto: Header `Authorization: Bearer ${PROXY_TOKEN}`.
+Si `STREAM_TOKEN_IN_QUERY=true`, también se acepta `?token=${PROXY_TOKEN}` en URLs de streaming (`/api/live/*`, `/hls*`, `/webrtc/*`).
 
 - GET `/api/storage` → Info de disco
 - GET `/api/storage/list?date=YYYY-MM-DD&page=1&limit=20` → Lista grabaciones

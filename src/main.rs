@@ -34,6 +34,8 @@ pub struct AppState {
     pub mjpeg_tx: broadcast::Sender<Bytes>,
     pub audio_webm_tx: broadcast::Sender<Bytes>,
     pub enable_hls: bool,
+    // Permite validar token por query (p.ej., ?token=...) en rutas de streaming
+    pub allow_query_token_streams: bool,
 }
 
 #[tokio::main]
@@ -48,6 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let storage_path = env::var("STORAGE_PATH")?;
     let enable_hls = env::var("ENABLE_HLS").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    // Soporte de compatibilidad: STREAM_MJPEG_TOKEN_IN_QUERY también habilita el modo de token en query
+    let allow_query_token_streams =
+        env::var("STREAM_TOKEN_IN_QUERY").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+        || env::var("STREAM_MJPEG_TOKEN_IN_QUERY").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -66,8 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage_path: storage_path_buf.clone(),
         pipeline: Arc::new(Mutex::new(None)),
         mjpeg_tx,
-    audio_webm_tx,
+        audio_webm_tx,
         enable_hls,
+        allow_query_token_streams,
     });
 
     // Iniciar la tarea de limpieza de almacenamiento en segundo plano
