@@ -2237,6 +2237,7 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "axum",
+ "base64",
  "bytes",
  "chrono",
  "dotenvy",
@@ -2253,6 +2254,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha1",
  "shell-escape",
  "tokio",
  "tokio-util",

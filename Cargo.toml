@@ -15,6 +15,8 @@ chrono = { version = "0.4", features = ["serde"] }
 async-stream = "0.3"
 futures = "0.3"
 rand = "0.8"
+sha1 = "0.10"
+base64 = "0.22"
 uuid = { version = "1.8", features = ["v4", "fast-rng"] }
 fs2 = "0.4"
 tokio-util = { version = "0.7", features = ["io"] }
