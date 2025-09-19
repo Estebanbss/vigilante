@@ -12,9 +12,11 @@ mod storage;
 mod stream;
 mod camera;
 mod ptz;
+mod logs;
 
 use storage::{get_storage_info, list_recordings, delete_recording, stream_recording, start_cleanup_task, get_log_file, stream_recording_tail};
 use stream::{stream_hls_handler, stream_hls_index, stream_webrtc_handler, stream_mjpeg_handler, stream_audio_handler};
+use logs::stream_journal_logs;
 use camera::{start_camera_pipeline};
 use ptz::{pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, ptz_stop};
 use axum::middleware::from_fn_with_state;
@@ -94,6 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/webrtc/*path", get(stream_webrtc_handler))
     .route("/api/live/mjpeg", get(stream_mjpeg_handler))
     .route("/api/live/audio", get(stream_audio_handler))
+        .route("/api/logs/stream", get(stream_journal_logs))
         .route("/api/storage", get(get_storage_info))
         .route("/api/storage/list", get(list_recordings))
         .route("/api/storage/delete/*path", get(delete_recording))

@@ -69,9 +69,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
     let pipeline_str = format!(
             concat!(
                 "rtspsrc location={camera_url} protocols=tcp do-rtsp-keep-alive=true latency=300 retry=5 timeout=20000000000 drop-on-latency=true name=src ",
-                // Video path: seleccionar por caps desde rtspsrc
-                "src. ! queue ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! h264parse config-interval=1 ",
-                "! tee name=t ",
+                // Tee de video (alimentado dinámicamente en pad-added)
+                "tee name=t ",
                 // Audio se maneja dinámicamente en pad-added de rtspsrc (PCMA/PCMU/OPUS)
                 // recording branch: MP4 con video Y audio
                 // PASSTHROUGH: usar H.264 directo desde la cámara (evita re-encode y reduce CPU)
@@ -110,7 +109,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             }
         };
 
-        // Manejo dinámico de pads de rtspsrc para audio compatible (PCMA/PCMU/OPUS)
+        // Manejo dinámico de pads de rtspsrc para video (H264) y audio (PCMA/PCMU/OPUS)
         if let Some(rtspsrc) = pipeline.by_name("src") {
             let pipeline_weak = pipeline.downgrade();
             let state_clone = state.clone();
@@ -123,10 +122,27 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                     .unwrap_or_default();
 
                 let name = pad.name();
-                // Solo manejar audio dinámico; video ya está en el string y negociado
                 if !caps_str.contains("application/x-rtp") { return; }
-                if !(caps_str.contains("media=audio")) { return; }
 
+                if caps_str.contains("media=video") && caps_str.contains("encoding-name=H264") {
+                    println!("🎥 Pad de video detectado: {} - {}", name, caps_str);
+                    // Construir rama: queue->rtph264depay->h264parse->tee t
+                    let qv = gst::ElementFactory::make("queue").name(&format!("qv_{}", name)).build().unwrap();
+                    let depay = gst::ElementFactory::make("rtph264depay").name(&format!("vdepay_{}", name)).build().unwrap();
+                    let parse = gst::ElementFactory::make("h264parse").name(&format!("vparse_{}", name)).build().unwrap();
+                    parse.set_property_from_str("config-interval", "1");
+                    pipeline.add_many(&[&qv, &depay, &parse]).ok();
+                    gst::Element::link_many(&[&qv, &depay, &parse]).ok();
+                    // link a tee t
+                    if let Some(t) = pipeline.by_name("t") { if let Some(sinkpad) = t.request_pad_simple("sink_%u") { if let Some(srcpad) = parse.static_pad("src") { let _=srcpad.link(&sinkpad);} } }
+                    // Link desde rtspsrc pad a qv
+                    if let Some(sinkpad) = qv.static_pad("sink") { let _ = pad.link(&sinkpad); }
+                    for e in [&qv, &depay, &parse] { e.sync_state_with_parent().ok(); }
+                    println!("✅ Video enlazado a tee principal");
+                    return;
+                }
+
+                if !(caps_str.contains("media=audio")) { return; }
                 println!("🔊 Pad de audio detectado: {} - {}", name, caps_str);
 
                 // Construimos la rama de audio según el encoding-name
