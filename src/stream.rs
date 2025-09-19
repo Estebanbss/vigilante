@@ -1,6 +1,6 @@
 use crate::{AppState, auth::RequireAuth};
 use axum::{
-    extract::{State, Path},
+    extract::{State, Path, Query},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -18,6 +18,8 @@ use std::sync::Arc;
 // use std::fs;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
+use serde::Deserialize;
+use std::time::{Duration, Instant};
 
 // Autenticación: por header Authorization global y opcionalmente por query `?token=` en rutas de streaming si STREAM_TOKEN_IN_QUERY=true
 
@@ -75,16 +77,32 @@ pub async fn stream_webrtc_handler(
 pub async fn stream_mjpeg_handler(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
+    Query(params): Query<MjpegParams>,
 ) -> Result<Response, StatusCode> {
     println!("🎯 Handler: stream_mjpeg_handler");
-    // Suscribimos al broadcast de JPEGs producido por el pipeline principal
-    let mut rx = state.mjpeg_tx.subscribe();
+    // Suscribimos al broadcast de JPEGs (high o low) producido por el pipeline principal
+    let mut rx = if params.preset.as_deref() == Some("low") {
+        state.mjpeg_low_tx.subscribe()
+    } else {
+        state.mjpeg_tx.subscribe()
+    };
 
     // Creamos un body streaming multipart/x-mixed-replace
     let boundary = "frame";
     let mut first = true;
+    let target_fps = params.fps.unwrap_or(0);
+    let frame_interval = if target_fps > 0 { Some(Duration::from_secs_f64(1.0 / target_fps as f64)) } else { None };
+    let mut last_sent: Option<Instant> = None;
     let stream = async_stream::stream! {
         while let Ok(jpeg) = rx.recv().await {
+            // FPS throttling per-request
+            if let Some(iv) = frame_interval {
+                let now = Instant::now();
+                if let Some(last) = last_sent {
+                    if now.duration_since(last) < iv { continue; }
+                }
+                last_sent = Some(now);
+            }
             let mut chunk = Vec::with_capacity(jpeg.len() + 256);
             if first {
                 first = false;
@@ -106,6 +124,16 @@ pub async fn stream_mjpeg_handler(
     headers.insert(axum::http::header::CONTENT_TYPE, format!("multipart/x-mixed-replace; boundary={}", boundary).parse().unwrap());
     headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
     Ok(resp)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MjpegParams {
+    pub fps: Option<u32>,
+    pub preset: Option<String>, // "high" (default) o "low"
+    // Futuro: calidad/resolución. Por ahora no re-comprimimos para evitar alto CPU.
+    // pub quality: Option<u8>,
+    // pub width: Option<u32>,
+    // pub height: Option<u32>,
 }
 
 // Live audio endpoint over chunked HTTP (WebM Opus)

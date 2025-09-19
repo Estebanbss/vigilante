@@ -32,6 +32,7 @@ pub struct AppState {
     pub storage_path: PathBuf,
     pub pipeline: Arc<Mutex<Option<gst::Pipeline>>>,
     pub mjpeg_tx: broadcast::Sender<Bytes>,
+    pub mjpeg_low_tx: broadcast::Sender<Bytes>,
     pub audio_webm_tx: broadcast::Sender<Bytes>,
     pub enable_hls: bool,
     // Permite validar token por query (p.ej., ?token=...) en rutas de streaming
@@ -63,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage_path_buf = PathBuf::from(&storage_path);
 
     let (mjpeg_tx, _mjpeg_rx) = broadcast::channel::<Bytes>(32);
+    let (mjpeg_low_tx, _mjpeg_low_rx) = broadcast::channel::<Bytes>(32);
     let (audio_webm_tx, _audio_rx) = broadcast::channel::<Bytes>(32);
 
     let state = Arc::new(AppState {
@@ -72,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage_path: storage_path_buf.clone(),
         pipeline: Arc::new(Mutex::new(None)),
         mjpeg_tx,
+        mjpeg_low_tx,
         audio_webm_tx,
         enable_hls,
         allow_query_token_streams,
