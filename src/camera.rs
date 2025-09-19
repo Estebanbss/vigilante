@@ -78,8 +78,6 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 // Aseguramos formato AVC/au para MP4
                 "t. ! queue ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au,profile=baseline ! mux.video_0 ",
                 // El audio AAC hacia el MP4 se conecta dinámicamente cuando se detecta audio
-                // Crear appsink para audio webm (se enlaza dinámicamente)
-                "appsink name=audio_webm_sink sync=false max-buffers=50 drop=true ",
                 // MP4 fragmentado compatible con streaming progresivo
                 "mp4mux name=mux streamable=true faststart=true fragment-duration=1000 fragment-mode=dash-or-mss ",
                 "! filesink location=\"{daily}\" sync=false append=false ",
@@ -115,7 +113,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         // Manejo dinámico de pads de rtspsrc para audio compatible (PCMA/PCMU/OPUS)
         if let Some(rtspsrc) = pipeline.by_name("src") {
             let pipeline_weak = pipeline.downgrade();
-            rtspsrc.connect_pad_added(move |src, pad| {
+            let state_clone = state.clone();
+            rtspsrc.connect_pad_added(move |_src, pad| {
                 let Some(pipeline) = pipeline_weak.upgrade() else { return; };
                 let pad_caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
                 let caps_str = pad_caps
@@ -127,6 +126,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 // Solo manejar audio dinámico; video ya está en el string y negociado
                 if !caps_str.contains("application/x-rtp") { return; }
                 if !(caps_str.contains("media=audio")) { return; }
+
+                println!("🔊 Pad de audio detectado: {} - {}", name, caps_str);
 
                 // Construimos la rama de audio según el encoding-name
                 let is_pcma = caps_str.contains("encoding-name=PCMA");
@@ -173,39 +174,39 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 opusenc.set_property_from_str("bitrate", "64000");
                 let webmmux = gst::ElementFactory::make("webmmux").name(&format!("webma_dyn_{}", name)).build().unwrap();
                 webmmux.set_property_from_str("streamable", "true");
-                let audio_sink_el = pipeline.by_name("audio_webm_sink");
-                let appqueue = gst::ElementFactory::make("queue").build().unwrap();
+                let audio_sink = gst::ElementFactory::make("appsink").name(&format!("audio_webm_sink_dyn_{}", name)).build().unwrap();
+                audio_sink.set_property_from_str("sync", "false");
+                audio_sink.set_property_from_str("max-buffers", "50");
+                audio_sink.set_property_from_str("drop", "true");
 
                 // Agregar y linkear
-                let mut elements: Vec<&gst::Element> = vec![
+                let audio_sink_app = audio_sink.clone().downcast::<gst_app::AppSink>().unwrap();
+                let txa = state_clone.audio_webm_tx.clone();
+                audio_sink_app.set_callbacks(
+                    gst_app::AppSinkCallbacks::builder()
+                        .new_sample(move |s| {
+                            let sample = s.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                            let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                            let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                            let data = Bytes::copy_from_slice(map.as_ref());
+                            let _ = txa.send(data);
+                            Ok(gst::FlowSuccess::Ok)
+                        })
+                        .build(),
+                );
+
+                let elements: Vec<&gst::Element> = vec![
                     &queue, &depay,
                     &audioconvert, &audioresample, &capsfilter, &tee,
                     &qa1, &voaacenc, &aacparse,
-                    &qa2, &opusenc, &webmmux, &appqueue,
+                    &qa2, &opusenc, &webmmux, &audio_sink,
                 ];
-                if let Some(ref d) = alawdec { elements.push(d); }
-                if let Some(ref d) = mulawdec { elements.push(d); }
-                if let Some(ref d) = opusdec { elements.push(d); }
+                let mut all_elements = elements;
+                if let Some(ref d) = alawdec { all_elements.push(d); }
+                if let Some(ref d) = mulawdec { all_elements.push(d); }
+                if let Some(ref d) = opusdec { all_elements.push(d); }
 
-                pipeline.add_many(&elements).ok();
-                gst::Element::link_many(&[&queue, &depay]).ok();
-                if let Some(d) = &alawdec { depay.link(d).ok(); d.link(&audioconvert).ok(); }
-                if let Some(d) = &mulawdec { depay.link(d).ok(); d.link(&audioconvert).ok(); }
-                if let Some(d) = &opusdec { depay.link(d).ok(); d.link(&audioconvert).ok(); }
-                if alawdec.is_none() && mulawdec.is_none() && opusdec.is_none() {
-                    // sin decodificador, intentar directo a convert
-                    depay.link(&audioconvert).ok();
-                }
-                gst::Element::link_many(&[&audioconvert, &audioresample, &capsfilter, &tee]).ok();
-                gst::Element::link_many(&[&qa1, &voaacenc, &aacparse]).ok();
-                gst::Element::link_many(&[&qa2, &opusenc, &webmmux, &appqueue]).ok();
-
-                // link a app sink (audio webm)
-                if let Some(audio_sink_el) = audio_sink_el {
-                    if let Some(appsink_sinkpad) = audio_sink_el.static_pad("sink") {
-                        if let Some(srcpad) = appqueue.static_pad("src") { srcpad.link(&appsink_sinkpad).ok(); }
-                    }
-                }
+                pipeline.add_many(&all_elements).ok();
 
                 // link a mux.audio_0
                 if let Some(mux) = pipeline.by_name("mux") {
@@ -218,7 +219,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 let Some(sinkpad) = queue.static_pad("sink") else { return; };
                 pad.link(&sinkpad).ok();
 
-                for e in elements { e.sync_state_with_parent().ok(); }
+                for e in all_elements { e.sync_state_with_parent().ok(); }
                 println!("🔊 Audio dinámico enlazado: {}", caps_str);
             });
         }
@@ -350,23 +351,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             );
         }
 
-        // AUDIO appsink (webm chunks): publish to broadcast channel
-        if let Some(audio_sink) = pipeline.by_name("audio_webm_sink") {
-            let audio_sink = audio_sink.downcast::<gst_app::AppSink>().unwrap();
-            let txa = state.audio_webm_tx.clone();
-            audio_sink.set_callbacks(
-                gst_app::AppSinkCallbacks::builder()
-                    .new_sample(move |s| {
-                        let sample = s.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                        let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                        let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                        let data = Bytes::copy_from_slice(map.as_ref());
-                        let _ = txa.send(data);
-                        Ok(gst::FlowSuccess::Ok)
-                    })
-                    .build(),
-            );
-        }
+        
         
         // Get the bus to receive messages from the pipeline
         let bus = pipeline.bus().unwrap();
