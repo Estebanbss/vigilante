@@ -55,7 +55,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
             let pipeline_str = format!(
                 concat!(
-                    "uridecodebin3 uri={} name=src ",
+                    "rtspsrc location={} latency=300 drop-on-latency=true do-retransmission=false ! decodebin3 name=src ",
                     "tee name=t ",
                     "tee name=tee_audio ",
                     "t. ! queue ! videoconvert ! x264enc bitrate=2000 ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au ! mux.video_0 ",
@@ -88,7 +88,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 }
             };
 
-        // Manejo dinámico de pads de uridecodebin3 para video/audio raw
+        // Manejo dinámico de pads de decodebin3 para video/audio raw
         if let Some(src) = pipeline.by_name("src") {
             let pipeline_weak = pipeline.downgrade();
             src.connect_pad_added(move |_src, pad| {
