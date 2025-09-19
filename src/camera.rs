@@ -56,12 +56,10 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             (
                 format!(
                     concat!(
-                        // Crear mux TS y encadenar a hlssink2 primero (sin caps forzados)
-                        " mpegtsmux name=hlsmux ! queue ! hlssink2 target-duration=2 max-files=5 playlist-length=5 location=\"{segments}\" playlist-location=\"{playlist}\" ",
-                        // Conectar VIDEO al mux (request sink pad)
-                        " t. ! queue ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au ! hlsmux. ",
-                        // Conectar AUDIO al mux (request sink pad) y forzar ADTS vía caps
-                        " tee_audio. ! queue ! aacparse ! audio/mpeg, mpegversion=4, stream-format=adts ! hlsmux. "
+                        // HLS pipeline: video y audio a mpegtsmux, luego a hlssink2
+                        " t. ! queue ! h264parse config-interval=1 ! video/x-h264,stream-format=byte-stream,alignment=au ",
+                        "! mpegtsmux name=hlsmux ! video/mpegts,systemstream=true,packetsize=188 ! queue ! hlssink2 target-duration=2 max-files=5 playlist-length=5 location=\"{segments}\" playlist-location=\"{playlist}\" ",
+                        " tee_audio. ! queue ! aacparse ! audio/mpeg,mpegversion=4,stream-format=adts ! hlsmux. "
                     ),
                     segments = segments_s,
                     playlist = playlist_s,
