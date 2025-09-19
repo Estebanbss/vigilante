@@ -81,13 +81,10 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 "ta. ! queue ! opusenc bitrate=64000 ! webmmux streamable=true name=webma ",
                 "! appsink name=audio_webm_sink sync=false max-buffers=50 drop=true ",
                 // recording branch: MP4 con video Y audio
-                "t. ! queue ! decodebin ! videoconvert ! video/x-raw,format=I420 ",
-                // Encoder H.264 sin B-frames, baja latencia y GOP corto
-                "! x264enc tune=zerolatency speed-preset=ultrafast bitrate=2000 key-int-max=30 intra-refresh=false b-adapt=0 bframes=0 threads=2 ",
-                // Asegurar SPS/PPS y alineación por unidad de acceso en formato 'avc' (no Annex-B)
-                "! h264parse config-interval=-1 disable-passthrough=true ! video/x-h264,stream-format=avc,alignment=au,profile=baseline ",
-                "! mux.video_0 ",
-                // Audio para MP4 recording
+                // PASSTHROUGH: usar H.264 directo desde la cámara (evita re-encode y reduce CPU)
+                // Aseguramos formato AVC/au para MP4
+                "t. ! queue ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au,profile=baseline ! mux.video_0 ",
+                // Conectar audio AAC al MP4 para que las grabaciones incluyan audio
                 "tee_audio. ! queue ! mux.audio_0 ",
                 // MP4 fragmentado compatible con streaming progresivo
                 "mp4mux name=mux streamable=true faststart=true fragment-duration=1000 fragment-mode=dash-or-mss ",
@@ -95,7 +92,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 // detector branch: decodificar a GRAY8 reducido para análisis rápido
                 "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=640,height=360 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
                 // mjpeg branch: decode->scale->jpeg->appsink (solo video)
-                "t. ! queue leaky=downstream max-size-buffers=1 ! decodebin ! videoconvert ! videoscale ! video/x-raw,width=1920,height=1080 ! jpegenc quality=100 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true",
+                // Alta resolución (1080p) con FPS limitado para reducir carga sin perder detalle
+                "t. ! queue leaky=downstream max-size-buffers=10 max-size-time=300000000 ! decodebin ! videoconvert ! videoscale ! video/x-raw,width=1920,height=1080 ! videorate ! video/x-raw,framerate=10/1 ! jpegenc quality=90 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true",
                 "{hls_part}"
             ),
             camera_url = camera_url,
