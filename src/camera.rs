@@ -306,7 +306,7 @@ fn handle_audio_pad(pipeline: &Pipeline, src_pad: &gst::Pad, encoding: &str, sta
 fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Branch 1: AAC para grabación MP4
     let queue1 = gst::ElementFactory::make("queue")
-        .property("leaky", gst::QueueLeaky::Downstream)
+        .property("leaky", "downstream")
         .property("max-size-buffers", 10u32)
         .build()?;
     let aacenc = gst::ElementFactory::make("voaacenc")
