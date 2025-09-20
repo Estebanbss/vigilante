@@ -56,15 +56,15 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                     "uridecodebin3 uri={} name=src ",
                     "tee name=t ",
                     "tee name=tee_audio ",
-                    "t. ! queue leaky=downstream ! videoconvert ! x264enc bitrate=500 ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au ! mux.video_0 ",
                     "mp4mux name=mux streamable=true faststart=true fragment-duration=1000 fragment-mode=dash-or-mss ! filesink location=\"{}\" sync=false append=false ",
+                    "t. ! queue leaky=downstream ! videoconvert ! x264enc bitrate=500 ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au ! mux.video_0 ",
                     "t. ! queue leaky=downstream max-size-buffers=1 ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=320,height=180 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
                     "t. ! queue leaky=downstream max-size-buffers=10 max-size-time=300000000 ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! videorate ! video/x-raw,framerate=15/1 ! jpegenc quality=90 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true ",
                     "t. ! queue leaky=downstream max-size-buffers=5 max-size-time=200000000 ! videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=10/1 ! jpegenc quality=70 ! appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true ",
-                    "tee_audio. ! queue leaky=downstream max-size-buffers=5 max-size-time=200000000 ! audioconvert ! audioresample ! voaacenc bitrate=32000 ! mp4mux name=mux ! filesink location={}/recording_{}.mp4 ",
+                    "tee_audio. ! queue leaky=downstream max-size-buffers=5 max-size-time=200000000 ! audioconvert ! audioresample ! voaacenc bitrate=32000 ! mux.audio_0 ",
                     "tee_audio. ! queue leaky=downstream ! opusenc bitrate=16000 ! webmmux streamable=true ! appsink name=audio_webm_sink sync=false max-buffers=50 drop=true"
                 ),
-                camera_url, daily_s, day_dir.display(), day_dir_name
+                camera_url, daily_s
             );            println!("📷 Recording pipeline: {}", pipeline_str);
             println!("🔄 Creando pipeline GStreamer...");
             let pipeline = match gst::parse::launch(&pipeline_str) {
