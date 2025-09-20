@@ -48,16 +48,18 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
         let daily_s = daily_path.to_string_lossy();
 
-        // Pipeline simplificado - sin audio por ahora para evitar complejidades
+        // Pipeline con audio y video
         let pipeline_str = format!(
             concat!(
-                "rtspsrc location={} latency=2000 protocols=tcp ! ",
-                "rtph264depay ! h264parse ! tee name=t_video ",
+                // Fuente RTSP
+                "rtspsrc location={} latency=2000 protocols=tcp name=src ",
                 
-                // Branch 1: Recording to MP4 (sin recodificar H.264)
+                // Video: H.264 depayload
+                "src. ! rtph264depay ! h264parse ! tee name=t_video ",
+                
+                // Branch 1: Recording to MP4 con muxer compartido
                 "t_video. ! queue leaky=2 max-size-buffers=100 max-size-time=5000000000 ! ",
-                "h264parse config-interval=-1 ! ",
-                "mp4mux ! filesink location=\"{}\" sync=false ",
+                "h264parse config-interval=-1 ! mp4mux name=mux ! filesink location=\"{}\" sync=false ",
                 
                 // Branch 2: Motion detection (decode + grayscale)
                 "t_video. ! queue leaky=2 max-size-buffers=3 ! ",
@@ -75,7 +77,9 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 "t_video. ! queue leaky=2 max-size-buffers=3 ! ",
                 "avdec_h264 ! videoconvert ! videoscale ! ",
                 "video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=8/1 ! ",
-                "jpegenc quality=70 ! appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true"
+                "jpegenc quality=70 ! appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true "
+                
+                // Audio se conectará dinámicamente cuando aparezca el pad
             ),
             camera_url, daily_s
         );
@@ -96,6 +100,9 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             }
         };
 
+        // Configurar dynamic pads para rtspsrc
+        setup_dynamic_audio(&pipeline, &state);
+        
         // Configurar motion detection
         setup_motion_detection(&pipeline, &state);
         
@@ -200,6 +207,160 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             println!("🕛 Nuevo día - creando nuevo archivo...");
         }
     }
+}
+
+fn setup_dynamic_audio(pipeline: &Pipeline, state: &Arc<AppState>) {
+    let Some(rtspsrc) = pipeline.by_name("src") else {
+        eprintln!("❌ No se encontró rtspsrc");
+        return;
+    };
+
+    let pipeline_weak = pipeline.downgrade();
+    let state_clone = state.clone();
+    
+    rtspsrc.connect_pad_added(move |_src, src_pad| {
+        let Some(pipeline) = pipeline_weak.upgrade() else { return; };
+        
+        let pad_caps = src_pad.current_caps()
+            .or_else(|| Some(src_pad.query_caps(None::<&gst::Caps>)));
+        
+        if let Some(caps) = pad_caps {
+            let structure = caps.structure(0).unwrap();
+            let media_type = structure.name();
+            
+            if media_type.starts_with("application/x-rtp") {
+                if let Ok(encoding_name) = structure.get::<&str>("encoding-name") {
+                    match encoding_name {
+                        "H264" => {
+                            println!("🎥 Pad de video H.264 detectado (ya conectado)");
+                        }
+                        "PCMA" | "PCMU" | "L16" | "OPUS" | "MP4A-LATM" => {
+                            println!("🎵 Pad de audio detectado: {}", encoding_name);
+                            if let Err(e) = handle_audio_pad(&pipeline, src_pad, encoding_name, &state_clone) {
+                                eprintln!("⚠️ Error configurando audio: {}", e);
+                            }
+                        }
+                        _ => {
+                            println!("🔍 Pad desconocido: {}", encoding_name);
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn handle_audio_pad(pipeline: &Pipeline, src_pad: &gst::Pad, encoding: &str, state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let depayloader_name = match encoding {
+        "PCMA" => "rtppcmadepay",
+        "PCMU" => "rtppcmudepay", 
+        "L16" => "rtpL16depay",
+        "OPUS" => "rtpopusdepay",
+        "MP4A-LATM" => "rtpmp4adepay",
+        _ => return Ok(())
+    };
+
+    println!("🔊 Configurando audio: {} -> {}", encoding, depayloader_name);
+
+    // Crear elementos de audio dinámicamente
+    let depay = gst::ElementFactory::make(depayloader_name).build()?;
+    let convert = gst::ElementFactory::make("audioconvert").build()?;
+    let resample = gst::ElementFactory::make("audioresample").build()?;
+    let tee = gst::ElementFactory::make("tee").name("tee_audio").build()?;
+
+    pipeline.add_many([&depay, &convert, &resample, &tee])?;
+    gst::Element::link_many([&depay, &convert, &resample, &tee])?;
+
+    // Conectar el pad de origen
+    let sink_pad = depay.static_pad("sink").unwrap();
+    src_pad.link(&sink_pad)?;
+
+    // Crear branches de audio
+    create_audio_branches(pipeline, &tee, state)?;
+
+    // Sincronizar estado
+    depay.sync_state_with_parent()?;
+    convert.sync_state_with_parent()?;
+    resample.sync_state_with_parent()?;
+    tee.sync_state_with_parent()?;
+
+    println!("✅ Audio configurado correctamente");
+    Ok(())
+}
+
+fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Branch 1: AAC para grabación MP4
+    let queue1 = gst::ElementFactory::make("queue")
+        .property("leaky", 2i32) // downstream
+        .property("max-size-buffers", 10u32)
+        .build()?;
+    let aacenc = gst::ElementFactory::make("voaacenc")
+        .property("bitrate", 64000i32) // 64kbps para buena calidad
+        .build()?;
+    
+    pipeline.add_many([&queue1, &aacenc])?;
+    gst::Element::link_many([&queue1, &aacenc])?;
+    
+    let tee_pad1 = tee.request_pad_simple("src_%u").unwrap();
+    let queue_pad1 = queue1.static_pad("sink").unwrap();
+    tee_pad1.link(&queue_pad1)?;
+    
+    // Conectar al mux del MP4
+    if let Some(mux) = pipeline.by_name("mux") {
+        let aac_src = aacenc.static_pad("src").unwrap();
+        let mux_sink = mux.request_pad_simple("audio_0").unwrap();
+        aac_src.link(&mux_sink)?;
+        println!("🔗 Audio AAC conectado al MP4");
+    }
+
+    // Branch 2: Opus para streaming en tiempo real
+    let queue2 = gst::ElementFactory::make("queue")
+        .property("leaky", 2i32)
+        .property("max-size-buffers", 5u32)
+        .build()?;
+    let opusenc = gst::ElementFactory::make("opusenc")
+        .property("bitrate", 32000i32) // 32kbps para streaming eficiente
+        .build()?;
+    let webmmux = gst::ElementFactory::make("webmmux")
+        .property("streamable", true)
+        .build()?;
+    let appsink = gst::ElementFactory::make("appsink")
+        .name("audio_webm_sink")
+        .property("sync", false)
+        .property("max-buffers", 20u32)
+        .property("drop", true)
+        .build()?;
+
+    pipeline.add_many([&queue2, &opusenc, &webmmux, &appsink])?;
+    gst::Element::link_many([&queue2, &opusenc, &webmmux, &appsink])?;
+
+    let tee_pad2 = tee.request_pad_simple("src_%u").unwrap();
+    let queue_pad2 = queue2.static_pad("sink").unwrap();
+    tee_pad2.link(&queue_pad2)?;
+
+    // Configurar callback para audio WebM streaming
+    let audio_sink_app = appsink.clone().downcast::<gst_app::AppSink>().unwrap();
+    let tx_audio = state.audio_webm_tx.clone();
+    audio_sink_app.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |s| {
+                let sample = s.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                let data = Bytes::copy_from_slice(map.as_ref());
+                let _ = tx_audio.send(data); // Best effort broadcast
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+
+    // Sincronizar estados
+    for element in [&queue1, &aacenc, &queue2, &opusenc, &webmmux, &appsink] {
+        element.sync_state_with_parent()?;
+    }
+
+    println!("🎵 Branches de audio creados: AAC para MP4, Opus para streaming");
+    Ok(())
 }
 
 fn setup_motion_detection(pipeline: &Pipeline, state: &Arc<AppState>) {
