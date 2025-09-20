@@ -324,10 +324,18 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
     
     // Conectar al mux del MP4
     if let Some(mux) = pipeline.by_name("mux") {
-        let aac_src = aacenc.static_pad("src").unwrap();
-        let mux_sink = mux.request_pad_simple("audio_0").unwrap();
-        aac_src.link(&mux_sink)?;
-        println!("🔗 Audio AAC conectado al MP4");
+        if let (Some(aac_src), Some(mux_sink)) = (
+            aacenc.static_pad("src"),
+            mux.request_pad_simple("audio_0")
+        ) {
+            if let Err(e) = aac_src.link(&mux_sink) {
+                eprintln!("⚠️ Error conectando audio AAC al MP4: {}", e);
+            } else {
+                println!("🔗 Audio AAC conectado al MP4");
+            }
+        } else {
+            eprintln!("⚠️ No se pudieron obtener los pads para conectar audio al MP4");
+        }
     }
 
     // Branch 2: Opus para streaming en tiempo real
