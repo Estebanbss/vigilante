@@ -251,12 +251,12 @@ fn setup_dynamic_audio(pipeline: &Pipeline, state: &Arc<AppState>) {
 }
 
 fn handle_audio_pad(pipeline: &Pipeline, src_pad: &gst::Pad, encoding: &str, state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let depayloader_name = match encoding {
-        "PCMA" => "rtppcmadepay",
-        "PCMU" => "rtppcmudepay", 
-        "L16" => "rtpL16depay",
-        "OPUS" => "rtpopusdepay",
-        "MP4A-LATM" => "rtpmp4adepay",
+    let (depayloader_name, decoder_name) = match encoding {
+        "PCMA" => ("rtppcmadepay", Some("alawdec")),
+        "PCMU" => ("rtppcmudepay", Some("mulawdec")), 
+        "L16" => ("rtpL16depay", None),
+        "OPUS" => ("rtpopusdepay", None),
+        "MP4A-LATM" => ("rtpmp4adepay", None),
         _ => return Ok(())
     };
 
@@ -268,8 +268,15 @@ fn handle_audio_pad(pipeline: &Pipeline, src_pad: &gst::Pad, encoding: &str, sta
     let resample = gst::ElementFactory::make("audioresample").build()?;
     let tee = gst::ElementFactory::make("tee").name("tee_audio").build()?;
 
-    pipeline.add_many([&depay, &convert, &resample, &tee])?;
-    gst::Element::link_many([&depay, &convert, &resample, &tee])?;
+    // Crear decoder si es necesario para G.711
+    if let Some(decoder_name) = decoder_name {
+        let decoder = gst::ElementFactory::make(decoder_name).build()?;
+        pipeline.add_many([&depay, &decoder, &convert, &resample, &tee])?;
+        gst::Element::link_many([&depay, &decoder, &convert, &resample, &tee])?;
+    } else {
+        pipeline.add_many([&depay, &convert, &resample, &tee])?;
+        gst::Element::link_many([&depay, &convert, &resample, &tee])?;
+    }
 
     // Conectar el pad de origen
     let sink_pad = depay.static_pad("sink").unwrap();
@@ -280,6 +287,14 @@ fn handle_audio_pad(pipeline: &Pipeline, src_pad: &gst::Pad, encoding: &str, sta
 
     // Sincronizar estado
     depay.sync_state_with_parent()?;
+    if let Some(decoder_name) = decoder_name {
+        // Sincronizar el decoder si existe
+        if let Some(decoder) = pipeline.children().iter().find(|e| {
+            e.name().starts_with(decoder_name)
+        }) {
+            decoder.sync_state_with_parent()?;
+        }
+    }
     convert.sync_state_with_parent()?;
     resample.sync_state_with_parent()?;
     tee.sync_state_with_parent()?;
