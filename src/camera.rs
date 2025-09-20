@@ -48,20 +48,17 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             // Pipeline para grabación continua en archivo diario
             // Single RTSP source with tee to: recording(mp4), detector(appsink), mjpeg(appsink)
             let daily_s = daily_path.to_string_lossy();
-            let enable_hls = false; // Deshabilitado para simplificar
-            let (segments_s, playlist_s) = (String::new(), String::new());
 
             let pipeline_str = format!(
                 concat!(
-                    "uridecodebin3 uri={} name=src ",
-                    "tee name=t ",
-                    "tee name=tee_audio ",
-                    "mp4mux name=mux streamable=true faststart=true fragment-duration=1000 fragment-mode=dash-or-mss ! filesink location=\"{}\" sync=false append=false ",
-                    "t. ! queue leaky=downstream ! videoconvert ! x264enc bitrate=500 ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au ! mux.video_0 ",
+                    "playbin3 uri={} name=player ",
+                    "player. ! queue leaky=downstream ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! tee name=t ",
+                    "t. ! queue leaky=downstream ! videoconvert ! x264enc bitrate=500 ! h264parse config-interval=-1 ! video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux ! filesink location=\"{}\" sync=false append=false ",
                     "t. ! queue leaky=downstream max-size-buffers=1 ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=320,height=180 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
                     "t. ! queue leaky=downstream max-size-buffers=10 max-size-time=300000000 ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! videorate ! video/x-raw,framerate=15/1 ! jpegenc quality=90 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true ",
                     "t. ! queue leaky=downstream max-size-buffers=5 max-size-time=200000000 ! videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=10/1 ! jpegenc quality=70 ! appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true ",
-                    "tee_audio. ! queue leaky=downstream max-size-buffers=5 max-size-time=200000000 ! audioconvert ! audioresample ! voaacenc bitrate=32000 ! mux.audio_0 ",
+                    "player. ! queue leaky=downstream ! audioconvert ! audioresample ! tee name=tee_audio ",
+                    "tee_audio. ! queue leaky=downstream max-size-buffers=5 max-size-time=200000000 ! voaacenc bitrate=32000 ! mux.audio_0 ",
                     "tee_audio. ! queue leaky=downstream ! opusenc bitrate=16000 ! webmmux streamable=true ! appsink name=audio_webm_sink sync=false max-buffers=50 drop=true"
                 ),
                 camera_url, daily_s
@@ -80,49 +77,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 }
             };
 
-        // Manejo dinámico de pads de decodebin3 para video/audio raw
-        if let Some(src) = pipeline.by_name("src") {
-            let pipeline_weak = pipeline.downgrade();
-            src.connect_pad_added(move |_src, pad| {
-                let Some(pipeline) = pipeline_weak.upgrade() else { return; };
-                let pad_caps = pad.current_caps().unwrap_or_else(|| pad.query_caps(None));
-                let caps_str = pad_caps
-                    .structure(0)
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-
-                let name = pad.name();
-                println!("Pad added: {} caps: {}", name, caps_str);
-
-                if caps_str.contains("video/x-raw") {
-                    println!("🎥 Linking raw video pad to tee");
-                    if let Some(t) = pipeline.by_name("t") {
-                        if let Some(sinkpad) = t.request_pad_simple("sink_%u") {
-                            let _ = pad.link(&sinkpad);
-                            println!("✅ Raw video linked to tee");
-                        }
-                    }
-                } else if caps_str.contains("audio/x-raw") {
-                    println!("🔊 Linking raw audio pad to tee_audio");
-                    if let Some(tee_audio) = pipeline.by_name("tee_audio") {
-                        if let Some(sinkpad) = tee_audio.request_pad_simple("sink_%u") {
-                            let _ = pad.link(&sinkpad);
-                            println!("✅ Raw audio linked to tee_audio");
-                        }
-                    }
-                } else {
-                    eprintln!("⚠️ Pad no reconocido: {} -> conectando a fakesink para evitar not-linked", caps_str);
-                    let q = gst::ElementFactory::make("queue").name(&format!("q_unknown_{}", name)).build().unwrap();
-                    let fs = gst::ElementFactory::make("fakesink").name(&format!("fs_unknown_{}", name)).build().unwrap();
-                    fs.set_property_from_str("sync", "false");
-                    fs.set_property_from_str("async", "false");
-                    pipeline.add_many(&[&q, &fs]).ok();
-                    gst::Element::link_many(&[&q, &fs]).ok();
-                    let _ = pad.link(&q.static_pad("sink").unwrap());
-                    for e in [&q, &fs] { e.sync_state_with_parent().ok(); }
-                }
-            });
-        }            // Get the appsink element for event detection
+        // No necesitamos manejo manual de pads con playbin3
+        // playbin3 maneja automáticamente la negociación RTSP            // Get the appsink element for event detection
             let appsink = pipeline
                 .by_name("detector")
                 .unwrap()
