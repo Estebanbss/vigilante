@@ -14,7 +14,7 @@ mod camera;
 mod ptz;
 mod logs;
 
-use storage::{get_storage_info, list_recordings, delete_recording, stream_recording, start_cleanup_task, get_log_file, stream_recording_tail, storage_stream_ws, recordings_stream_ws};
+use storage::{get_storage_info, list_recordings, delete_recording, stream_recording, start_cleanup_task, get_log_file, stream_recording_tail, storage_stream_ws, recordings_stream_ws, stream_recording_logs_sse};
 use stream::{stream_hls_handler, stream_hls_index, stream_webrtc_handler, stream_mjpeg_handler, stream_audio_handler};
 use logs::stream_journal_logs;
 use camera::{start_camera_pipeline};
@@ -105,6 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/recordings/stream/*path", get(stream_recording))
     .route("/api/recordings/stream/tail/*path", get(stream_recording_tail))
         .route("/api/recordings/log/:date", get(get_log_file))
+        .route("/api/recordings/log/:date/stream", get(stream_recording_logs_sse))
         // Rutas para el control PTZ
         .route("/api/ptz/pan/left", post(pan_left))
         .route("/api/ptz/pan/right", post(pan_right))

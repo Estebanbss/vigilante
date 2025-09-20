@@ -11,12 +11,13 @@ use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 use fs2;
 use chrono::{DateTime, Utc};
 use tokio::{fs::File, time::sleep};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader, AsyncBufReadExt};
 use bytes::Bytes;
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use tokio::time;
 use sha1::{Digest, Sha1};
 use url;
+use axum::http::header;
 
 // Estructura para la respuesta estándar de la API
 #[derive(Serialize)]
@@ -620,4 +621,84 @@ async fn handle_recordings_stream(mut socket: WebSocket, state: Arc<AppState>) {
             last_hash = hash;
         }
     }
+}
+
+// Nueva función SSE para streaming de logs de grabaciones en tiempo real
+pub async fn stream_recording_logs_sse(
+    RequireAuth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(date): Path<String>,
+) -> Result<Response, StatusCode> {
+    println!("🎯 Handler: stream_recording_logs_sse -> {}", date);
+
+    // Construir la ruta del archivo de log
+    let file_name = format!("{}-log.txt", date);
+    let day_dir = match chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") {
+        Ok(d) => state.storage_path.join(d.format("%d-%m-%y").to_string()),
+        Err(_) => state.storage_path.clone(),
+    };
+    let full_path_new = day_dir.join(&file_name);
+    let log_path = if full_path_new.exists() { full_path_new } else { state.storage_path.join(&file_name) };
+
+    // Verificar que el archivo existe
+    if !log_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Abrir el archivo para lectura
+    let file = File::open(&log_path).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut reader = BufReader::new(file);
+
+    // Crear stream SSE
+    let stream = async_stream::stream! {
+        let mut buf = String::new();
+        let mut last_pos: u64 = 0;
+
+        // Enviar evento de conexión
+        yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b":connected\n\n"));
+
+        loop {
+            // Verificar si el archivo ha crecido
+            let metadata = match tokio::fs::metadata(&log_path).await {
+                Ok(m) => m,
+                Err(_) => break, // Archivo eliminado
+            };
+
+            let current_size = metadata.len();
+
+            // Si el archivo ha crecido, leer las nuevas líneas
+            if current_size > last_pos {
+                // Mover el cursor a la última posición leída
+                if let Ok(_) = reader.seek(std::io::SeekFrom::Start(last_pos)).await {
+                    buf.clear();
+                    while let Ok(read) = reader.read_line(&mut buf).await {
+                        if read == 0 {
+                            break; // EOF
+                        }
+
+                        // Enviar línea como evento SSE
+                        let line = format!("data: {}\n\n", buf.trim_end_matches(['\n', '\r']));
+                        yield Ok(axum::body::Bytes::from(line));
+
+                        buf.clear();
+                    }
+                }
+
+                last_pos = current_size;
+            }
+
+            // Esperar un poco antes de verificar nuevamente
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+    };
+
+    // Crear respuesta SSE
+    let mut resp = Response::new(Body::from_stream(stream));
+    let headers = resp.headers_mut();
+    headers.insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+    headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    headers.insert(header::CONNECTION, "keep-alive".parse().unwrap());
+    headers.insert("X-Accel-Buffering", "no".parse().unwrap());
+
+    Ok(resp)
 }
