@@ -1,6 +1,5 @@
 use crate::AppState;
 use gstreamer::{ self as gst, prelude::*, Pipeline, MessageView };
-use glib::Value;
 use gstreamer_app as gst_app;
 use bytes::Bytes;
 use std::sync::Arc;
