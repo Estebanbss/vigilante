@@ -13,7 +13,10 @@ use chrono::{DateTime, Utc};
 use tokio::{fs::File, time::sleep};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use bytes::Bytes;
-// use std::convert::TryInto; // not used
+use axum::extract::ws::{WebSocket, WebSocketUpgrade};
+use tokio::time;
+use sha1::{Digest, Sha1};
+use url;
 
 // Estructura para la respuesta estándar de la API
 #[derive(Serialize)]
@@ -482,6 +485,139 @@ pub async fn start_cleanup_task(storage_path: PathBuf) {
                     }
                 }
             }
+        }
+    }
+}
+
+// Función helper para validar token desde query en WebSockets
+async fn validate_ws_token(uri: &axum::http::Uri, expected_token: &str) -> Result<(), StatusCode> {
+    if let Some(query) = uri.query() {
+        let tok_opt = url::form_urlencoded::parse(query.as_bytes())
+            .find(|(k, _)| k == "token")
+            .map(|(_, v)| v.into_owned());
+        if let Some(tok) = tok_opt {
+            if tok == expected_token {
+                println!("🔐 WS Auth OK (query token)");
+                return Ok(());
+            } else {
+                println!("🚫 WS Token query inválido");
+            }
+        }
+    }
+    Err(StatusCode::UNAUTHORIZED)
+}
+
+pub async fn storage_stream_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
+    // Validar token
+    if let Err(status) = validate_ws_token(&uri, &state.proxy_token).await {
+        return status.into_response();
+    }
+
+    ws.on_upgrade(move |socket| handle_storage_stream(socket, state))
+}
+
+async fn handle_storage_stream(mut socket: WebSocket, state: Arc<AppState>) {
+    println!("📡 WS Storage stream conectado");
+
+    let mut interval = time::interval(Duration::from_secs(1));
+    let mut last_hash = String::new();
+
+    loop {
+        interval.tick().await;
+
+        // Obtener info de storage
+        let info = match fs2::statvfs(&state.storage_path) {
+            Ok(stats) => {
+                let total_space = stats.total_space();
+                let free_space = stats.free_space();
+                let used_space = total_space - free_space;
+
+                StorageInfo {
+                    total_space_bytes: total_space,
+                    used_space_bytes: used_space,
+                    storage_path: state.storage_path.to_str().unwrap_or_default().to_string(),
+                    storage_name: "Disco de Grabaciones".to_string(),
+                }
+            }
+            Err(e) => {
+                eprintln!("❌ Error al obtener info de almacenamiento: {}", e);
+                continue;
+            }
+        };
+
+        // Serializar y calcular hash
+        let json = match serde_json::to_string(&info) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("❌ Error serializando storage info: {}", e);
+                continue;
+            }
+        };
+
+        let mut hasher = Sha1::new();
+        hasher.update(json.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+
+        // Enviar solo si cambió
+        if hash != last_hash {
+            if socket.send(axum::extract::ws::Message::Text(json)).await.is_err() {
+                println!("📡 WS Storage stream desconectado");
+                break;
+            }
+            last_hash = hash;
+        }
+    }
+}
+
+pub async fn recordings_stream_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
+    // Validar token
+    if let Err(status) = validate_ws_token(&uri, &state.proxy_token).await {
+        return status.into_response();
+    }
+
+    ws.on_upgrade(move |socket| handle_recordings_stream(socket, state))
+}
+
+async fn handle_recordings_stream(mut socket: WebSocket, state: Arc<AppState>) {
+    println!("📡 WS Recordings stream conectado");
+
+    let mut interval = time::interval(Duration::from_secs(1));
+    let mut last_hash = String::new();
+
+    loop {
+        interval.tick().await;
+
+        // Obtener lista de recordings
+        let recordings = get_recordings_recursively(&state.storage_path);
+
+        // Serializar y calcular hash
+        let json = match serde_json::to_string(&recordings) {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("❌ Error serializando recordings: {}", e);
+                continue;
+            }
+        };
+
+        let mut hasher = Sha1::new();
+        hasher.update(json.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+
+        // Enviar solo si cambió
+        if hash != last_hash {
+            if socket.send(axum::extract::ws::Message::Text(json)).await.is_err() {
+                println!("📡 WS Recordings stream desconectado");
+                break;
+            }
+            last_hash = hash;
         }
     }
 }

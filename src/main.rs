@@ -14,7 +14,7 @@ mod camera;
 mod ptz;
 mod logs;
 
-use storage::{get_storage_info, list_recordings, delete_recording, stream_recording, start_cleanup_task, get_log_file, stream_recording_tail};
+use storage::{get_storage_info, list_recordings, delete_recording, stream_recording, start_cleanup_task, get_log_file, stream_recording_tail, storage_stream_ws, recordings_stream_ws};
 use stream::{stream_hls_handler, stream_hls_index, stream_webrtc_handler, stream_mjpeg_handler, stream_audio_handler};
 use logs::stream_journal_logs;
 use camera::{start_camera_pipeline};
@@ -99,6 +99,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/logs/stream", get(stream_journal_logs))
         .route("/api/storage", get(get_storage_info))
         .route("/api/storage/list", get(list_recordings))
+        .route("/api/storage/stream", get(storage_stream_ws))
+        .route("/api/recordings/stream", get(recordings_stream_ws))
         .route("/api/storage/delete/*path", get(delete_recording))
         .route("/api/recordings/stream/*path", get(stream_recording))
     .route("/api/recordings/stream/tail/*path", get(stream_recording_tail))
