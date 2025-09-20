@@ -330,7 +330,7 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
 
     // Branch 2: Opus para streaming en tiempo real
     let queue2 = gst::ElementFactory::make("queue")
-        .property("leaky", gst::QueueLeaky::Downstream)
+        .property("leaky", "downstream")
         .property("max-size-buffers", 5u32)
         .build()?;
     let opusenc = gst::ElementFactory::make("opusenc")
