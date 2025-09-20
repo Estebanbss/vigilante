@@ -1,5 +1,6 @@
 use crate::AppState;
 use gstreamer::{ self as gst, prelude::*, Pipeline, MessageView };
+use glib::Value;
 use gstreamer_app as gst_app;
 use bytes::Bytes;
 use std::sync::Arc;
@@ -303,13 +304,19 @@ fn handle_audio_pad(pipeline: &Pipeline, src_pad: &gst::Pad, encoding: &str, sta
     Ok(())
 }
 
-
 fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Branch 1: AAC para grabación MP4
+    // Create queue without leaky property to avoid enum binding issues
     let queue1 = gst::ElementFactory::make("queue")
         .property("max-size-buffers", 10u32)
         .property("max-size-time", 3000000000u64) // 3 seconds max
         .build()?;
+        
+    // Set leaky property using set_property with Value after creation
+    // This avoids the enum binding issue in the builder pattern
+    use glib::Value;
+    queue1.set_property("leaky", &Value::from(2i32))?; // 2 = downstream
+    
     let aacenc = gst::ElementFactory::make("voaacenc")
         .property("bitrate", 64000i32) // 64kbps para buena calidad
         .build()?;
@@ -334,6 +341,10 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
         .property("max-size-buffers", 5u32)
         .property("max-size-time", 2000000000u64) // 2 seconds max
         .build()?;
+        
+    // Set leaky property using set_property with Value
+    queue2.set_property("leaky", &Value::from(2i32))?; // 2 = downstream
+    
     let opusenc = gst::ElementFactory::make("opusenc")
         .property("bitrate", 32000i32) // 32kbps para streaming eficiente
         .build()?;
