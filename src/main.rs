@@ -90,20 +90,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // HLS ahora se genera dentro del pipeline principal en camera.rs mediante un branch del tee
 
-    let app = Router::new()
+    // Router 1: Rutas públicas sin autenticación (streaming público)
+    let public_router = Router::new()
         .route("/hls", get(stream_hls_index))
         .route("/hls/*path", get(stream_hls_handler))
         .route("/webrtc/*path", get(stream_webrtc_handler))
-    .route("/api/live/mjpeg", get(stream_mjpeg_handler))
-    .route("/api/live/audio", get(stream_audio_handler))
+        .route("/api/live/mjpeg", get(stream_mjpeg_handler))
+        .route("/api/live/audio", get(stream_audio_handler))
         .route("/api/logs/stream", get(stream_journal_logs))
-        .route("/api/storage", get(get_storage_info))
-        .route("/api/storage/list", get(list_recordings))
+        .layer(cors.clone())
+        .with_state(state.clone());
+
+    // Router 2: Rutas WebSocket sin middleware (validan token internamente)
+    let websocket_router = Router::new()
         .route("/api/storage/stream", get(storage_stream_ws))
         .route("/api/recordings/stream", get(recordings_stream_ws))
+        .layer(cors.clone())
+        .with_state(state.clone());
+
+    // Router 3: Rutas API con autenticación global
+    let api_router = Router::new()
+        .route("/api/storage", get(get_storage_info))
+        .route("/api/storage/list", get(list_recordings))
         .route("/api/storage/delete/*path", get(delete_recording))
         .route("/api/recordings/stream/*path", get(stream_recording))
-    .route("/api/recordings/stream/tail/*path", get(stream_recording_tail))
+        .route("/api/recordings/stream/tail/*path", get(stream_recording_tail))
         .route("/api/recordings/log/:date", get(get_log_file))
         .route("/api/recordings/log/:date/stream", get(stream_recording_logs_sse))
         // Rutas para el control PTZ
@@ -114,10 +125,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/ptz/zoom/in", post(zoom_in))
         .route("/api/ptz/zoom/out", post(zoom_out))
         .route("/api/ptz/stop", post(ptz_stop))
-    .layer(cors)
-    // Middleware global de autenticación para TODAS las rutas
-    .layer(from_fn_with_state(state.clone(), auth::require_auth_middleware))
-    .with_state(state);
+        .layer(cors)
+        // Middleware global de autenticación para rutas API
+        .layer(from_fn_with_state(state.clone(), auth::require_auth_middleware))
+        .with_state(state);
+
+    // Combinar todos los routers
+    let app = public_router
+        .merge(websocket_router)
+        .merge(api_router);
 
     let addr: SocketAddr = listen_addr.parse()?;
     println!("🚀 API y Streamer escuchando en http://{}", addr);
