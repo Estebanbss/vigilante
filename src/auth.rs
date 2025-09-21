@@ -142,18 +142,48 @@ where
             }
         }
 
-    match check_auth(headers, &app_state.proxy_token).await {
-            Ok(()) => {
-        println!("🔐 Auth OK (extractor): {} {}", method, path);
-                Ok(RequireAuth)
+        // Para rutas no-stream, usar lógica flexible igual que el middleware
+        let has_auth_header = headers.get(header::AUTHORIZATION).is_some();
+
+        if has_auth_header {
+            // Si hay header, validarlo
+            match check_auth(headers, &app_state.proxy_token).await {
+                Ok(()) => {
+                    println!("🔐 Auth OK (extractor header): {} {}", method, path);
+                    Ok(RequireAuth)
+                }
+                Err(_) => {
+                    let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+                    let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
+                    let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
+                    println!("🚫 Header Authorization inválido (extractor): {} {} | UA='{}' CF-IP='{}' XFF='{}'", method, path, ua, cfip, xff);
+                    Err((StatusCode::UNAUTHORIZED, "Unauthorized"))
+                }
             }
-            Err(_) => {
-        let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
-        let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
-        let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
-        println!("🚫 Auth FAIL (extractor): {} {} | UA='{}' CF-IP='{}' XFF='{}'", method, path, ua, cfip, xff);
-                Err((StatusCode::UNAUTHORIZED, "Unauthorized"))
+        } else {
+            // Si NO hay header, verificar token en query
+            if let Some(query) = parts.uri.query() {
+                let tok_opt = url::form_urlencoded::parse(query.as_bytes())
+                    .find(|(k, _)| k == "token")
+                    .map(|(_, v)| v.into_owned());
+                if let Some(tok) = tok_opt {
+                    if tok == app_state.proxy_token {
+                        println!("🔐 Auth OK (extractor query token - no header): {} {}", method, path);
+                        return Ok(RequireAuth);
+                    } else {
+                        println!("🚫 Query token inválido (extractor): {} {}", method, path);
+                    }
+                } else {
+                    println!("🚫 No hay token en query (extractor): {} {}", method, path);
+                }
+            } else {
+                println!("🚫 No hay header ni query token (extractor): {} {}", method, path);
             }
+            let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+            let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
+            let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
+            println!("🚫 Auth FAIL (extractor): {} {} | UA='{}' CF-IP='{}' XFF='{}'", method, path, ua, cfip, xff);
+            Err((StatusCode::UNAUTHORIZED, "Unauthorized"))
         }
     }
 }
