@@ -158,8 +158,8 @@ where
     }
 }
 
-/// Middleware que valida token tanto por header Authorization como por query parameter ?token=
-/// Útil para rutas que necesitan autenticación pero algunos clientes (como frontend) prefieren pasar token por URL
+/// Middleware que valida token: si NO hay header Authorization, requiere token por query ?token=
+/// Si hay header Authorization, lo valida normalmente
 pub async fn flexible_auth_middleware(
     State(state): State<Arc<AppState>>,
     uri: Uri,
@@ -167,28 +167,39 @@ pub async fn flexible_auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // 1) Intentar validar por header Authorization
-    if check_auth(&headers, &state.proxy_token).await.is_ok() {
-        println!("🔐 Auth OK (header): {}", uri.path());
-        return next.run(request).await;
-    }
+    // Verificar si hay header Authorization
+    let has_auth_header = headers.get(header::AUTHORIZATION).is_some();
 
-    // 2) Intentar validar por query parameter ?token=
-    if let Some(query) = uri.query() {
-        let tok_opt = url::form_urlencoded::parse(query.as_bytes())
-            .find(|(k, _)| k == "token")
-            .map(|(_, v)| v.into_owned());
-        if let Some(tok) = tok_opt {
-            if tok == state.proxy_token {
-                println!("🔐 Auth OK (query token): {}", uri.path());
-                return next.run(request).await;
+    if has_auth_header {
+        // Si hay header, validarlo normalmente
+        if check_auth(&headers, &state.proxy_token).await.is_ok() {
+            println!("🔐 Auth OK (header): {}", uri.path());
+            return next.run(request).await;
+        } else {
+            println!("🚫 Header Authorization inválido: {}", uri.path());
+        }
+    } else {
+        // Si NO hay header, verificar token en query
+        if let Some(query) = uri.query() {
+            let tok_opt = url::form_urlencoded::parse(query.as_bytes())
+                .find(|(k, _)| k == "token")
+                .map(|(_, v)| v.into_owned());
+            if let Some(tok) = tok_opt {
+                if tok == state.proxy_token {
+                    println!("🔐 Auth OK (query token - no header): {}", uri.path());
+                    return next.run(request).await;
+                } else {
+                    println!("🚫 Query token inválido: {}", uri.path());
+                }
             } else {
-                println!("🚫 Query token inválido: {}", uri.path());
+                println!("🚫 No hay token en query: {}", uri.path());
             }
+        } else {
+            println!("🚫 No hay header ni query token: {}", uri.path());
         }
     }
 
-    // 3) Si ninguna validación funcionó, rechazar
+    // Si llegamos aquí, falló la autenticación
     let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
     let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
     let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
