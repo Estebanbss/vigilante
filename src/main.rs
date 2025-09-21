@@ -14,12 +14,13 @@ mod camera;
 mod ptz;
 mod logs;
 
-use storage::{get_storage_info, list_recordings, delete_recording, stream_recording, start_cleanup_task, get_log_file, stream_recording_tail, storage_stream_ws, recordings_stream_ws, stream_recording_logs_sse};
+use storage::{get_storage_info, list_recordings, delete_recording, stream_recording, start_cleanup_task, get_log_file, stream_recording_tail, storage_stream_sse, recordings_stream_sse, stream_recording_logs_sse};
 use stream::{stream_hls_handler, stream_hls_index, stream_webrtc_handler, stream_mjpeg_handler, stream_audio_handler};
 use logs::stream_journal_logs;
 use camera::{start_camera_pipeline};
 use ptz::{pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, ptz_stop};
 use axum::middleware::from_fn_with_state;
+use auth::flexible_auth_middleware;
 
 // Dependencias de GStreamer
 use gstreamer as gst;
@@ -90,31 +91,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // HLS ahora se genera dentro del pipeline principal en camera.rs mediante un branch del tee
 
-    // Router 1: Rutas públicas sin autenticación (streaming público)
-    let public_router = Router::new()
+    // Router único con autenticación flexible (header o query token)
+    let app = Router::new()
         .route("/hls", get(stream_hls_index))
         .route("/hls/*path", get(stream_hls_handler))
         .route("/webrtc/*path", get(stream_webrtc_handler))
         .route("/api/live/mjpeg", get(stream_mjpeg_handler))
         .route("/api/live/audio", get(stream_audio_handler))
         .route("/api/logs/stream", get(stream_journal_logs))
-        .layer(cors.clone())
-        .with_state(state.clone());
-
-    // Router 2: Rutas WebSocket sin middleware (validan token internamente)
-    let websocket_router = Router::new()
-        .route("/api/storage/stream", get(storage_stream_ws))
-        .route("/api/recordings/stream", get(recordings_stream_ws))
-        .layer(cors.clone())
-        .with_state(state.clone());
-
-    // Router 3: Rutas API con autenticación global
-    let api_router = Router::new()
+        .route("/api/storage/stream", get(storage_stream_sse))
+        .route("/api/recordings/stream", get(recordings_stream_sse))
+        .route("/api/recordings/stream/tail/*path", get(stream_recording_tail))
         .route("/api/storage", get(get_storage_info))
         .route("/api/storage/list", get(list_recordings))
         .route("/api/storage/delete/*path", get(delete_recording))
         .route("/api/recordings/stream/*path", get(stream_recording))
-        .route("/api/recordings/stream/tail/*path", get(stream_recording_tail))
         .route("/api/recordings/log/:date", get(get_log_file))
         .route("/api/recordings/log/:date/stream", get(stream_recording_logs_sse))
         // Rutas para el control PTZ
@@ -126,14 +117,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/ptz/zoom/out", post(zoom_out))
         .route("/api/ptz/stop", post(ptz_stop))
         .layer(cors)
-        // Middleware global de autenticación para rutas API
-        .layer(from_fn_with_state(state.clone(), auth::require_auth_middleware))
+        // Middleware flexible: valida token por header O por query
+        .layer(from_fn_with_state(state.clone(), flexible_auth_middleware))
         .with_state(state);
-
-    // Combinar todos los routers
-    let app = public_router
-        .merge(websocket_router)
-        .merge(api_router);
 
     let addr: SocketAddr = listen_addr.parse()?;
     println!("🚀 API y Streamer escuchando en http://{}", addr);

@@ -3,7 +3,7 @@ use axum::body::Body;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::{io::{AsyncBufReadExt, BufReader}, process::Command};
-use crate::{AppState, auth::RequireAuth};
+use crate::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct LogsParams {
@@ -15,11 +15,11 @@ pub struct LogsParams {
 // GET /api/logs/stream?unit=vigilante.service&n=0
 // Streams journald logs in real-time similar to `journalctl -u UNIT -f`
 pub async fn stream_journal_logs(
-    RequireAuth: RequireAuth,
     State(_state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<LogsParams>,
 )
 -> Result<Response, StatusCode> {
+
     let unit = params.unit.unwrap_or_else(|| "vigilante.service".to_string());
     let n = params.n.unwrap_or(0).to_string();
 

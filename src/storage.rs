@@ -13,10 +13,7 @@ use chrono::{DateTime, Utc};
 use tokio::{fs::File, time::sleep};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader, AsyncBufReadExt};
 use bytes::Bytes;
-use axum::extract::ws::{WebSocket, WebSocketUpgrade};
-use tokio::time;
 use sha1::{Digest, Sha1};
-use url;
 use axum::http::header;
 
 // Estructura para la respuesta estándar de la API
@@ -314,12 +311,11 @@ pub async fn get_log_file(
 
 // Stream que "sigue" creciendo el archivo para verlo en tiempo real
 pub async fn stream_recording_tail(
-    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
     Path(file_path): Path<String>,
 ) -> Result<Response, StatusCode> {
     println!("🎯 Handler: stream_recording_tail -> {}", file_path);
-    // Autenticación ya validada por middleware global
+    // Autenticación ya validada por middleware flexible
 
     let candidate = PathBuf::from(&state.storage_path).join(&file_path);
     let full_path = candidate.canonicalize().map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -490,137 +486,124 @@ pub async fn start_cleanup_task(storage_path: PathBuf) {
     }
 }
 
-// Función helper para validar token desde query en WebSockets
-async fn validate_ws_token(uri: &axum::http::Uri, expected_token: &str) -> Result<(), StatusCode> {
-    if let Some(query) = uri.query() {
-        let tok_opt = url::form_urlencoded::parse(query.as_bytes())
-            .find(|(k, _)| k == "token")
-            .map(|(_, v)| v.into_owned());
-        if let Some(tok) = tok_opt {
-            if tok == expected_token {
-                println!("🔐 WS Auth OK (query token)");
-                return Ok(());
-            } else {
-                println!("🚫 WS Token query inválido");
-            }
-        }
-    }
-    Err(StatusCode::UNAUTHORIZED)
-}
-
-pub async fn storage_stream_ws(
-    ws: WebSocketUpgrade,
+// SSE para información de almacenamiento en tiempo real
+pub async fn storage_stream_sse(
     State(state): State<Arc<AppState>>,
-    uri: axum::http::Uri,
-) -> impl IntoResponse {
-    // Validar token
-    if let Err(status) = validate_ws_token(&uri, &state.proxy_token).await {
-        return status.into_response();
-    }
+) -> Result<Response, StatusCode> {
+    println!("🎯 Handler: storage_stream_sse");
 
-    ws.on_upgrade(move |socket| handle_storage_stream(socket, state))
-}
+    let stream = async_stream::stream! {
+        let mut last_hash = String::new();
 
-async fn handle_storage_stream(mut socket: WebSocket, state: Arc<AppState>) {
-    println!("📡 WS Storage stream conectado");
+        // Enviar evento de conexión
+        yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b":connected\n\n"));
 
-    let mut interval = time::interval(Duration::from_secs(1));
-    let mut last_hash = String::new();
+        loop {
+            // Obtener info de storage
+            let info = match fs2::statvfs(&state.storage_path) {
+                Ok(stats) => {
+                    let total_space = stats.total_space();
+                    let free_space = stats.free_space();
+                    let used_space = total_space - free_space;
 
-    loop {
-        interval.tick().await;
-
-        // Obtener info de storage
-        let info = match fs2::statvfs(&state.storage_path) {
-            Ok(stats) => {
-                let total_space = stats.total_space();
-                let free_space = stats.free_space();
-                let used_space = total_space - free_space;
-
-                StorageInfo {
-                    total_space_bytes: total_space,
-                    used_space_bytes: used_space,
-                    storage_path: state.storage_path.to_str().unwrap_or_default().to_string(),
-                    storage_name: "Disco de Grabaciones".to_string(),
+                    StorageInfo {
+                        total_space_bytes: total_space,
+                        used_space_bytes: used_space,
+                        storage_path: state.storage_path.to_str().unwrap_or_default().to_string(),
+                        storage_name: "Disco de Grabaciones".to_string(),
+                    }
                 }
-            }
-            Err(e) => {
-                eprintln!("❌ Error al obtener info de almacenamiento: {}", e);
-                continue;
-            }
-        };
+                Err(e) => {
+                    eprintln!("❌ Error al obtener info de almacenamiento: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
 
-        // Serializar y calcular hash
-        let json = match serde_json::to_string(&info) {
-            Ok(j) => j,
-            Err(e) => {
-                eprintln!("❌ Error serializando storage info: {}", e);
-                continue;
-            }
-        };
+            // Serializar y calcular hash
+            let json = match serde_json::to_string(&info) {
+                Ok(j) => j,
+                Err(e) => {
+                    eprintln!("❌ Error serializando storage info: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
 
-        let mut hasher = Sha1::new();
-        hasher.update(json.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+            let mut hasher = Sha1::new();
+            hasher.update(json.as_bytes());
+            let hash = format!("{:x}", hasher.finalize());
 
-        // Enviar solo si cambió
-        if hash != last_hash {
-            if socket.send(axum::extract::ws::Message::Text(json)).await.is_err() {
-                println!("📡 WS Storage stream desconectado");
-                break;
+            // Enviar solo si cambió
+            if hash != last_hash {
+                let event = format!("data: {}\n\n", json);
+                yield Ok(axum::body::Bytes::from(event));
+                last_hash = hash;
             }
-            last_hash = hash;
+
+            // Pequeño delay para no sobrecargar CPU
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
-    }
+    };
+
+    let mut resp = Response::new(Body::from_stream(stream));
+    let headers = resp.headers_mut();
+    headers.insert(axum::http::header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    headers.insert(axum::http::header::CONNECTION, "keep-alive".parse().unwrap());
+    headers.insert("X-Accel-Buffering", "no".parse().unwrap());
+    Ok(resp)
 }
 
-pub async fn recordings_stream_ws(
-    ws: WebSocketUpgrade,
+// SSE para lista de grabaciones en tiempo real
+pub async fn recordings_stream_sse(
     State(state): State<Arc<AppState>>,
-    uri: axum::http::Uri,
-) -> impl IntoResponse {
-    // Validar token
-    if let Err(status) = validate_ws_token(&uri, &state.proxy_token).await {
-        return status.into_response();
-    }
+) -> Result<Response, StatusCode> {
+    println!("🎯 Handler: recordings_stream_sse");
 
-    ws.on_upgrade(move |socket| handle_recordings_stream(socket, state))
-}
+    let stream = async_stream::stream! {
+        let mut last_hash = String::new();
 
-async fn handle_recordings_stream(mut socket: WebSocket, state: Arc<AppState>) {
-    println!("📡 WS Recordings stream conectado");
+        // Enviar evento de conexión
+        yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b":connected\n\n"));
 
-    let mut interval = time::interval(Duration::from_secs(1));
-    let mut last_hash = String::new();
+        loop {
+            // Obtener lista de recordings
+            let recordings = get_recordings_recursively(&state.storage_path);
 
-    loop {
-        interval.tick().await;
+            // Serializar y calcular hash
+            let json = match serde_json::to_string(&recordings) {
+                Ok(j) => j,
+                Err(e) => {
+                    eprintln!("❌ Error serializando recordings: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
 
-        // Obtener lista de recordings
-        let recordings = get_recordings_recursively(&state.storage_path);
+            let mut hasher = Sha1::new();
+            hasher.update(json.as_bytes());
+            let hash = format!("{:x}", hasher.finalize());
 
-        // Serializar y calcular hash
-        let json = match serde_json::to_string(&recordings) {
-            Ok(j) => j,
-            Err(e) => {
-                eprintln!("❌ Error serializando recordings: {}", e);
-                continue;
+            // Enviar solo si cambió
+            if hash != last_hash {
+                let event = format!("data: {}\n\n", json);
+                yield Ok(axum::body::Bytes::from(event));
+                last_hash = hash;
             }
-        };
 
-        let mut hasher = Sha1::new();
-        hasher.update(json.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
-
-        // Enviar solo si cambió
-        if hash != last_hash {
-            if socket.send(axum::extract::ws::Message::Text(json)).await.is_err() {
-                println!("📡 WS Recordings stream desconectado");
-                break;
-            }
-            last_hash = hash;
+            // Pequeño delay para no sobrecargar CPU
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
-    }
+    };
+
+    let mut resp = Response::new(Body::from_stream(stream));
+    let headers = resp.headers_mut();
+    headers.insert(axum::http::header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    headers.insert(axum::http::header::CONNECTION, "keep-alive".parse().unwrap());
+    headers.insert("X-Accel-Buffering", "no".parse().unwrap());
+    Ok(resp)
 }
 
 // Nueva función SSE para streaming de logs de grabaciones en tiempo real

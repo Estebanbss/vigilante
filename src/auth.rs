@@ -1,12 +1,13 @@
-use axum::http::{header, HeaderMap, Method, Request, StatusCode};
+use axum::http::{header, HeaderMap, Request, StatusCode};
 use axum::body::Body;
 use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
 use crate::AppState;
-use axum::extract::{FromRef, FromRequestParts};
+use axum::extract::{FromRef, FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::Uri;
+use url;
 
 /// Comprueba la validez del token de autenticación en los encabezados de la petición.
 ///
@@ -87,84 +88,6 @@ pub async fn check_auth(headers: &HeaderMap, token: &str) -> Result<(), StatusCo
     }
 }
 
-/// Middleware global para exigir Authorization en todas las rutas.
-/// Permite OPTIONS (preflight CORS) sin autenticación.
-pub async fn require_auth_middleware(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-    req: Request<Body>,
-    next: Next,
-)
--> Response {
-    // Permite preflight CORS sin auth (deja que CorsLayer maneje y añada headers)
-    if req.method() == Method::OPTIONS {
-        println!("🛫 CORS preflight bypass: {} {}", req.method(), req.uri().path());
-        return next.run(req).await;
-    }
-
-    let headers = req.headers();
-    let method = req.method().clone();
-    let uri: Uri = req.uri().clone();
-    let path = uri.path().to_string();
-
-    // Si está habilitado permitir token por query y es una ruta de streaming, intenta validar `?token=`
-    let is_stream_route = path.starts_with("/api/live/") || path.starts_with("/hls") || path.starts_with("/webrtc/");
-    if state.allow_query_token_streams && is_stream_route {
-        // 1) Intentar con query propia
-        if let Some(q) = uri.query() {
-            // busca token=... (decodificado)
-            let tok_opt = url::form_urlencoded::parse(q.as_bytes())
-                .find(|(k, _)| k == "token")
-                .map(|(_, v)| v.into_owned());
-            if let Some(tok) = tok_opt {
-                if tok == state.proxy_token {
-                    println!("✅ Auth OK (query token): {} {}", method, path);
-                    return next.run(req).await;
-                } else {
-                    println!("🚫 Token query inválido en {} {}", method, path);
-                }
-            }
-        }
-
-        // 2) Fallback: intentar extraer token de Referer (útil para /hls/*.ts referenciados por el .m3u8 con token)
-        if let Some(referer) = headers.get(header::REFERER).and_then(|v| v.to_str().ok()) {
-            if let Ok(url) = url::Url::parse(referer) {
-                if let Some(q) = url.query() {
-                    let tok_opt = url::form_urlencoded::parse(q.as_bytes())
-                        .find(|(k, _)| k == "token")
-                        .map(|(_, v)| v.into_owned());
-                    if let Some(tok) = tok_opt {
-                        if tok == state.proxy_token {
-                            println!("✅ Auth OK (referer token): {} {} <- {}", method, path, referer);
-                            return next.run(req).await;
-                        } else {
-                            println!("🚫 Token referer inválido en {} {}", method, path);
-                        }
-                    }
-                }
-            }
-        }
-
-        // si falla query/referer, continúa a validar header normal
-    }
-
-    match check_auth(headers, &state.proxy_token).await {
-        Ok(()) => {
-            println!("✅ Auth OK (middleware): {} {}", method, path);
-            next.run(req).await
-        }
-        Err(status) => {
-            let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
-            let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
-            let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
-            println!("❌ Auth FAIL (middleware): {} {} -> {} | UA='{}' CF-IP='{}' XFF='{}'", method, path, status.as_u16(), ua, cfip, xff);
-            Response::builder()
-                .status(status)
-                .body(Body::from("Unauthorized"))
-                .unwrap()
-        }
-    }
-}
-
 /// Extractor que exige Authorization en cada handler que lo use.
 /// Esto añade una segunda capa de protección además del middleware global.
 #[derive(Debug, Clone, Copy)]
@@ -233,4 +156,46 @@ where
             }
         }
     }
+}
+
+/// Middleware que valida token tanto por header Authorization como por query parameter ?token=
+/// Útil para rutas que necesitan autenticación pero algunos clientes (como frontend) prefieren pasar token por URL
+pub async fn flexible_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    uri: Uri,
+    headers: HeaderMap,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    // 1) Intentar validar por header Authorization
+    if check_auth(&headers, &state.proxy_token).await.is_ok() {
+        println!("🔐 Auth OK (header): {}", uri.path());
+        return next.run(request).await;
+    }
+
+    // 2) Intentar validar por query parameter ?token=
+    if let Some(query) = uri.query() {
+        let tok_opt = url::form_urlencoded::parse(query.as_bytes())
+            .find(|(k, _)| k == "token")
+            .map(|(_, v)| v.into_owned());
+        if let Some(tok) = tok_opt {
+            if tok == state.proxy_token {
+                println!("🔐 Auth OK (query token): {}", uri.path());
+                return next.run(request).await;
+            } else {
+                println!("🚫 Query token inválido: {}", uri.path());
+            }
+        }
+    }
+
+    // 3) Si ninguna validación funcionó, rechazar
+    let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
+    println!("🚫 Auth FAIL (flexible): {} | UA='{}' CF-IP='{}' XFF='{}'", uri.path(), ua, cfip, xff);
+
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .body(Body::from("Unauthorized"))
+        .unwrap()
 }
