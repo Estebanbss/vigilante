@@ -26,8 +26,23 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             }
         }
 
-        // Archivo diario con nombre YYYY-MM-DD.mkv (Matroska streamable para mejor append)
-        let daily_filename = format!("{}.mkv", now.format("%Y-%m-%d"));
+                // Encontrar el próximo número de archivo para el día
+        let date_str = now.format("%Y-%m-%d").to_string();
+        let mut next_num = 1;
+        if let Ok(entries) = std::fs::read_dir(&day_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with(&date_str) && name.ends_with(".mkv") {
+                        if let Some(num_str) = name.strip_prefix(&format!("{}-", date_str)).and_then(|s| s.strip_suffix(".mkv")) {
+                            if let Ok(num) = num_str.parse::<i32>() {
+                                next_num = next_num.max(num + 1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let daily_filename = format!("{}-{}.mkv", date_str, next_num);
         let daily_path = day_dir.join(&daily_filename);
         
         // Calcular tiempo hasta medianoche
@@ -57,9 +72,9 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 // Video: H.264 depayload
                 "src. ! rtph264depay ! h264parse ! tee name=t_video ",
                 
-                // Branch 1: Recording to Matroska streamable con muxer compartido
+                // Branch 1: Recording to Matroska con muxer compartido
                 "t_video. ! queue leaky=2 max-size-buffers=100 max-size-time=5000000000 ! ",
-                "h264parse config-interval=-1 ! matroskamux name=mux streamable=true ! filesink location=\"{}\" sync=false append=true ",
+                "h264parse config-interval=-1 ! matroskamux name=mux ! filesink location=\"{}\" sync=false ",
                 
                 // Branch 2: Motion detection (decode + grayscale)
                 "t_video. ! queue leaky=2 max-size-buffers=3 ! ",
