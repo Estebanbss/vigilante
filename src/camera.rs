@@ -338,35 +338,32 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
         }
     }
 
-    // Branch 2: Opus para streaming en tiempo real
+    // Branch 2: MP3 para streaming en tiempo real
     let queue2 = gst::ElementFactory::make("queue")
         .property("max-size-buffers", 5u32)
         .property("max-size-time", 2000000000u64) // 2 seconds max
         .build()?;
     
-    let opusenc = gst::ElementFactory::make("opusenc")
-        .property("bitrate", 32000i32) // 32kbps para streaming eficiente
-        .build()?;
-    let webmmux = gst::ElementFactory::make("webmmux")
-        .property("streamable", true)
+    let mp3enc = gst::ElementFactory::make("lamemp3enc")
+        .property("bitrate", 128000i32) // 128kbps para buena calidad
         .build()?;
     let appsink = gst::ElementFactory::make("appsink")
-        .name("audio_webm_sink")
+        .name("audio_mp3_sink")
         .property("sync", false)
         .property("max-buffers", 20u32)
         .property("drop", true)
         .build()?;
 
-    pipeline.add_many([&queue2, &opusenc, &webmmux, &appsink])?;
-    gst::Element::link_many([&queue2, &opusenc, &webmmux, &appsink])?;
+    pipeline.add_many([&queue2, &mp3enc, &appsink])?;
+    gst::Element::link_many([&queue2, &mp3enc, &appsink])?;
 
     let tee_pad2 = tee.request_pad_simple("src_%u").unwrap();
     let queue_pad2 = queue2.static_pad("sink").unwrap();
     tee_pad2.link(&queue_pad2)?;
 
-    // Configurar callback para audio WebM streaming
+    // Configurar callback para audio MP3 streaming
     let audio_sink_app = appsink.clone().downcast::<gst_app::AppSink>().unwrap();
-    let tx_audio = state.audio_webm_tx.clone();
+    let tx_audio = state.audio_mp3_tx.clone();
     audio_sink_app.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             .new_sample(move |s| {
@@ -381,11 +378,11 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
     );
 
     // Sincronizar estados
-    for element in [&queue1, &aacenc, &queue2, &opusenc, &webmmux, &appsink] {
+    for element in [&queue1, &aacenc, &queue2, &mp3enc, &appsink] {
         element.sync_state_with_parent()?;
     }
 
-    println!("🎵 Branches de audio creados: AAC para MP4, Opus para streaming");
+    println!("🎵 Branches de audio creados: AAC para MP4, MP3 para streaming");
     Ok(())
 }
 

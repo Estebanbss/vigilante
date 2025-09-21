@@ -136,7 +136,7 @@ pub struct MjpegParams {
     // pub height: Option<u32>,
 }
 
-// Live audio endpoint over chunked HTTP (WebM Opus)
+// Live audio endpoint over chunked HTTP (MP3)
 // GET /api/live/audio
 pub async fn stream_audio_handler(
     RequireAuth: RequireAuth,
@@ -144,7 +144,7 @@ pub async fn stream_audio_handler(
 ) -> Result<Response, StatusCode> {
     println!("🎯 Handler: stream_audio_handler");
     // Suscripción al canal de audio
-    let mut rx = state.audio_webm_tx.subscribe();
+    let mut rx = state.audio_mp3_tx.subscribe();
 
     let stream = async_stream::stream! {
         while let Ok(chunk) = rx.recv().await {
@@ -154,7 +154,7 @@ pub async fn stream_audio_handler(
 
     let mut resp = Response::new(Body::from_stream(stream));
     let headers = resp.headers_mut();
-    headers.insert(axum::http::header::CONTENT_TYPE, "audio/webm; codecs=opus".parse().unwrap());
+    headers.insert(axum::http::header::CONTENT_TYPE, "audio/mpeg".parse().unwrap());
     headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
     Ok(resp)
 }
