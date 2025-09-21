@@ -345,7 +345,6 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
         .build()?;
     
     let mp3enc = gst::ElementFactory::make("lamemp3enc")
-        .property("bitrate", 128000i32) // 128kbps para buena calidad
         .build()?;
     let appsink = gst::ElementFactory::make("appsink")
         .name("audio_mp3_sink")
