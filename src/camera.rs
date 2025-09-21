@@ -26,8 +26,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             }
         }
 
-        // Archivo diario con nombre YYYY-MM-DD.mp4
-        let daily_filename = format!("{}.mp4", now.format("%Y-%m-%d"));
+        // Archivo diario con nombre YYYY-MM-DD.mkv (Matroska para mejor soporte de streaming y append)
+        let daily_filename = format!("{}.mkv", now.format("%Y-%m-%d"));
         let daily_path = day_dir.join(&daily_filename);
         
         // Calcular tiempo hasta medianoche
@@ -57,9 +57,9 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 // Video: H.264 depayload
                 "src. ! rtph264depay ! h264parse ! tee name=t_video ",
                 
-                // Branch 1: Recording to MP4 con muxer compartido
+                // Branch 1: Recording to Matroska con muxer compartido
                 "t_video. ! queue leaky=2 max-size-buffers=100 max-size-time=5000000000 ! ",
-                "h264parse config-interval=-1 ! mp4mux name=mux ! filesink location=\"{}\" sync=false ",
+                "h264parse config-interval=-1 ! matroskamux name=mux ! filesink location=\"{}\" sync=false append=true ",
                 
                 // Branch 2: Motion detection (decode + grayscale)
                 "t_video. ! queue leaky=2 max-size-buffers=3 ! ",
