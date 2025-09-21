@@ -26,8 +26,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             }
         }
 
-        // Archivo diario con nombre YYYY-MM-DD.mkv (Matroska para mejor soporte de streaming y append)
-        let daily_filename = format!("{}.mkv", now.format("%Y-%m-%d"));
+        // Archivo diario con nombre YYYY-MM-DD.mp4 (fragmented MP4 para mejor append)
+        let daily_filename = format!("{}.mp4", now.format("%Y-%m-%d"));
         let daily_path = day_dir.join(&daily_filename);
         
         // Calcular tiempo hasta medianoche
@@ -43,7 +43,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         
         println!("📹 Iniciando grabación diaria: {} (hasta medianoche: {:?})", daily_filename, duration_until_midnight);
         println!("📁 Carpeta de grabación: {}", day_dir.display());
-        println!("🎥 Archivo MP4: {}", daily_path.display());
+        println!("🎥 Archivo de video: {}", daily_path.display());
         println!("📡 URL RTSP: {}", camera_url);
 
         let daily_s = daily_path.to_string_lossy();
@@ -57,9 +57,9 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 // Video: H.264 depayload
                 "src. ! rtph264depay ! h264parse ! tee name=t_video ",
                 
-                // Branch 1: Recording to Matroska con muxer compartido
+                // Branch 1: Recording to fragmented MP4 con muxer compartido
                 "t_video. ! queue leaky=2 max-size-buffers=100 max-size-time=5000000000 ! ",
-                "h264parse config-interval=-1 ! matroskamux name=mux streamable=true ! filesink location=\"{}\" sync=false append=true ",
+                "h264parse config-interval=-1 ! mp4mux name=mux fragmented=true ! filesink location=\"{}\" sync=false append=true ",
                 
                 // Branch 2: Motion detection (decode + grayscale)
                 "t_video. ! queue leaky=2 max-size-buffers=3 ! ",
@@ -136,12 +136,12 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 if let Ok(metadata) = std::fs::metadata(&daily_path) {
                     let size = metadata.len();
                     if size > 1000 {
-                        println!("✅ Archivo MP4 está creciendo: {} bytes", size);
+                        println!("✅ Archivo de video está creciendo: {} bytes", size);
                     } else {
-                        eprintln!("⚠️ Archivo MP4 muy pequeño: {} bytes", size);
+                        eprintln!("⚠️ Archivo de video muy pequeño: {} bytes", size);
                     }
                 } else {
-                    eprintln!("❌ No se puede acceder al archivo MP4");
+                    eprintln!("❌ No se puede acceder al archivo de video");
                 }
             }
         });
@@ -331,10 +331,10 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
             if let Err(e) = aac_src.link(&mux_sink) {
                 eprintln!("⚠️ Error conectando audio AAC al MP4: {}", e);
             } else {
-                println!("🔗 Audio AAC conectado al MP4");
+                println!("🔗 Audio AAC conectado al video");
             }
         } else {
-            eprintln!("⚠️ No se pudieron obtener los pads para conectar audio al MP4");
+            eprintln!("⚠️ No se pudieron obtener los pads para conectar audio al video");
         }
     }
 
