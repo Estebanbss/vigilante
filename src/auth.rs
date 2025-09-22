@@ -72,18 +72,7 @@ pub async fn check_auth(headers: &HeaderMap, token: &str) -> Result<(), StatusCo
         );
         Err(StatusCode::UNAUTHORIZED)
     } else {
-        // Log detallado en éxito para validar que coincide con .env
-        let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("");
-        let cfip = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).unwrap_or("");
-        let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).unwrap_or("");
-        let provided = mask_auth_header(auth_header);
-        let expected_b = mask_auth_header(&expected_bearer);
-        let expected_r = mask_token(token);
-        let matched = if auth_header == expected_bearer { "Bearer" } else { "Raw" };
-        println!(
-            "🔑 Authorization OK: coincide={} | header_proporcionado='{}' header_esperado_bearer='{}' header_esperado_raw='{}' | UA='{}' CF-IP='{}' XFF='{}'",
-            matched, provided, expected_b, expected_r, ua, cfip, xff
-        );
+        // Authorization successful - no detailed logging to reduce noise
         Ok(())
     }
 }

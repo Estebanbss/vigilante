@@ -342,27 +342,36 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
     
     gst::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
         if let Some(mux) = mux_clone.by_name("mux") {
+            println!("🔍 Intentando conectar audio AAC al mux MP4...");
+            
             // Intentar diferentes nombres de pad para audio
             let mut connected = false;
-            for pad_name in ["audio_0", "audio_%u", "sink_%u"].iter() {
+            for pad_name in ["audio_0", "audio_%u", "sink_%u", "audio", "sink"].iter() {
+                println!("🔍 Probando pad: {}", pad_name);
                 if let Some(mux_sink) = mux.request_pad_simple(pad_name) {
                     if let Some(aac_src_pad) = aacenc_clone.static_pad("src") {
                         if let Err(e) = aac_src_pad.link(&mux_sink) {
-                            eprintln!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
+                            println!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
                         } else {
                             println!("🔗 Audio AAC conectado al video usando pad {}", pad_name);
                             connected = true;
                             break;
                         }
+                    } else {
+                        println!("⚠️ No se pudo obtener pad src de aacenc");
                     }
+                } else {
+                    println!("⚠️ No se pudo obtener pad {} del mux", pad_name);
                 }
             }
 
             if !connected {
-                eprintln!("⚠️ No se pudieron conectar pads de audio al mux MP4");
+                eprintln!("❌ No se pudieron conectar pads de audio al mux MP4");
             }
+        } else {
+            eprintln!("❌ No se encontró el elemento mux en el pipeline");
         }
-        gst::glib::ControlFlow::Continue
+        gst::glib::ControlFlow::Break
     });
 
     // Branch 2: MP3 para streaming en tiempo real
