@@ -5,7 +5,8 @@ use axum::{
 };
 use tower_http::cors::{CorsLayer, Any};
 use dotenvy::dotenv;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
+use bytes::Bytes;
 
 mod auth;
 mod storage;
@@ -17,14 +18,13 @@ mod logs;
 use storage::{get_storage_info, list_recordings, delete_recording, stream_recording, start_cleanup_task, get_log_file, stream_recording_tail, storage_stream_sse, recordings_stream_sse, stream_recording_logs_sse};
 use stream::{stream_hls_handler, stream_hls_index, stream_webrtc_handler, stream_mjpeg_handler, stream_audio_handler};
 use logs::stream_journal_logs;
-use camera::{start_camera_pipeline};
+use camera::{start_camera_pipeline, try_connect_audio_to_mux};
 use ptz::{pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, ptz_stop};
 use axum::middleware::from_fn_with_state;
 use auth::flexible_auth_middleware;
 
 // Dependencias de GStreamer
 use gstreamer as gst;
-use bytes::Bytes;
 use tokio::sync::broadcast;
 
 #[derive(Clone)]
@@ -40,6 +40,8 @@ pub struct AppState {
     pub enable_hls: bool,
     // Permite validar token por query (p.ej., ?token=...) en rutas de streaming
     pub allow_query_token_streams: bool,
+    // Canal para comunicar desde callbacks de GStreamer al runtime de Tokio
+    pub audio_connect_tx: mpsc::UnboundedSender<()>,
 }
 
 #[tokio::main]
@@ -69,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mjpeg_tx, _mjpeg_rx) = broadcast::channel::<Bytes>(32);
     let (mjpeg_low_tx, _mjpeg_low_rx) = broadcast::channel::<Bytes>(32);
     let (audio_mp3_tx, _audio_rx) = broadcast::channel::<Bytes>(32);
+    let (audio_connect_tx, mut audio_connect_rx) = mpsc::unbounded_channel::<()>();
 
     let state = Arc::new(AppState {
         camera_rtsp_url: camera_rtsp_url.clone(),
@@ -81,6 +84,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio_mp3_tx,
         enable_hls,
         allow_query_token_streams,
+        audio_connect_tx,
+    });
+
+    // Tarea para manejar conexiones de audio desde callbacks de GStreamer
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        while let Some(_) = audio_connect_rx.recv().await {
+            // Intentar conectar audio al mux MP4
+            if let Some(pipeline) = state_clone.pipeline.lock().await.as_ref() {
+                if let Err(e) = try_connect_audio_to_mux(pipeline, &state_clone).await {
+                    eprintln!("❌ Error conectando audio al mux: {}", e);
+                }
+            }
+        }
     });
 
     // Iniciar la tarea de limpieza de almacenamiento en segundo plano

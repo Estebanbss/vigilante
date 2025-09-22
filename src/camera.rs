@@ -337,47 +337,8 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
     let queue_pad1 = queue1.static_pad("sink").unwrap();
     tee_pad1.link(&queue_pad1)?;
 
-    // Conectar al mux del MP4 - usar spawn con delay mayor
-    let mux_clone = pipeline.by_name("mux");
-    let aacenc_clone = aacenc.clone();
-
-    if let Some(mux) = mux_clone {
-        tokio::spawn(async move {
-            // Esperar más tiempo para que el mux esté completamente listo
-            tokio::time::sleep(Duration::from_millis(2000)).await;
-
-            // Intentar diferentes nombres de pad para audio
-            let mut connected = false;
-            for pad_name in ["audio_0", "audio_%u", "sink_%u"].iter() {
-                if let Some(mux_sink) = mux.request_pad_simple(pad_name) {
-                    if let Some(aac_src_pad) = aacenc_clone.static_pad("src") {
-                        if let Err(e) = aac_src_pad.link(&mux_sink) {
-                            eprintln!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
-                        } else {
-                            println!("🔗 Audio AAC conectado al video usando pad {}", pad_name);
-                            connected = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if !connected {
-                eprintln!("⚠️ No se pudieron conectar pads de audio al mux MP4");
-                // Intentar una vez más después de más tiempo
-                tokio::time::sleep(Duration::from_millis(3000)).await;
-                if let Some(mux_sink) = mux.request_pad_simple("audio_0") {
-                    if let Some(aac_src_pad) = aacenc_clone.static_pad("src") {
-                        if let Err(e) = aac_src_pad.link(&mux_sink) {
-                            eprintln!("⚠️ Segundo intento fallido conectando audio AAC al MP4: {}", e);
-                        } else {
-                            println!("🔗 Audio AAC conectado al video en segundo intento");
-                        }
-                    }
-                }
-            }
-        });
-    }
+    // Conectar al mux del MP4 - enviar señal por canal en lugar de spawn
+    let _ = state.audio_connect_tx.send(());
 
     // Branch 2: MP3 para streaming en tiempo real
     let queue2 = gst::ElementFactory::make("queue")
@@ -577,4 +538,50 @@ fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>) {
             );
         }
     }
+}
+
+// Función para intentar conectar audio al mux MP4 desde el runtime de Tokio
+pub async fn try_connect_audio_to_mux(pipeline: &Pipeline, state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Esperar un poco para que el mux esté listo
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    // Buscar elementos de audio ya creados
+    let mut aacenc = None;
+    let mut tee_audio = None;
+
+    for element in pipeline.children() {
+        if element.name().starts_with("aacenc") {
+            aacenc = Some(element.clone());
+        } else if element.name() == "tee_audio" {
+            tee_audio = Some(element.clone());
+        }
+    }
+
+    if let (Some(aacenc), Some(tee_audio)) = (aacenc, tee_audio) {
+        if let Some(mux) = pipeline.by_name("mux") {
+            // Intentar diferentes nombres de pad para audio
+            let mut connected = false;
+            for pad_name in ["audio_0", "audio_%u", "sink_%u"].iter() {
+                if let Some(mux_sink) = mux.request_pad_simple(pad_name) {
+                    if let Some(aac_src_pad) = aacenc.static_pad("src") {
+                        if let Err(e) = aac_src_pad.link(&mux_sink) {
+                            eprintln!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
+                        } else {
+                            println!("🔗 Audio AAC conectado al video usando pad {}", pad_name);
+                            connected = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if !connected {
+                eprintln!("⚠️ No se pudieron conectar pads de audio al mux MP4");
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
+    Err("Elementos de audio no encontrados o mux no disponible".into())
 }
