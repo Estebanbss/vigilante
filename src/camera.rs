@@ -541,7 +541,7 @@ fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>) {
 }
 
 // Función para intentar conectar audio al mux MP4 desde el runtime de Tokio
-pub async fn try_connect_audio_to_mux(pipeline: &Pipeline, state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn try_connect_audio_to_mux(pipeline: &Pipeline, _state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Esperar un poco para que el mux esté listo
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
@@ -557,7 +557,7 @@ pub async fn try_connect_audio_to_mux(pipeline: &Pipeline, state: &Arc<AppState>
         }
     }
 
-    if let (Some(aacenc), Some(tee_audio)) = (aacenc, tee_audio) {
+    if let (Some(aacenc), Some(_tee_audio)) = (aacenc, tee_audio) {
         if let Some(mux) = pipeline.by_name("mux") {
             // Intentar diferentes nombres de pad para audio
             let mut connected = false;
