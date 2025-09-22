@@ -340,29 +340,28 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
     if let Some(mux) = pipeline.by_name("mux") {
         println!("🔍 Conectando audio AAC al mux MP4...");
         
-        // Intentar diferentes nombres de pad para audio
-        let mut connected = false;
-        for pad_name in ["audio_0", "audio_%u", "sink_%u", "audio", "sink"].iter() {
-            println!("🔍 Probando pad: {}", pad_name);
-            if let Some(mux_sink) = mux.request_pad_simple(pad_name) {
+        // Obtener el pad template de audio del mux
+        if let Some(audio_template) = mux.pad_template("audio_%u") {
+            println!("📋 Template de audio encontrado: {}", audio_template.name_template());
+            
+            // Request pad usando el template
+            if let Some(mux_sink) = mux.request_pad(&audio_template, None, None) {
+                println!("✅ Pad de audio solicitado exitosamente: {}", mux_sink.name());
+                
                 if let Some(aac_src_pad) = aacenc.static_pad("src") {
                     if let Err(e) = aac_src_pad.link(&mux_sink) {
-                        println!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
+                        eprintln!("❌ Error linking AAC src a mux sink: {}", e);
                     } else {
-                        println!("🔗 Audio AAC conectado al video usando pad {}", pad_name);
-                        connected = true;
-                        break;
+                        println!("🔗 Audio AAC conectado exitosamente al mux MP4");
                     }
                 } else {
-                    println!("⚠️ No se pudo obtener pad src de aacenc");
+                    eprintln!("❌ No se pudo obtener pad src de aacenc");
                 }
             } else {
-                println!("⚠️ No se pudo obtener pad {} del mux", pad_name);
+                eprintln!("❌ No se pudo solicitar pad de audio del mux");
             }
-        }
-
-        if !connected {
-            eprintln!("❌ No se pudieron conectar pads de audio al mux MP4");
+        } else {
+            eprintln!("❌ No se encontró template de audio 'audio_%u' en el mux");
         }
     } else {
         eprintln!("❌ No se encontró el elemento mux en el pipeline");
