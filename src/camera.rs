@@ -74,7 +74,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 
                 // Branch 1: Recording to MP4 con faststart para web streaming
                 "t_video. ! queue leaky=1 max-size-buffers=500 max-size-time=10000000000 max-size-bytes=100000000 ! ",
-                "mp4mux name=mux faststart=true streamable=true ! filesink location=\"{}\" sync=false ",
+                "mp4mux name=mux faststart=true ! filesink location=\"{}\" sync=false ",
                 
                 // Branch 2: Motion detection (decode + grayscale)
                 "t_video. ! queue leaky=1 max-size-buffers=10 max-size-time=1000000000 ! ",
@@ -323,7 +323,6 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
     let queue1 = gst::ElementFactory::make("queue")
         .property("max-size-buffers", 50u32)
         .property("max-size-time", 5000000000u64) // 5 seconds max
-        .property("leaky", 1u32) // Downstream (oldest buffers)
         .build()?;
     
     let aacenc = gst::ElementFactory::make("voaacenc")
@@ -357,7 +356,6 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
     let queue2 = gst::ElementFactory::make("queue")
         .property("max-size-buffers", 20u32)
         .property("max-size-time", 3000000000u64) // 3 seconds max
-        .property("leaky", 1u32) // Downstream (oldest buffers)
         .build()?;
     
     let mp3enc = gst::ElementFactory::make("lamemp3enc")
