@@ -72,9 +72,9 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 // Video: H.264 depayload
                 "src. ! rtph264depay ! h264parse ! tee name=t_video ",
                 
-                // Branch 1: Recording to MP4 fragmented para mejor manejo de streams dinámicos
+                // Branch 1: Recording to MP4 con faststart para web streaming
                 "t_video. ! queue leaky=1 max-size-buffers=500 max-size-time=10000000000 max-size-bytes=100000000 ! ",
-                "mp4mux name=mux fragmented=true faststart=true streamable=true ! filesink location=\"{}\" sync=false ",
+                "mp4mux name=mux faststart=true streamable=true ! filesink location=\"{}\" sync=false ",
                 
                 // Branch 2: Motion detection (decode + grayscale)
                 "t_video. ! queue leaky=1 max-size-buffers=10 max-size-time=1000000000 ! ",
