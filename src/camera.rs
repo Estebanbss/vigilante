@@ -73,23 +73,23 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 "src. ! rtph264depay ! h264parse ! tee name=t_video ",
                 
                 // Branch 1: Recording to MP4 con faststart para web streaming
-                "t_video. ! queue leaky=1 max-size-buffers=500 max-size-time=10000000000 max-size-bytes=100000000 ! ",
+                "t_video. ! queue max-size-buffers=500 max-size-time=10000000000 max-size-bytes=100000000 ! ",
                 "mp4mux name=mux faststart=true ! filesink location=\"{}\" sync=false ",
                 
                 // Branch 2: Motion detection (decode + grayscale)
-                "t_video. ! queue leaky=1 max-size-buffers=10 max-size-time=1000000000 ! ",
+                "t_video. ! queue max-size-buffers=10 max-size-time=1000000000 ! ",
                 "avdec_h264 ! videoconvert ! videoscale ! ",
                 "video/x-raw,format=GRAY8,width=320,height=180 ! ",
                 "appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
                 
                 // Branch 3: MJPEG streaming (decode + encode)
-                "t_video. ! queue leaky=1 max-size-buffers=15 max-size-time=2000000000 ! ",
+                "t_video. ! queue max-size-buffers=15 max-size-time=2000000000 ! ",
                 "avdec_h264 ! videoconvert ! videoscale ! ",
                 "video/x-raw,width=1280,height=720 ! videorate ! video/x-raw,framerate=15/1 ! ",
                 "jpegenc quality=85 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true ",
                 
                 // Branch 4: MJPEG low quality
-                "t_video. ! queue leaky=1 max-size-buffers=10 max-size-time=1000000000 ! ",
+                "t_video. ! queue max-size-buffers=10 max-size-time=1000000000 ! ",
                 "avdec_h264 ! videoconvert ! videoscale ! ",
                 "video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=8/1 ! ",
                 "jpegenc quality=70 ! appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true "
@@ -153,10 +153,10 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                     if size > 1000 {
                         println!("✅ Archivo de video está creciendo: {} bytes", size);
                     } else {
-                        eprintln!("⚠️ Archivo de video muy pequeño: {} bytes", size);
+                        eprintln!("⚠️ Archivo de video muy pequeño: {} bytes - posible problema de grabación", size);
                     }
                 } else {
-                    eprintln!("❌ No se puede acceder al archivo de video");
+                    eprintln!("❌ No se puede acceder al archivo de video - problema de creación");
                 }
             }
         });
@@ -336,20 +336,38 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
     let queue_pad1 = queue1.static_pad("sink").unwrap();
     tee_pad1.link(&queue_pad1)?;
     
-    // Conectar al mux del MP4
+    // Conectar al mux del MP4 - intentar después de un delay
     if let Some(mux) = pipeline.by_name("mux") {
-        if let (Some(aac_src), Some(mux_sink)) = (
-            aacenc.static_pad("src"),
-            mux.request_pad_simple("audio_0")
-        ) {
-            if let Err(e) = aac_src.link(&mux_sink) {
-                eprintln!("⚠️ Error conectando audio AAC al MP4: {}", e);
-            } else {
-                println!("🔗 Audio AAC conectado al video");
+        let aac_src = aacenc.static_pad("src");
+        let mux_clone = mux.clone();
+        let aacenc_clone = aacenc.clone();
+
+        // Intentar conectar audio después de un pequeño delay
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            let aac_src = aacenc_clone.static_pad("src");
+            let mut connected = false;
+
+            // Intentar diferentes nombres de pad para audio
+            for pad_name in ["audio_0", "audio_%u", "sink_%u"].iter() {
+                if let Some(mux_sink) = mux_clone.request_pad_simple(pad_name) {
+                    if let Some(aac_src_pad) = &aac_src {
+                        if let Err(e) = aac_src_pad.link(&mux_sink) {
+                            eprintln!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
+                        } else {
+                            println!("🔗 Audio AAC conectado al video usando pad {}", pad_name);
+                            connected = true;
+                            break;
+                        }
+                    }
+                }
             }
-        } else {
-            eprintln!("⚠️ No se pudieron obtener los pads para conectar audio al video");
-        }
+
+            if !connected {
+                eprintln!("⚠️ No se pudieron obtener los pads para conectar audio al video después del delay");
+            }
+        });
     }
 
     // Branch 2: MP3 para streaming en tiempo real
