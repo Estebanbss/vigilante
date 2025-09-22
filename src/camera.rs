@@ -345,23 +345,41 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
             println!("📋 Template de audio encontrado: {}", audio_template.name_template());
             
             // Request pad usando el template
-            if let Some(mux_sink) = mux.request_pad(&audio_template, None, None) {
-                println!("✅ Pad de audio solicitado exitosamente: {}", mux_sink.name());
-                
-                if let Some(aac_src_pad) = aacenc.static_pad("src") {
-                    if let Err(e) = aac_src_pad.link(&mux_sink) {
-                        eprintln!("❌ Error linking AAC src a mux sink: {}", e);
+            match mux.request_pad(&audio_template, None, None) {
+                Some(mux_sink) => {
+                    println!("✅ Pad de audio solicitado exitosamente: {}", mux_sink.name());
+                    
+                    if let Some(aac_src_pad) = aacenc.static_pad("src") {
+                        match aac_src_pad.link(&mux_sink) {
+                            Ok(_) => println!("🔗 Audio AAC conectado exitosamente al mux MP4"),
+                            Err(e) => eprintln!("❌ Error linking AAC src a mux sink: {}", e),
+                        }
                     } else {
-                        println!("🔗 Audio AAC conectado exitosamente al mux MP4");
+                        eprintln!("❌ No se pudo obtener pad src de aacenc");
                     }
-                } else {
-                    eprintln!("❌ No se pudo obtener pad src de aacenc");
                 }
-            } else {
-                eprintln!("❌ No se pudo solicitar pad de audio del mux");
+                None => {
+                    eprintln!("❌ No se pudo solicitar pad de audio del mux - request_pad returned None");
+                    // Intentar con request_pad_simple como fallback
+                    if let Some(fallback_pad) = mux.request_pad_simple("audio_0") {
+                        println!("✅ Pad fallback solicitado: {}", fallback_pad.name());
+                        if let Some(aac_src_pad) = aacenc.static_pad("src") {
+                            match aac_src_pad.link(&fallback_pad) {
+                                Ok(_) => println!("🔗 Audio AAC conectado con fallback"),
+                                Err(e) => eprintln!("❌ Error en fallback link: {}", e),
+                            }
+                        }
+                    } else {
+                        eprintln!("❌ Fallback también falló");
+                    }
+                }
             }
         } else {
             eprintln!("❌ No se encontró template de audio 'audio_%u' en el mux");
+            // Listar todos los templates disponibles
+            println!("📋 Buscando templates disponibles en mux...");
+            // Note: GStreamer Element doesn't have pad_templates() method, 
+            // we'll need to check manually or use gst-inspect
         }
     } else {
         eprintln!("❌ No se encontró el elemento mux en el pipeline");
