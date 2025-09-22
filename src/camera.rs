@@ -5,7 +5,6 @@ use bytes::Bytes;
 use std::sync::Arc;
 use std::fs::{OpenOptions};
 use std::io::Write;
-use std::time::Duration;
 use chrono::{Local};
 
 pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
@@ -337,38 +336,27 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
     let queue_pad1 = queue1.static_pad("sink").unwrap();
     tee_pad1.link(&queue_pad1)?;
     
-    // Conectar al mux del MP4 - intentar después de un delay
+    // Conectar al mux del MP4 - intentar inmediatamente
     if let Some(mux) = pipeline.by_name("mux") {
-        let aac_src = aacenc.static_pad("src");
-        let mux_clone = mux.clone();
-        let aacenc_clone = aacenc.clone();
-
-        // Intentar conectar audio después de un pequeño delay
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-
-            let aac_src = aacenc_clone.static_pad("src");
-            let mut connected = false;
-
-            // Intentar diferentes nombres de pad para audio
-            for pad_name in ["audio_0", "audio_%u", "sink_%u"].iter() {
-                if let Some(mux_sink) = mux_clone.request_pad_simple(pad_name) {
-                    if let Some(aac_src_pad) = &aac_src {
-                        if let Err(e) = aac_src_pad.link(&mux_sink) {
-                            eprintln!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
-                        } else {
-                            println!("🔗 Audio AAC conectado al video usando pad {}", pad_name);
-                            connected = true;
-                            break;
-                        }
+        // Intentar diferentes nombres de pad para audio
+        let mut connected = false;
+        for pad_name in ["audio_0", "audio_%u", "sink_%u"].iter() {
+            if let Some(mux_sink) = mux.request_pad_simple(pad_name) {
+                if let Some(aac_src_pad) = aacenc.static_pad("src") {
+                    if let Err(e) = aac_src_pad.link(&mux_sink) {
+                        eprintln!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
+                    } else {
+                        println!("🔗 Audio AAC conectado al video usando pad {}", pad_name);
+                        connected = true;
+                        break;
                     }
                 }
             }
+        }
 
-            if !connected {
-                eprintln!("⚠️ No se pudieron obtener los pads para conectar audio al video después del delay");
-            }
-        });
+        if !connected {
+            eprintln!("⚠️ No se pudieron conectar pads de audio al mux MP4");
+        }
     }
 
     // Branch 2: MP3 para streaming en tiempo real

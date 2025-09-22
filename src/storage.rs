@@ -2,12 +2,14 @@ use crate::{AppState, auth::RequireAuth};
 use axum::{
     extract::{Path, State, Query},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, Sse},
     Json,
     body::Body,
 };
+use axum::response::sse::Event;
+use futures::Stream;
 use serde::{Serialize, Deserialize};
-use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{fs, path::PathBuf, sync::Arc, time::Duration, convert::Infallible};
 use fs2;
 use chrono::{DateTime, Utc};
 use tokio::{fs::File, time::sleep};
@@ -489,14 +491,11 @@ pub async fn start_cleanup_task(storage_path: PathBuf) {
 // SSE para información de almacenamiento en tiempo real
 pub async fn storage_stream_sse(
     State(state): State<Arc<AppState>>,
-) -> Result<Response, StatusCode> {
-    println!("🎯 Handler: storage_stream_sse");
-
-    let stream = async_stream::stream! {
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {    let stream = async_stream::stream! {
         let mut last_hash = String::new();
 
         // Enviar evento de conexión
-        yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b":connected\n\n"));
+        yield Ok::<_, Infallible>(Event::default().data(":connected"));
 
         loop {
             // Obtener info de storage
@@ -536,8 +535,7 @@ pub async fn storage_stream_sse(
 
             // Enviar solo si cambió
             if hash != last_hash {
-                let event = format!("data: {}\n\n", json);
-                yield Ok(axum::body::Bytes::from(event));
+                yield Ok(Event::default().data(json));
                 last_hash = hash;
             }
 
@@ -546,26 +544,23 @@ pub async fn storage_stream_sse(
         }
     };
 
-    let mut resp = Response::new(Body::from_stream(stream));
-    let headers = resp.headers_mut();
-    headers.insert(axum::http::header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
-    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
-    headers.insert(axum::http::header::CONNECTION, "keep-alive".parse().unwrap());
-    headers.insert("X-Accel-Buffering", "no".parse().unwrap());
-    Ok(resp)
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(1))
+            .text("keep-alive")
+    )
 }
 
 // SSE para lista de grabaciones en tiempo real
 pub async fn recordings_stream_sse(
     State(state): State<Arc<AppState>>,
-) -> Result<Response, StatusCode> {
-    println!("🎯 Handler: recordings_stream_sse");
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
 
     let stream = async_stream::stream! {
         let mut last_hash = String::new();
 
         // Enviar evento de conexión
-        yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b":connected\n\n"));
+        yield Ok::<_, Infallible>(Event::default().data(":connected"));
 
         loop {
             // Obtener lista de recordings
@@ -587,8 +582,7 @@ pub async fn recordings_stream_sse(
 
             // Enviar solo si cambió
             if hash != last_hash {
-                let event = format!("data: {}\n\n", json);
-                yield Ok(axum::body::Bytes::from(event));
+                yield Ok(Event::default().data(json));
                 last_hash = hash;
             }
 
@@ -597,13 +591,11 @@ pub async fn recordings_stream_sse(
         }
     };
 
-    let mut resp = Response::new(Body::from_stream(stream));
-    let headers = resp.headers_mut();
-    headers.insert(axum::http::header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
-    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
-    headers.insert(axum::http::header::CONNECTION, "keep-alive".parse().unwrap());
-    headers.insert("X-Accel-Buffering", "no".parse().unwrap());
-    Ok(resp)
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(1))
+            .text("keep-alive")
+    )
 }
 
 // Nueva función SSE para streaming de logs de grabaciones en tiempo real

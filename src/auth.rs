@@ -117,7 +117,7 @@ where
                     .map(|(_, v)| v.into_owned());
                 if let Some(tok) = tok_opt {
                     if tok == app_state.proxy_token {
-                        println!("🔐 Auth OK (extractor query token): {} {}", method, path);
+                        // Auth OK - no log para reducir ruido
                         return Ok(RequireAuth);
                     } else {
                         println!("🚫 Token query inválido (extractor) en {} {}", method, path);
@@ -133,7 +133,7 @@ where
                             .map(|(_, v)| v.into_owned());
                         if let Some(tok) = tok_opt {
                             if tok == app_state.proxy_token {
-                                println!("🔐 Auth OK (extractor referer token): {} {} <- {}", method, path, referer);
+                                // Auth OK - no log para reducir ruido
                                 return Ok(RequireAuth);
                             }
                         }
@@ -149,7 +149,7 @@ where
             // Si hay header, validarlo
             match check_auth(headers, &app_state.proxy_token).await {
                 Ok(()) => {
-                    println!("🔐 Auth OK (extractor header): {} {}", method, path);
+                    // Auth OK - no log para reducir ruido
                     Ok(RequireAuth)
                 }
                 Err(_) => {
@@ -168,7 +168,7 @@ where
                     .map(|(_, v)| v.into_owned());
                 if let Some(tok) = tok_opt {
                     if tok == app_state.proxy_token {
-                        println!("🔐 Auth OK (extractor query token - no header): {} {}", method, path);
+                        // Auth OK - no log para reducir ruido
                         return Ok(RequireAuth);
                     } else {
                         println!("🚫 Query token inválido (extractor): {} {}", method, path);
@@ -203,7 +203,7 @@ pub async fn flexible_auth_middleware(
     if has_auth_header {
         // Si hay header, validarlo normalmente
         if check_auth(&headers, &state.proxy_token).await.is_ok() {
-            println!("🔐 Auth OK (header): {}", uri.path());
+            // Auth OK - no log para reducir ruido
             return next.run(request).await;
         } else {
             println!("🚫 Header Authorization inválido: {}", uri.path());
@@ -216,7 +216,7 @@ pub async fn flexible_auth_middleware(
                 .map(|(_, v)| v.into_owned());
             if let Some(tok) = tok_opt {
                 if tok == state.proxy_token {
-                    println!("🔐 Auth OK (query token - no header): {}", uri.path());
+                    // Auth OK - no log para reducir ruido
                     return next.run(request).await;
                 } else {
                     println!("🚫 Query token inválido: {}", uri.path());

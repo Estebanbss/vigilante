@@ -142,7 +142,6 @@ pub async fn stream_audio_handler(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, StatusCode> {
-    println!("🎯 Handler: stream_audio_handler");
     // Suscripción al canal de audio
     let mut rx = state.audio_mp3_tx.subscribe();
 
