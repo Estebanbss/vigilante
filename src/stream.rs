@@ -28,7 +28,6 @@ pub async fn stream_hls_handler(
     State(state): State<Arc<AppState>>,
     Path(path): Path<String>,
 ) -> impl IntoResponse {
-    println!("🎯 Handler: stream_hls_handler -> {}", path);
     // Sirve archivos HLS desde STORAGE_PATH/hls
     let mut rel = path.trim_start_matches('/').to_string();
     if rel.is_empty() { rel = "stream.m3u8".to_string(); }
@@ -56,7 +55,6 @@ pub async fn stream_hls_index(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    println!("🎯 Handler: stream_hls_index");
     // Reutiliza la misma lógica, sirviendo el playlist por defecto
     let path = Path("".to_string());
     let res = stream_hls_handler(RequireAuth, State(state), path).await;
@@ -67,7 +65,6 @@ pub async fn stream_webrtc_handler(
     RequireAuth: RequireAuth,
     State(_state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    println!("🎯 Handler: stream_webrtc_handler");
     // Placeholder para la lógica de GStreamer
     (StatusCode::OK, "WebRTC stream handler is working!").into_response()
 }
@@ -79,7 +76,6 @@ pub async fn stream_mjpeg_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<MjpegParams>,
 ) -> Result<Response, StatusCode> {
-    println!("🎯 Handler: stream_mjpeg_handler");
     // Suscribimos al broadcast de JPEGs (high o low) producido por el pipeline principal
     let mut rx = if params.preset.as_deref() == Some("low") {
         state.mjpeg_low_tx.subscribe()

@@ -5,6 +5,7 @@ use bytes::Bytes;
 use std::sync::Arc;
 use std::fs::{OpenOptions};
 use std::io::Write;
+use std::time::Duration;
 use chrono::{Local};
 
 pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
@@ -324,39 +325,58 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
         .property("max-size-buffers", 50u32)
         .property("max-size-time", 5000000000u64) // 5 seconds max
         .build()?;
-    
+
     let aacenc = gst::ElementFactory::make("voaacenc")
         .property("bitrate", 64000i32) // 64kbps para buena calidad
         .build()?;
-    
+
     pipeline.add_many([&queue1, &aacenc])?;
     gst::Element::link_many([&queue1, &aacenc])?;
-    
+
     let tee_pad1 = tee.request_pad_simple("src_%u").unwrap();
     let queue_pad1 = queue1.static_pad("sink").unwrap();
     tee_pad1.link(&queue_pad1)?;
-    
-    // Conectar al mux del MP4 - intentar inmediatamente
-    if let Some(mux) = pipeline.by_name("mux") {
-        // Intentar diferentes nombres de pad para audio
-        let mut connected = false;
-        for pad_name in ["audio_0", "audio_%u", "sink_%u"].iter() {
-            if let Some(mux_sink) = mux.request_pad_simple(pad_name) {
-                if let Some(aac_src_pad) = aacenc.static_pad("src") {
-                    if let Err(e) = aac_src_pad.link(&mux_sink) {
-                        eprintln!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
-                    } else {
-                        println!("🔗 Audio AAC conectado al video usando pad {}", pad_name);
-                        connected = true;
-                        break;
+
+    // Conectar al mux del MP4 - usar spawn con delay mayor
+    let mux_clone = pipeline.by_name("mux");
+    let aacenc_clone = aacenc.clone();
+
+    if let Some(mux) = mux_clone {
+        tokio::spawn(async move {
+            // Esperar más tiempo para que el mux esté completamente listo
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            // Intentar diferentes nombres de pad para audio
+            let mut connected = false;
+            for pad_name in ["audio_0", "audio_%u", "sink_%u"].iter() {
+                if let Some(mux_sink) = mux.request_pad_simple(pad_name) {
+                    if let Some(aac_src_pad) = aacenc_clone.static_pad("src") {
+                        if let Err(e) = aac_src_pad.link(&mux_sink) {
+                            eprintln!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
+                        } else {
+                            println!("🔗 Audio AAC conectado al video usando pad {}", pad_name);
+                            connected = true;
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        if !connected {
-            eprintln!("⚠️ No se pudieron conectar pads de audio al mux MP4");
-        }
+            if !connected {
+                eprintln!("⚠️ No se pudieron conectar pads de audio al mux MP4");
+                // Intentar una vez más después de más tiempo
+                tokio::time::sleep(Duration::from_millis(3000)).await;
+                if let Some(mux_sink) = mux.request_pad_simple("audio_0") {
+                    if let Some(aac_src_pad) = aacenc_clone.static_pad("src") {
+                        if let Err(e) = aac_src_pad.link(&mux_sink) {
+                            eprintln!("⚠️ Segundo intento fallido conectando audio AAC al MP4: {}", e);
+                        } else {
+                            println!("🔗 Audio AAC conectado al video en segundo intento");
+                        }
+                    }
+                }
+            }
+        });
     }
 
     // Branch 2: MP3 para streaming en tiempo real
