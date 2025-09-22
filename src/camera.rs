@@ -32,8 +32,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         if let Ok(entries) = std::fs::read_dir(&day_dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with(&date_str) && name.ends_with(".mkv") {
-                        if let Some(num_str) = name.strip_prefix(&format!("{}-", date_str)).and_then(|s| s.strip_suffix(".mkv")) {
+                    if name.starts_with(&date_str) && name.ends_with(".mp4") {
+                        if let Some(num_str) = name.strip_prefix(&format!("{}-", date_str)).and_then(|s| s.strip_suffix(".mp4")) {
                             if let Ok(num) = num_str.parse::<i32>() {
                                 next_num = next_num.max(num + 1);
                             }
@@ -42,7 +42,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 }
             }
         }
-        let daily_filename = format!("{}-{}.mkv", date_str, next_num);
+        let daily_filename = format!("{}-{}.mp4", date_str, next_num);
         let daily_path = day_dir.join(&daily_filename);
         
         // Calcular tiempo hasta medianoche
@@ -72,24 +72,24 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 // Video: H.264 depayload
                 "src. ! rtph264depay ! h264parse ! tee name=t_video ",
                 
-                // Branch 1: Recording to MKV con muxer compartido
-                "t_video. ! queue leaky=2 max-size-buffers=100 max-size-time=5000000000 ! ",
-                "matroskamux name=mux ! filesink location=\"{}\" sync=false ",
+                // Branch 1: Recording to MP4 fragmented para mejor manejo de streams dinámicos
+                "t_video. ! queue leaky=1 max-size-buffers=500 max-size-time=10000000000 max-size-bytes=100000000 ! ",
+                "mp4mux name=mux fragmented=true faststart=true streamable=true ! filesink location=\"{}\" sync=false ",
                 
                 // Branch 2: Motion detection (decode + grayscale)
-                "t_video. ! queue leaky=2 max-size-buffers=3 ! ",
+                "t_video. ! queue leaky=1 max-size-buffers=10 max-size-time=1000000000 ! ",
                 "avdec_h264 ! videoconvert ! videoscale ! ",
                 "video/x-raw,format=GRAY8,width=320,height=180 ! ",
                 "appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
                 
                 // Branch 3: MJPEG streaming (decode + encode)
-                "t_video. ! queue leaky=2 max-size-buffers=5 ! ",
+                "t_video. ! queue leaky=1 max-size-buffers=15 max-size-time=2000000000 ! ",
                 "avdec_h264 ! videoconvert ! videoscale ! ",
                 "video/x-raw,width=1280,height=720 ! videorate ! video/x-raw,framerate=15/1 ! ",
                 "jpegenc quality=85 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true ",
                 
                 // Branch 4: MJPEG low quality
-                "t_video. ! queue leaky=2 max-size-buffers=3 ! ",
+                "t_video. ! queue leaky=1 max-size-buffers=10 max-size-time=1000000000 ! ",
                 "avdec_h264 ! videoconvert ! videoscale ! ",
                 "video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=8/1 ! ",
                 "jpegenc quality=70 ! appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true "
@@ -320,10 +320,10 @@ fn handle_audio_pad(pipeline: &Pipeline, src_pad: &gst::Pad, encoding: &str, sta
 
 fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Branch 1: AAC para grabación MP4
-    // Create queue without leaky property to avoid enum binding issues
     let queue1 = gst::ElementFactory::make("queue")
-        .property("max-size-buffers", 10u32)
-        .property("max-size-time", 3000000000u64) // 3 seconds max
+        .property("max-size-buffers", 50u32)
+        .property("max-size-time", 5000000000u64) // 5 seconds max
+        .property("leaky", 1u32) // Downstream (oldest buffers)
         .build()?;
     
     let aacenc = gst::ElementFactory::make("voaacenc")
@@ -355,8 +355,9 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
 
     // Branch 2: MP3 para streaming en tiempo real
     let queue2 = gst::ElementFactory::make("queue")
-        .property("max-size-buffers", 5u32)
-        .property("max-size-time", 2000000000u64) // 2 seconds max
+        .property("max-size-buffers", 20u32)
+        .property("max-size-time", 3000000000u64) // 3 seconds max
+        .property("leaky", 1u32) // Downstream (oldest buffers)
         .build()?;
     
     let mp3enc = gst::ElementFactory::make("lamemp3enc")
