@@ -336,43 +336,37 @@ fn create_audio_branches(pipeline: &Pipeline, tee: &gst::Element, state: &Arc<Ap
     let queue_pad1 = queue1.static_pad("sink").unwrap();
     tee_pad1.link(&queue_pad1)?;
 
-    // Conectar al mux del MP4 - intentar inmediatamente con un pequeño delay usando glib
-    let mux_clone = pipeline.clone();
-    let aacenc_clone = aacenc.clone();
-    
-    gst::glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-        if let Some(mux) = mux_clone.by_name("mux") {
-            println!("🔍 Intentando conectar audio AAC al mux MP4...");
-            
-            // Intentar diferentes nombres de pad para audio
-            let mut connected = false;
-            for pad_name in ["audio_0", "audio_%u", "sink_%u", "audio", "sink"].iter() {
-                println!("🔍 Probando pad: {}", pad_name);
-                if let Some(mux_sink) = mux.request_pad_simple(pad_name) {
-                    if let Some(aac_src_pad) = aacenc_clone.static_pad("src") {
-                        if let Err(e) = aac_src_pad.link(&mux_sink) {
-                            println!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
-                        } else {
-                            println!("🔗 Audio AAC conectado al video usando pad {}", pad_name);
-                            connected = true;
-                            break;
-                        }
+    // Conectar al mux del MP4 inmediatamente
+    if let Some(mux) = pipeline.by_name("mux") {
+        println!("🔍 Conectando audio AAC al mux MP4...");
+        
+        // Intentar diferentes nombres de pad para audio
+        let mut connected = false;
+        for pad_name in ["audio_0", "audio_%u", "sink_%u", "audio", "sink"].iter() {
+            println!("🔍 Probando pad: {}", pad_name);
+            if let Some(mux_sink) = mux.request_pad_simple(pad_name) {
+                if let Some(aac_src_pad) = aacenc.static_pad("src") {
+                    if let Err(e) = aac_src_pad.link(&mux_sink) {
+                        println!("⚠️ Error conectando audio AAC al MP4 con pad {}: {}", pad_name, e);
                     } else {
-                        println!("⚠️ No se pudo obtener pad src de aacenc");
+                        println!("🔗 Audio AAC conectado al video usando pad {}", pad_name);
+                        connected = true;
+                        break;
                     }
                 } else {
-                    println!("⚠️ No se pudo obtener pad {} del mux", pad_name);
+                    println!("⚠️ No se pudo obtener pad src de aacenc");
                 }
+            } else {
+                println!("⚠️ No se pudo obtener pad {} del mux", pad_name);
             }
-
-            if !connected {
-                eprintln!("❌ No se pudieron conectar pads de audio al mux MP4");
-            }
-        } else {
-            eprintln!("❌ No se encontró el elemento mux en el pipeline");
         }
-        gst::glib::ControlFlow::Break
-    });
+
+        if !connected {
+            eprintln!("❌ No se pudieron conectar pads de audio al mux MP4");
+        }
+    } else {
+        eprintln!("❌ No se encontró el elemento mux en el pipeline");
+    }
 
     // Branch 2: MP3 para streaming en tiempo real
     let queue2 = gst::ElementFactory::make("queue")
