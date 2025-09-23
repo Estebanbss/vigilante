@@ -111,7 +111,9 @@ where
         // Igual que el middleware: aceptar token en query para rutas de stream si está habilitado
         let is_stream_route = path.starts_with("/api/live/")
             || path.starts_with("/hls")
-            || path.starts_with("/webrtc/");
+            || path.starts_with("/webrtc/")
+            || path.starts_with("/api/storage/")
+            || path.starts_with("/api/recordings/");
         if app_state.allow_query_token_streams && is_stream_route {
             // 1) Intentar con query propia
             if let Some(q) = parts.uri.query() {
@@ -228,6 +230,9 @@ pub async fn flexible_auth_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    if request.method() == axum::http::Method::OPTIONS {
+        return next.run(request).await;
+    }
     // Verificar si hay header Authorization
     let has_auth_header = headers.get(header::AUTHORIZATION).is_some();
 
