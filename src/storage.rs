@@ -11,7 +11,6 @@ use axum::{
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use fs2;
-use futures::Stream;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::{convert::Infallible, fs, path::PathBuf, sync::Arc, time::Duration};
@@ -388,6 +387,10 @@ pub async fn stream_recording(
     // Evitar buffering por proxies/reverse proxies, y permitir envío inmediato
     h.insert("X-Accel-Buffering", "no".parse().unwrap());
     h.insert(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate".parse().unwrap());
+    // CORS headers for streaming
+    h.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    h.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    h.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
     if status == StatusCode::PARTIAL_CONTENT {
         let cr = format!("bytes {}-{}/{}", start, end, file_size);
         h.insert(axum::http::header::CONTENT_RANGE, cr.parse().unwrap());
@@ -638,7 +641,7 @@ pub async fn start_cleanup_task(storage_path: PathBuf) {
 // SSE para información de almacenamiento en tiempo real
 pub async fn storage_stream_sse(
     State(state): State<Arc<AppState>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Response {
     let stream = async_stream::stream! {
         let mut last_hash = String::new();
 
@@ -692,17 +695,25 @@ pub async fn storage_stream_sse(
         }
     };
 
-    Sse::new(stream).keep_alive(
+    let sse = Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(1))
             .text("keep-alive"),
-    )
+    );
+    
+    let mut resp = sse.into_response();
+    let headers = resp.headers_mut();
+    // CORS headers for streaming
+    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
+    resp
 }
 
 // SSE para lista de grabaciones en tiempo real
 pub async fn recordings_stream_sse(
     State(state): State<Arc<AppState>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Response {
     let stream = async_stream::stream! {
         let mut last_hash = String::new();
 
@@ -738,11 +749,19 @@ pub async fn recordings_stream_sse(
         }
     };
 
-    Sse::new(stream).keep_alive(
+    let sse = Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(1))
             .text("keep-alive"),
-    )
+    );
+    
+    let mut resp = sse.into_response();
+    let headers = resp.headers_mut();
+    // CORS headers for streaming
+    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
+    resp
 }
 
 // Nueva función SSE para streaming de logs de grabaciones en tiempo real
@@ -825,6 +844,10 @@ pub async fn stream_recording_logs_sse(
     headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
     headers.insert(header::CONNECTION, "keep-alive".parse().unwrap());
     headers.insert("X-Accel-Buffering", "no".parse().unwrap());
+    // CORS headers for streaming
+    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
 
     Ok(resp)
 }

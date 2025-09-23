@@ -120,6 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/ptz/zoom/in", post(zoom_in))
         .route("/api/ptz/zoom/out", post(zoom_out))
         .route("/api/ptz/stop", post(ptz_stop))
+        // CORS middleware debe ir ANTES de autenticación para manejar preflight OPTIONS
         .layer(cors)
         // Middleware flexible: valida token por header O por query
         .layer(from_fn_with_state(state.clone(), flexible_auth_middleware))

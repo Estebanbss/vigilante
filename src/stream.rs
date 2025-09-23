@@ -60,6 +60,10 @@ pub async fn stream_hls_handler(
         "application/octet-stream"
     };
     headers.insert(axum::http::header::CONTENT_TYPE, ctype.parse().unwrap());
+    // CORS headers for streaming
+    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
     resp
 }
 
@@ -79,7 +83,13 @@ pub async fn stream_webrtc_handler(
     State(_state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // Placeholder para la lógica de GStreamer
-    (StatusCode::OK, "WebRTC stream handler is working!").into_response()
+    let mut resp = (StatusCode::OK, "WebRTC stream handler is working!").into_response();
+    let headers = resp.headers_mut();
+    // CORS headers for streaming
+    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
+    resp
 }
 
 // Simple MJPEG live endpoint (separado de la grabación)
@@ -144,6 +154,10 @@ pub async fn stream_mjpeg_handler(
         axum::http::header::CACHE_CONTROL,
         "no-cache".parse().unwrap(),
     );
+    // CORS headers for streaming
+    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
     Ok(resp)
 }
 
@@ -193,6 +207,10 @@ pub async fn stream_audio_handler(
     );
     headers.insert(axum::http::header::PRAGMA, "no-cache".parse().unwrap());
     headers.insert(axum::http::header::EXPIRES, "0".parse().unwrap());
+    // CORS headers for streaming
+    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
+    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
     Ok(resp)
 }
 // HLS ahora es generado dentro del pipeline principal (camera.rs)
