@@ -75,28 +75,28 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         let daily_s = daily_path.to_string_lossy();
 
         // Pipeline por defecto (si no se provee plantilla por ENV/archivo)
+        // Permitir desactivar el audio AAC en la grabación MP4 si prefieres solo video
+        let record_with_audio_aac = std::env::var("RECORD_WITH_AUDIO_AAC")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         let default_pipeline = format!(concat!(
             // Fuente RTSP
             "rtspsrc location={} latency=2000 protocols=tcp name=src ",
 
             // Video: selecciona RTP de video H264 por caps
-            "src. ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! ",
-            "h264parse config-interval=-1 ! tee name=t_video ",
+            "src. ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! h264parse config-interval=-1 ! tee name=t_video ",
 
-            // Grabación MP4 (video H264 + audio AAC)
+            // Grabación MP4 - video con caps explícitos antes del muxer
             "t_video. ! queue max-size-buffers=500 max-size-time=10000000000 max-size-bytes=100000000 ! ",
-            "mp4mux name=mux faststart=true streamable=true ! filesink location=\"{}\" sync=false ",
+            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true ! ",
+            "filesink location=\"{}\" sync=false ",
 
             // Audio: selecciona RTP de audio PCMA (ALaw); si tu cámara usa PCMU, cambia encoding-name=PCMU y depay/decoder
-            "src. ! application/x-rtp,media=audio,encoding-name=PCMA ! rtppcmadepay ! alawdec ! ",
-            "audioconvert ! audioresample ! tee name=t_audio ",
+            "src. ! application/x-rtp,media=audio,encoding-name=PCMA ! rtppcmadepay ! alawdec ! audioconvert ! audioresample ! tee name=t_audio ",
 
-            // Rama de audio hacia MP4 (AAC) con parseador
-            "t_audio. ! queue max-size-buffers=50 max-size-time=5000000000 ! voaacenc bitrate=64000 ! aacparse ! queue ! mux.audio_0 ",
-
-            // Rama de audio hacia streaming MP3
-            "t_audio. ! queue max-size-buffers=20 max-size-time=3000000000 ! lamemp3enc ! ",
-            "appsink name=audio_mp3_sink sync=false max-buffers=20 drop=true ",
+            // Rama de audio hacia streaming MP3 (live)
+            "t_audio. ! queue max-size-buffers=20 max-size-time=3000000000 ! lamemp3enc ! appsink name=audio_mp3_sink sync=false max-buffers=20 drop=true ",
 
             // Detección de movimiento (GRAY8 downscaled)
             "t_video. ! queue max-size-buffers=10 max-size-time=1000000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
@@ -112,6 +112,12 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             "video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=8/1 ! jpegenc quality=70 ! ",
             "appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true "
         ), camera_url, daily_s);
+
+        // Si se desea grabar audio AAC dentro del MP4, adjuntar rama al muxer dinámicamente via plantilla ENV.
+        // Nota: En el pipeline por defecto ya está el muxer creado; aquí sólo avisamos cómo activarlo con plantilla.
+        if record_with_audio_aac {
+            println!("ℹ️ RECORD_WITH_AUDIO_AAC=true: Para incluir audio en MP4 usa plantilla GST_PIPELINE_TEMPLATE con rama 't_audio. ! voaacenc ! aacparse ! queue ! mux.audio_0'.");
+        }
 
         // Plantilla configurable: ENV `GST_PIPELINE_TEMPLATE` o archivo `GST_PIPELINE_TEMPLATE_FILE`
         let pipeline_str = match std::env::var("GST_PIPELINE_TEMPLATE_FILE")
@@ -249,14 +255,33 @@ fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>) {
         .downcast::<gst_app::AppSink>()
         .unwrap();
 
-    // Config desde ENV con valores por defecto
-    let pixel_diff_min: u8 = env::var("MOTION_PIXEL_DIFF_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(15);
-    let pixel_percent_threshold: f32 = env::var("MOTION_PIXEL_PERCENT").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0); // % de píxeles que deben cambiar
-    let debounce_ms: u64 = env::var("MOTION_DEBOUNCE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
+    // Config desde ENV
+    let diff_min: u8 = env::var("MOTION_PIXEL_DIFF_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+    let percent_threshold: f32 = env::var("MOTION_PIXEL_PERCENT").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
+    let debounce_ms: u64 = env::var("MOTION_DEBOUNCE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
+    let ignore_rect_env = env::var("MOTION_IGNORE_RECT").ok(); // "x,y,w,h" en coords del frame 320x180
 
     #[derive(Default)]
-    struct Prev { frame: Vec<u8>, last_emit: Option<Instant> }
-    let prev = Arc::new(Mutex::new(Prev::default()));
+    struct BgModel {
+        bg: Vec<f32>, // fondo como float para EMA
+        last_emit: Option<Instant>,
+        ignore: Option<(usize, usize, usize, usize)>,
+    }
+    let model = Arc::new(Mutex::new(BgModel::default()));
+
+    // Parse ignore rect
+    if let Some(s) = ignore_rect_env {
+        if let Some(mut st) = model.lock().ok() {
+            let parts: Vec<_> = s.split(',').collect();
+            if parts.len() == 4 {
+                let x = parts[0].trim().parse().unwrap_or(0);
+                let y = parts[1].trim().parse().unwrap_or(0);
+                let w = parts[2].trim().parse().unwrap_or(0);
+                let h = parts[3].trim().parse().unwrap_or(0);
+                st.ignore = Some((x, y, w, h));
+            }
+        }
+    }
 
     detector_sink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
@@ -270,36 +295,39 @@ fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>) {
                 let data = map.as_slice();
                 if data.len() < width * height { return Ok(gst::FlowSuccess::Ok); }
 
-                let mut st = prev.lock().unwrap();
-                if st.frame.len() != width * height {
-                    // Inicializar frame previo
-                    st.frame.clear();
-                    st.frame.extend_from_slice(&data[..width*height]);
+                let mut st = model.lock().unwrap();
+                // Inicializar fondo si hace falta
+                if st.bg.len() != width * height {
+                    st.bg = data[..width*height].iter().map(|&v| v as f32).collect();
                     st.last_emit = None;
                     return Ok(gst::FlowSuccess::Ok);
                 }
 
-                // Muestreo: cada 4 px en ambas direcciones para bajar costo
-                let step = 4usize;
+                // EMA para el fondo
+                let alpha = 0.02f32; // peso de actualización del fondo
+                let step = 3usize; // muestreo
                 let mut changed = 0usize;
                 let mut total = 0usize;
+                let ignore = st.ignore;
+
                 for y in (0..height).step_by(step) {
-                    let row_off = y * width;
                     for x in (0..width).step_by(step) {
-                        let idx = row_off + x;
-                        let a = st.frame[idx];
-                        let b = data[idx];
-                        let diff = if a > b { a - b } else { b - a };
-                        if diff as u8 >= pixel_diff_min { changed += 1; }
+                        if let Some((ix, iy, iw, ih)) = ignore {
+                            if x >= ix && x < ix+iw && y >= iy && y < iy+ih { continue; }
+                        }
+                        let idx = y*width + x;
+                        let prev = st.bg[idx];
+                        let cur = data[idx] as f32;
+                        let diff = (cur - prev).abs() as f32;
+                        if diff >= diff_min as f32 { changed += 1; }
+                        // actualizar fondo
+                        st.bg[idx] = prev * (1.0 - alpha) + cur * alpha;
                         total += 1;
                     }
                 }
                 let percent = (changed as f32) * 100.0 / (total.max(1) as f32);
 
-                // Actualiza frame previo
-                st.frame[..width*height].copy_from_slice(&data[..width*height]);
-
-                if percent >= pixel_percent_threshold {
+                if percent >= percent_threshold {
                     let now = Instant::now();
                     let allow = match st.last_emit { Some(t) => now.duration_since(t) >= Duration::from_millis(debounce_ms), None => true };
                     if allow {
@@ -357,31 +385,21 @@ fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>) {
     );
 }
 fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>) {
-    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
     let audio_sink_app = pipeline
         .by_name("audio_mp3_sink")
         .unwrap()
         .downcast::<gst_app::AppSink>()
         .unwrap();
     let tx_audio = state.audio_mp3_tx.clone();
-    // Telemetría: contar buffers y loguear cada N
-    let counter = Arc::new(AtomicU64::new(0));
     audio_sink_app.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
-            .new_sample({
-                let counter = counter.clone();
-                move |s| {
+            .new_sample(move |s| {
                 let sample = s.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
                 let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                 let data = Bytes::copy_from_slice(map.as_ref());
                 let _ = tx_audio.send(data);
-                let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                if n % 50 == 0 { // cada ~50 paquetes (~1-2s según bitrate)
-                    println!("🔊 Audio MP3 buffers: {}", n);
-                }
                 Ok(gst::FlowSuccess::Ok)
-            }
             })
             .build(),
     );
