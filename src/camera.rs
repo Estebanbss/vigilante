@@ -88,8 +88,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             "src. ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! h264parse config-interval=-1 ! tee name=t_video ",
 
             // Grabación MP4 - video con caps explícitos antes del muxer
-            "t_video. ! queue max-size-buffers=500 max-size-time=10000000000 max-size-bytes=100000000 ! ",
-            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true ! ",
+            "t_video. ! queue name=recq max-size-buffers=500 max-size-time=10000000000 max-size-bytes=100000000 ! ",
+            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true fragment-duration=2000 ! ",
             "filesink location=\"{}\" sync=false ",
 
             // Audio: selecciona RTP de audio PCMA (ALaw); si tu cámara usa PCMU, cambia encoding-name=PCMU y depay/decoder
@@ -159,6 +159,57 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             setup_audio_mp3_sink(&pipeline, &state);
         }
 
+        // Añadir sondas (probes) a la rama de grabación para diagnosticar CAPS/BUFFERS
+        if let Some(recq) = pipeline.by_name("recq") {
+            if let Some(srcpad) = recq.static_pad("src") {
+                use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+                use gst::{PadProbeType, PadProbeReturn, EventView, PadProbeData};
+                let buf_count = Arc::new(AtomicU64::new(0));
+                let caps_seen = Arc::new(AtomicU64::new(0));
+                let buf_count_cl = buf_count.clone();
+                let caps_seen_cl = caps_seen.clone();
+                srcpad.add_probe(PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
+                    if let Some(PadProbeData::Event(ref ev)) = info.data {
+                        if let EventView::Caps(c) = ev.view() {
+                            if caps_seen_cl.fetch_add(1, Ordering::Relaxed) == 0 {
+                                let caps = c.caps();
+                                println!("🎛️ CAPS en recq/src -> mux: {}", caps.to_string());
+                            }
+                        }
+                    }
+                    PadProbeReturn::Ok
+                });
+                srcpad.add_probe(PadProbeType::BUFFER, move |_pad, _info| {
+                    let n = buf_count_cl.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n == 1 || n % 100 == 0 {
+                        println!("🎥 Buffers hacia mp4mux: {}", n);
+                    }
+                    PadProbeReturn::Ok
+                });
+            } else {
+                eprintln!("⚠️ No se encontró pad src en recq para instrumentación");
+            }
+        } else {
+            eprintln!("⚠️ No se encontró 'recq' para instrumentación de rama MP4");
+        }
+
+        // Probe en la salida del mp4mux para verificar salida hacia filesink
+        if let Some(mux) = pipeline.by_name("mux") {
+            if let Some(srcpad) = mux.static_pad("src") {
+                use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+                use gst::{PadProbeType, PadProbeReturn};
+                let out_count = Arc::new(AtomicU64::new(0));
+                let out_count_cl = out_count.clone();
+                srcpad.add_probe(PadProbeType::BUFFER, move |_pad, _info| {
+                    let n = out_count_cl.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n == 1 || n % 100 == 0 {
+                        println!("💽 Buffers después de mp4mux hacia filesink: {}", n);
+                    }
+                    PadProbeReturn::Ok
+                });
+            }
+        }
+
         // Bus y arranque
         let bus = pipeline.bus().unwrap();
         println!("▶️ Iniciando pipeline...");
@@ -175,20 +226,35 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         *state.pipeline.lock().await = Some(pipeline.clone());
         println!("🎬 Grabación activa - esperando datos...");
 
-        // Verificar que el archivo esté creciendo
+        // Verificar que el archivo esté creciendo de forma periódica
         tokio::spawn({
             let daily_path = daily_path.clone();
+            let duration = duration_until_midnight;
             async move {
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                if let Ok(metadata) = std::fs::metadata(&daily_path) {
-                    let size = metadata.len();
-                    if size > 1_000 {
-                        println!("📈 Archivo de video está creciendo: {} bytes", size);
-                    } else {
-                        eprintln!("⚠️ Archivo de video muy pequeño: {} bytes - posible problema de grabación", size);
+                use tokio::time::{sleep, Duration, Instant};
+                let start = Instant::now();
+                let mut last = 0u64;
+                let mut last_log = Instant::now();
+                // primera espera breve para permitir escritura inicial
+                sleep(Duration::from_secs(15)).await;
+                while start.elapsed() < duration {
+                    match std::fs::metadata(&daily_path) {
+                        Ok(meta) => {
+                            let size = meta.len();
+                            if size > last {
+                                let delta = size - last;
+                                if last_log.elapsed() >= Duration::from_secs(60) {
+                                    println!("📈 Archivo creciendo: {} (+{} bytes en último periodo)", size, delta);
+                                    last_log = Instant::now();
+                                }
+                                last = size;
+                            } else {
+                                eprintln!("⚠️ Archivo no crece ({} bytes). Verificar rama hacia mp4mux.", size);
+                            }
+                        }
+                        Err(e) => eprintln!("⚠️ No se puede acceder al archivo de video: {}", e),
                     }
-                } else {
-                    eprintln!("⚠️ No se puede acceder al archivo de video - problema de creación");
+                    sleep(Duration::from_secs(30)).await;
                 }
             }
         });
