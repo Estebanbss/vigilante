@@ -86,6 +86,12 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
 
+        // Fragmento MP4 configurable (ms) para mejorar start/seek manteniendo un solo archivo
+        let mp4_fragment_ms: u64 = std::env::var("MP4_FRAGMENT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+
         let pipeline_str_default = format!(concat!(
             // Fuente RTSP
             "rtspsrc location={} latency=2000 protocols=tcp name=src ",
@@ -95,7 +101,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
             // Grabación MP4 continua
             "t_video. ! queue name=recq max-size-buffers=50 max-size-time=500000000 max-size-bytes=10000000 ! ",
-            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true fragment-duration=1000 ! ",
+            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true fragment-duration={} ! ",
             "filesink location=\"{}\" sync=false ",
 
             // Audio: selecciona RTP de audio PCMA (ALaw)
@@ -120,7 +126,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             "t_video. ! queue max-size-buffers=10 max-size-time=500000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
             "video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=8/1 ! jpegenc quality=70 ! ",
             "appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true "
-        ), camera_url, daily_s);
+    ), camera_url, mp4_fragment_ms, daily_s);
 
         // Pipeline con splitmuxsink (segmentos)
         let segments_location = day_dir.join(format!("{}-%05d.mp4", date_str));
