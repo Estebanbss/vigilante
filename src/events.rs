@@ -169,7 +169,7 @@ pub async fn create_motion_subscription(onvif_url: &str, callback_url: &str) -> 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref());
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 if name == "SubscriptionReference" || name.ends_with(":SubscriptionReference") {
                     in_subscription_ref = true;
                 } else if in_subscription_ref && (name == "Address" || name.ends_with(":Address")) {
@@ -181,7 +181,7 @@ pub async fn create_motion_subscription(onvif_url: &str, callback_url: &str) -> 
                 }
             }
             Ok(Event::End(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref());
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 if name == "SubscriptionReference" || name.ends_with(":SubscriptionReference") {
                     in_subscription_ref = false;
                 }
