@@ -164,16 +164,26 @@ pub async fn create_motion_subscription(onvif_url: &str, callback_url: &str) -> 
     let mut reader = Reader::from_str(&response);
     let mut buf = Vec::new();
     let mut subscription_ref = String::new();
+    let mut in_subscription_ref = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                if e.name().as_ref() == b"SubscriptionReference" {
-                    // Leer el contenido
+            Ok(Event::Start(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref());
+                if name == "SubscriptionReference" || name.ends_with(":SubscriptionReference") {
+                    in_subscription_ref = true;
+                } else if in_subscription_ref && (name == "Address" || name.ends_with(":Address")) {
+                    // Leer el contenido del Address
                     if let Ok(Event::Text(t)) = reader.read_event_into(&mut buf) {
                         subscription_ref = String::from_utf8_lossy(&t).to_string();
                         break;
                     }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref());
+                if name == "SubscriptionReference" || name.ends_with(":SubscriptionReference") {
+                    in_subscription_ref = false;
                 }
             }
             Ok(Event::Eof) => break,
@@ -290,9 +300,9 @@ pub async fn start_onvif_events_service(state: Arc<AppState>) -> Result<(), Stri
         }
     }
 
-    // Crear suscripción (esto requiere un servidor HTTP público para callbacks)
-    // Nota: Para desarrollo local, necesitarías ngrok o similar
-    let callback_url = "http://tu-servidor-publico:3000/api/events/motion";
+    // Crear suscripción (esto requiere un servidor HTTP accesible para callbacks)
+    // Para desarrollo local, usar localhost. Para producción, usar ngrok o IP pública
+    let callback_url = "http://localhost:8081/api/events/motion";
 
     match create_motion_subscription(onvif_url, &callback_url).await {
         Ok(sub_ref) => {
