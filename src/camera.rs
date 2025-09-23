@@ -76,15 +76,41 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
         // Pipeline por defecto (si no se provee plantilla por ENV/archivo)
         let default_pipeline = format!(concat!(
+            // Fuente RTSP
             "rtspsrc location={} latency=2000 protocols=tcp name=src ",
-            "src. ! rtph264depay ! h264parse ! tee name=t_video ",
-            "t_video. ! queue max-size-buffers=500 max-size-time=10000000000 max-size-bytes=100000000 ! mp4mux name=mux faststart=true ! filesink location=\"{}\" sync=false ",
-            "src. ! rtppcmadepay ! alawdec ! audioconvert ! audioresample ! tee name=t_audio ",
-            "t_audio. ! queue max-size-buffers=50 max-size-time=5000000000 ! voaacenc bitrate=64000 ! queue ! mux.audio_0 ",
-            "t_audio. ! queue max-size-buffers=20 max-size-time=3000000000 ! lamemp3enc ! appsink name=audio_mp3_sink sync=false max-buffers=20 drop=true ",
-            "t_video. ! queue max-size-buffers=10 max-size-time=1000000000 ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,format=GRAY8,width=320,height=180 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
-            "t_video. ! queue max-size-buffers=15 max-size-time=2000000000 ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,width=1280,height=720 ! videorate ! video/x-raw,framerate=15/1 ! jpegenc quality=85 ! appsink name=mjpeg_sink sync=false max-buffers=1 drop=true ",
-            "t_video. ! queue max-size-buffers=10 max-size-time=1000000000 ! avdec_h264 ! videoconvert ! videoscale ! video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=8/1 ! jpegenc quality=70 ! appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true "
+
+            // Video: selecciona RTP de video H264 por caps
+            "src. ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! ",
+            "h264parse config-interval=-1 ! tee name=t_video ",
+
+            // Grabación MP4 (video H264 + audio AAC)
+            "t_video. ! queue max-size-buffers=500 max-size-time=10000000000 max-size-bytes=100000000 ! ",
+            "mp4mux name=mux faststart=true streamable=true ! filesink location=\"{}\" sync=false ",
+
+            // Audio: selecciona RTP de audio PCMA (ALaw); si tu cámara usa PCMU, cambia encoding-name=PCMU y depay/decoder
+            "src. ! application/x-rtp,media=audio,encoding-name=PCMA ! rtppcmadepay ! alawdec ! ",
+            "audioconvert ! audioresample ! tee name=t_audio ",
+
+            // Rama de audio hacia MP4 (AAC) con parseador
+            "t_audio. ! queue max-size-buffers=50 max-size-time=5000000000 ! voaacenc bitrate=64000 ! aacparse ! queue ! mux.audio_0 ",
+
+            // Rama de audio hacia streaming MP3
+            "t_audio. ! queue max-size-buffers=20 max-size-time=3000000000 ! lamemp3enc ! ",
+            "appsink name=audio_mp3_sink sync=false max-buffers=20 drop=true ",
+
+            // Detección de movimiento (GRAY8 downscaled)
+            "t_video. ! queue max-size-buffers=10 max-size-time=1000000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
+            "video/x-raw,format=GRAY8,width=320,height=180 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
+
+            // MJPEG high quality
+            "t_video. ! queue max-size-buffers=15 max-size-time=2000000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
+            "video/x-raw,width=1280,height=720 ! videorate ! video/x-raw,framerate=15/1 ! jpegenc quality=85 ! ",
+            "appsink name=mjpeg_sink sync=false max-buffers=1 drop=true ",
+
+            // MJPEG low quality
+            "t_video. ! queue max-size-buffers=10 max-size-time=1000000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
+            "video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=8/1 ! jpegenc quality=70 ! ",
+            "appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true "
         ), camera_url, daily_s);
 
         // Plantilla configurable: ENV `GST_PIPELINE_TEMPLATE` o archivo `GST_PIPELINE_TEMPLATE_FILE`
@@ -215,11 +241,22 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 }
 
 fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>) {
+    use std::{env, sync::{Arc, Mutex}, time::{Duration, Instant}};
+
     let detector_sink = pipeline
         .by_name("detector")
         .unwrap()
         .downcast::<gst_app::AppSink>()
         .unwrap();
+
+    // Config desde ENV con valores por defecto
+    let pixel_diff_min: u8 = env::var("MOTION_PIXEL_DIFF_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(15);
+    let pixel_percent_threshold: f32 = env::var("MOTION_PIXEL_PERCENT").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0); // % de píxeles que deben cambiar
+    let debounce_ms: u64 = env::var("MOTION_DEBOUNCE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000);
+
+    #[derive(Default)]
+    struct Prev { frame: Vec<u8>, last_emit: Option<Instant> }
+    let prev = Arc::new(Mutex::new(Prev::default()));
 
     detector_sink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
@@ -228,23 +265,48 @@ fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>) {
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
                 let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
 
-                // Procesar frame para detección de movimiento
-                let width = 320;
-                let height = 180;
-                let _stride = width;
+                let width = 320usize;
+                let height = 180usize;
                 let data = map.as_slice();
+                if data.len() < width * height { return Ok(gst::FlowSuccess::Ok); }
 
-                // Calcular promedio de brillo para detección simple de movimiento
-                let mut total_brightness: u64 = 0;
-                for &pixel in data {
-                    total_brightness += pixel as u64;
+                let mut st = prev.lock().unwrap();
+                if st.frame.len() != width * height {
+                    // Inicializar frame previo
+                    st.frame.clear();
+                    st.frame.extend_from_slice(&data[..width*height]);
+                    st.last_emit = None;
+                    return Ok(gst::FlowSuccess::Ok);
                 }
-                let avg_brightness = total_brightness / (width * height) as u64;
 
-                // Heurística simple: umbral de brillo
-                if avg_brightness < 100 {
-                    let now = Local::now().format("%H:%M:%S").to_string();
-                    println!("🚶 Movimiento detectado a las {}", now);
+                // Muestreo: cada 4 px en ambas direcciones para bajar costo
+                let step = 4usize;
+                let mut changed = 0usize;
+                let mut total = 0usize;
+                for y in (0..height).step_by(step) {
+                    let row_off = y * width;
+                    for x in (0..width).step_by(step) {
+                        let idx = row_off + x;
+                        let a = st.frame[idx];
+                        let b = data[idx];
+                        let diff = if a > b { a - b } else { b - a };
+                        if diff as u8 >= pixel_diff_min { changed += 1; }
+                        total += 1;
+                    }
+                }
+                let percent = (changed as f32) * 100.0 / (total.max(1) as f32);
+
+                // Actualiza frame previo
+                st.frame[..width*height].copy_from_slice(&data[..width*height]);
+
+                if percent >= pixel_percent_threshold {
+                    let now = Instant::now();
+                    let allow = match st.last_emit { Some(t) => now.duration_since(t) >= Duration::from_millis(debounce_ms), None => true };
+                    if allow {
+                        st.last_emit = Some(now);
+                        let ts = Local::now().format("%H:%M:%S").to_string();
+                        println!("🚶 Movimiento detectado ({}% cambios) a las {}", percent as u32, ts);
+                    }
                 }
 
                 Ok(gst::FlowSuccess::Ok)
@@ -295,21 +357,31 @@ fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>) {
     );
 }
 fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>) {
+    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
     let audio_sink_app = pipeline
         .by_name("audio_mp3_sink")
         .unwrap()
         .downcast::<gst_app::AppSink>()
         .unwrap();
     let tx_audio = state.audio_mp3_tx.clone();
+    // Telemetría: contar buffers y loguear cada N
+    let counter = Arc::new(AtomicU64::new(0));
     audio_sink_app.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
-            .new_sample(move |s| {
+            .new_sample({
+                let counter = counter.clone();
+                move |s| {
                 let sample = s.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
                 let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                 let data = Bytes::copy_from_slice(map.as_ref());
                 let _ = tx_audio.send(data);
+                let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if n % 50 == 0 { // cada ~50 paquetes (~1-2s según bitrate)
+                    println!("🔊 Audio MP3 buffers: {}", n);
+                }
                 Ok(gst::FlowSuccess::Ok)
+            }
             })
             .build(),
     );
