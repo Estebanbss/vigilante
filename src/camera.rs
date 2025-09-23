@@ -89,7 +89,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
             // Grabación MP4 - video con caps explícitos antes del muxer
             "t_video. ! queue name=recq max-size-buffers=50 max-size-time=1000000000 max-size-bytes=10000000 ! ", // Reducido buffers y tiempo para menor latencia
-            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=false streamable=true fragment-duration=1000 ! ", // Evita buffering de faststart durante grabación continua
+            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true fragment-duration=1000 ! ", // Faststart para duración disponible desde el inicio
             "filesink location=\"{}\" sync=false ",
 
             // Audio: selecciona RTP de audio PCMA (ALaw); si tu cámara usa PCMU, cambia encoding-name=PCMU y depay/decoder
