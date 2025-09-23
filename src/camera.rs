@@ -88,12 +88,15 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             "src. ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! h264parse config-interval=-1 ! tee name=t_video ",
 
             // Grabación MP4 - video con caps explícitos antes del muxer
-            "t_video. ! queue name=recq max-size-buffers=500 max-size-time=10000000000 max-size-bytes=100000000 ! ",
-            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true fragment-duration=2000 ! ",
+            "t_video. ! queue name=recq max-size-buffers=50 max-size-time=1000000000 max-size-bytes=10000000 ! ", // Reducido buffers y tiempo para menor latencia
+            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true fragment-duration=1000 ! ", // Reducido fragment-duration para más frecuencia
             "filesink location=\"{}\" sync=false ",
 
             // Audio: selecciona RTP de audio PCMA (ALaw); si tu cámara usa PCMU, cambia encoding-name=PCMU y depay/decoder
             "src. ! application/x-rtp,media=audio,encoding-name=PCMA ! rtppcmadepay ! alawdec ! audioconvert ! audioresample ! tee name=t_audio ",
+
+            // Rama de audio hacia grabación MP4 (AAC)
+            "t_audio. ! queue max-size-buffers=20 max-size-time=1000000000 ! voaacenc ! aacparse ! queue ! mux.audio_0 ", // Reducido buffers y tiempo
 
             // Rama de audio hacia streaming MP3 (live)
             "t_audio. ! queue max-size-buffers=20 max-size-time=3000000000 ! lamemp3enc ! appsink name=audio_mp3_sink sync=false max-buffers=20 drop=true ",

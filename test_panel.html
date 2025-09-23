@@ -336,14 +336,18 @@
 
                async function makeRequest(endpoint, options = {}) {
                     const token = getToken();
-                    const url = `${API_BASE}${endpoint}`;
+                    let url = `${API_BASE}${endpoint}`;
+                    // Añadir token en query si no está ya
+                    if (!url.includes("token=")) {
+                         url +=
+                              (url.includes("?") ? "&" : "?") +
+                              "token=" +
+                              encodeURIComponent(token);
+                    }
 
                     const requestOptions = {
                          ...options,
-                         headers: {
-                              Authorization: token,
-                              ...options.headers,
-                         },
+                         // Quitar headers Authorization, usar query
                     };
 
                     try {
@@ -509,7 +513,7 @@
                     const token = getToken();
 
                     // Video MJPEG
-                    img.src = `${API_BASE}/api/live/mjpeg`;
+                    img.src = `${API_BASE}/api/live/mjpeg?token=${token}`;
                     img.style.display = "block";
                     info.innerHTML = "<p>🔴 Conectando video...</p>";
                     img.onload = () => {
@@ -547,8 +551,7 @@
                          });
                          try {
                               const resp = await fetch(
-                                   `${API_BASE}/api/live/audio`,
-                                   { headers: { Authorization: token } }
+                                   `${API_BASE}/api/live/audio?token=${token}`
                               );
                               if (!resp.ok || !resp.body)
                                    throw new Error("Audio HTTP " + resp.status);
@@ -596,12 +599,9 @@
                     try {
                          const today = new Date().toISOString().split("T")[0];
                          const response = await fetch(
-                              `${API_BASE}/api/recordings/log/${today}`,
-                              {
-                                   headers: {
-                                        Authorization: getToken(),
-                                   },
-                              }
+                              `${API_BASE}/api/recordings/log/${today}?token=${encodeURIComponent(
+                                   getToken()
+                              )}`
                          );
                          if (!response.ok)
                               throw new Error(

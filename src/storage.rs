@@ -419,10 +419,10 @@ pub async fn stream_recording_tail(
 
             if !sent_header {
                 // Esperar a que el archivo tenga suficiente tamaño para contener metadatos
-                if len >= 1024 * 1024 { // Esperar al menos 1MB antes de intentar
+                if len >= 64 * 1024 { // Reducido de 1MB a 64KB - suficiente para ftyp + moov básico
                     // Con faststart=true, el moov debería estar al inicio
-                    // Leer los primeros 2MB para asegurar tener ftyp+moov
-                    let header_size = std::cmp::min(len, 2 * 1024 * 1024) as usize;
+                    // Leer los primeros 128KB para asegurar tener ftyp+moov
+                    let header_size = std::cmp::min(len, 128 * 1024) as usize; // Reducido de 2MB a 128KB
                     let mut header_buf = vec![0u8; header_size];
 
                     if let Err(e) = file.seek(std::io::SeekFrom::Start(0)).await {
@@ -439,7 +439,7 @@ pub async fn stream_recording_tail(
                                 yield Ok::<Bytes, std::io::Error>(Bytes::from(header_buf));
                                 continue;
                             } else {
-                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                tokio::time::sleep(Duration::from_millis(100)).await; // Reducido de 500ms a 100ms
                                 continue;
                             }
                         }
@@ -457,9 +457,9 @@ pub async fn stream_recording_tail(
                     continue;
                 }
             } else if len > pos {
-                // Para datos después del header, esperar fragmentos razonables
+                // Para datos después del header, enviar fragmentos más pequeños para menor latencia
                 let available = len - pos;
-                if available >= 32 * 1024 { // Esperar al menos 32KB antes de enviar
+                if available >= 4 * 1024 { // Reducido de 32KB a 4KB para menor latencia
                     let to_read = std::cmp::min(buf.len() as u64, available) as usize;
                     if let Err(e) = file.seek(std::io::SeekFrom::Start(pos)).await {
                         eprintln!("seek err: {}", e);
@@ -473,7 +473,8 @@ pub async fn stream_recording_tail(
                             continue;
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                            // Se alcanzó fin temporal, esperar
+                            // Se alcanzó fin temporal, esperar menos tiempo
+                            tokio::time::sleep(Duration::from_millis(100)).await; // Reducido de 500ms a 100ms
                         }
                         Err(e) => {
                             eprintln!("read err: {}", e);
@@ -484,7 +485,7 @@ pub async fn stream_recording_tail(
             }
 
             // No hay nuevos datos o aún no listo: dormir un poco
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await; // Reducido de 500ms a 100ms para más responsividad
         }
     };
 
