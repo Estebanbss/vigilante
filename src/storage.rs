@@ -343,20 +343,22 @@ pub async fn stream_recording(
     }
 
     // Construir stream limitado al rango solicitado
+    // Mayor buffer y uso de read() en lugar de read_exact() para evitar bloqueos en FS remotos
     let total_len = end.saturating_sub(start).saturating_add(1);
     let stream = async_stream::stream! {
         let mut remaining = total_len;
-        let mut buf = vec![0u8; 64 * 1024];
+        // 512KB buffer para mejorar throughput en lectura secuencial
+        let mut buf = vec![0u8; 512 * 1024];
         while remaining > 0 {
             let to_read = std::cmp::min(buf.len() as u64, remaining) as usize;
-            match file.read_exact(&mut buf[..to_read]).await {
-                Ok(_) => {
-                    remaining -= to_read as u64;
-                    yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buf[..to_read]));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // Archivo terminó inesperadamente; salir
+            match file.read(&mut buf[..to_read]).await {
+                Ok(0) => {
+                    // EOF alcanzado antes de completar el rango
                     break;
+                }
+                Ok(n) => {
+                    remaining = remaining.saturating_sub(n as u64);
+                    yield Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(&buf[..n]));
                 }
                 Err(e) => {
                     eprintln!("stream read err: {}", e);
@@ -383,6 +385,9 @@ pub async fn stream_recording(
     );
     h.insert(axum::http::header::PRAGMA, "no-cache".parse().unwrap());
     h.insert(axum::http::header::EXPIRES, "0".parse().unwrap());
+    // Evitar buffering por proxies/reverse proxies, y permitir envío inmediato
+    h.insert("X-Accel-Buffering", "no".parse().unwrap());
+    h.insert(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate".parse().unwrap());
     if status == StatusCode::PARTIAL_CONTENT {
         let cr = format!("bytes {}-{}/{}", start, end, file_size);
         h.insert(axum::http::header::CONTENT_RANGE, cr.parse().unwrap());

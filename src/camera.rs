@@ -80,23 +80,29 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        let default_pipeline = format!(concat!(
+        // Grabación segmentada opcional (mejora carga inicial y saltos)
+        let record_segment_seconds: u64 = std::env::var("RECORD_SEGMENT_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
+        let pipeline_str_default = format!(concat!(
             // Fuente RTSP
             "rtspsrc location={} latency=2000 protocols=tcp name=src ",
 
             // Video: selecciona RTP de video H264 por caps
             "src. ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! h264parse config-interval=-1 ! tee name=t_video ",
 
-            // Grabación MP4 - video con caps explícitos antes del muxer
-            "t_video. ! queue name=recq max-size-buffers=50 max-size-time=500000000 max-size-bytes=10000000 ! ", // Reducido buffers y tiempo para menor latencia
-            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true fragment-duration=1000 ! ", // Faststart para duración disponible desde el inicio
+            // Grabación MP4 continua
+            "t_video. ! queue name=recq max-size-buffers=50 max-size-time=500000000 max-size-bytes=10000000 ! ",
+            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true fragment-duration=1000 ! ",
             "filesink location=\"{}\" sync=false ",
 
-            // Audio: selecciona RTP de audio PCMA (ALaw); si tu cámara usa PCMU, cambia encoding-name=PCMU y depay/decoder
+            // Audio: selecciona RTP de audio PCMA (ALaw)
             "src. ! application/x-rtp,media=audio,encoding-name=PCMA ! rtppcmadepay ! alawdec ! audioconvert ! audioresample ! tee name=t_audio ",
 
             // Rama de audio hacia grabación MP4 (AAC)
-            "t_audio. ! queue max-size-buffers=20 max-size-time=500000000 ! voaacenc ! aacparse ! queue ! mux.audio_0 ", // Reducido buffers y tiempo
+            "t_audio. ! queue max-size-buffers=20 max-size-time=500000000 ! voaacenc ! aacparse ! queue ! mux.audio_0 ",
 
             // Rama de audio hacia streaming MP3 (live)
             "t_audio. ! queue max-size-buffers=5 max-size-time=100000000 ! lamemp3enc quality=9 ! appsink name=audio_mp3_sink sync=false max-buffers=1 drop=true ",
@@ -115,6 +121,50 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             "video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=8/1 ! jpegenc quality=70 ! ",
             "appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true "
         ), camera_url, daily_s);
+
+        // Pipeline con splitmuxsink (segmentos)
+        let segments_location = day_dir.join(format!("{}-%05d.mp4", date_str));
+        let segments_location_s = segments_location.to_string_lossy();
+        let max_size_time_ns = record_segment_seconds.saturating_mul(1_000_000_000);
+        let pipeline_str_segmented = format!(concat!(
+            // Fuente RTSP
+            "rtspsrc location={} latency=2000 protocols=tcp name=src ",
+
+            // Video
+            "src. ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! h264parse config-interval=-1 ! tee name=t_video ",
+
+            // Grabación segmentada con splitmuxsink (MP4)
+            "t_video. ! queue name=recq max-size-buffers=50 max-size-time=500000000 max-size-bytes=10000000 ! ",
+            "video/x-h264,stream-format=avc,alignment=au ! splitmuxsink name=spl muxer=mp4mux max-size-time={} location=\"{}\" ",
+
+            // Audio
+            "src. ! application/x-rtp,media=audio,encoding-name=PCMA ! rtppcmadepay ! alawdec ! audioconvert ! audioresample ! tee name=t_audio ",
+            "t_audio. ! queue max-size-buffers=20 max-size-time=500000000 ! voaacenc ! aacparse ! queue ! spl.audio_0 ",
+
+            // Rama de audio hacia streaming MP3 (live)
+            "t_audio. ! queue max-size-buffers=5 max-size-time=100000000 ! lamemp3enc quality=9 ! appsink name=audio_mp3_sink sync=false max-buffers=1 drop=true ",
+
+            // Detección de movimiento
+            "t_video. ! queue max-size-buffers=10 max-size-time=500000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
+            "video/x-raw,format=GRAY8,width=320,height=180 ! appsink name=detector emit-signals=true sync=false max-buffers=1 drop=true ",
+
+            // MJPEG high
+            "t_video. ! queue max-size-buffers=15 max-size-time=500000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
+            "video/x-raw,width=1280,height=720 ! videorate ! video/x-raw,framerate=15/1 ! jpegenc quality=85 ! ",
+            "appsink name=mjpeg_sink sync=false max-buffers=1 drop=true ",
+
+            // MJPEG low
+            "t_video. ! queue max-size-buffers=10 max-size-time=500000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
+            "video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=8/1 ! jpegenc quality=70 ! ",
+            "appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true "
+        ), camera_url, max_size_time_ns, segments_location_s);
+
+        let default_pipeline = if record_segment_seconds > 0 {
+            println!("🧩 Segmentación activada: {} s por archivo", record_segment_seconds);
+            pipeline_str_segmented
+        } else {
+            pipeline_str_default
+        };
 
         // Si se desea grabar audio AAC dentro del MP4, adjuntar rama al muxer dinámicamente via plantilla ENV.
         // Nota: En el pipeline por defecto ya está el muxer creado; aquí sólo avisamos cómo activarlo con plantilla.
@@ -225,35 +275,62 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         *state.pipeline.lock().await = Some(pipeline.clone());
         println!("🎬 Grabación activa - esperando datos...");
 
-        // Verificar que el archivo esté creciendo de forma periódica
+        // Verificar que la salida esté creciendo de forma periódica (soporta segmentación)
         tokio::spawn({
             let daily_path = daily_path.clone();
+            let day_dir = day_dir.clone();
+            let date_str = date_str.clone();
             let duration = duration_until_midnight;
+            let record_segment_seconds = record_segment_seconds;
             async move {
                 use tokio::time::{sleep, Duration, Instant};
+                use std::fs;
                 let start = Instant::now();
-                let mut last = 0u64;
+                let mut last_size = 0u64;
                 let mut stagnant_checks = 0u32;
                 // primera espera breve para permitir escritura inicial
                 sleep(Duration::from_secs(15)).await;
                 while start.elapsed() < duration {
-                    match std::fs::metadata(&daily_path) {
-                        Ok(meta) => {
-                            let size = meta.len();
-                            if size > last {
-                                let delta = size - last;
-                                println!("📈 Archivo creciendo: {} (+{} bytes)", size, delta);
-                                last = size;
-                                stagnant_checks = 0;
-                            } else {
-                                stagnant_checks += 1;
-                                if stagnant_checks == 3 {
-                                    eprintln!("⚠️ Archivo no crece ({} bytes) tras 3 chequeos. Verificar rama hacia mp4mux/filesink.", size);
+                    let cur_size = if record_segment_seconds > 0 {
+                        // Buscar el segmento más reciente YYYY-MM-DD-xxxxx.mp4
+                        let mut newest: Option<(u32, u64)> = None; // (index, size)
+                        if let Ok(entries) = fs::read_dir(&day_dir) {
+                            for ent in entries.flatten() {
+                                let p = ent.path();
+                                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                                    if name.starts_with(&format!("{}-", date_str)) && name.ends_with(".mp4") {
+                                        // extraer índice
+                                        if let Some(num_str) = name.trim_end_matches(".mp4").split('-').last() {
+                                            if let Ok(idx) = num_str.parse::<u32>() {
+                                                if let Ok(meta) = fs::metadata(&p) {
+                                                    let size = meta.len();
+                                                    if newest.as_ref().map(|(i, _)| idx > *i).unwrap_or(true) {
+                                                        newest = Some((idx, size));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
-                        Err(e) => eprintln!("⚠️ No se puede acceder al archivo de video: {}", e),
+                        newest.map(|(_, s)| s).unwrap_or(0)
+                    } else {
+                        fs::metadata(&daily_path).map(|m| m.len()).unwrap_or(0)
+                    };
+
+                    if cur_size > last_size {
+                        let delta = cur_size - last_size;
+                        println!("📈 Archivo(s) creciendo: {} (+{} bytes)", cur_size, delta);
+                        last_size = cur_size;
+                        stagnant_checks = 0;
+                    } else {
+                        stagnant_checks += 1;
+                        if stagnant_checks == 3 {
+                            eprintln!("⚠️ Salida de grabación no crece ({} bytes) tras 3 chequeos.", cur_size);
+                        }
                     }
+
                     sleep(Duration::from_secs(30)).await;
                 }
             }
