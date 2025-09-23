@@ -7,11 +7,10 @@ pub mod stream;
 
 use bytes::Bytes;
 use std::{path::PathBuf, sync::Arc};
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, watch, Mutex};
 
 // Dependencias de GStreamer
 use gstreamer as gst;
-use tokio::sync::broadcast;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -22,7 +21,7 @@ pub struct AppState {
     pub pipeline: Arc<Mutex<Option<gst::Pipeline>>>,
     pub mjpeg_tx: broadcast::Sender<Bytes>,
     pub mjpeg_low_tx: broadcast::Sender<Bytes>,
-    pub audio_mp3_tx: broadcast::Sender<Bytes>,
+    pub audio_mp3_tx: watch::Sender<Bytes>,
     pub enable_hls: bool,
     // Detección manual de movimiento (cuando ONVIF no está disponible)
     pub enable_manual_motion_detection: bool,

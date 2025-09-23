@@ -772,9 +772,7 @@ fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Ar
                     }
                 };
                 let data = Bytes::copy_from_slice(map.as_ref());
-                if let Err(e) = tx_audio.send(data) {
-                    eprintln!("❌ Error sending audio data to broadcast channel: {:?}", e);
-                }
+                let _ = tx_audio.send_replace(data);
                 Ok(gst::FlowSuccess::Ok)
             })
             .build(),

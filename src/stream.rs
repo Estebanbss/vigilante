@@ -168,15 +168,14 @@ pub async fn stream_audio_handler(
 
     let stream = async_stream::stream! {
         loop {
-            match rx.recv().await {
-                Ok(chunk) => yield Ok::<Bytes, std::io::Error>(chunk),
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    eprintln!("❌ Audio broadcast channel closed");
-                    break;
+            match rx.changed().await {
+                Ok(_) => {
+                    let chunk = rx.borrow().clone();
+                    yield Ok::<Bytes, std::io::Error>(chunk);
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    eprintln!("⚠️ Audio stream lagged, skipping frames");
-                    continue;
+                Err(_) => {
+                    eprintln!("❌ Audio watch channel closed");
+                    break;
                 }
             }
         }
