@@ -1,6 +1,6 @@
-use crate::{AppState, auth::RequireAuth};
+use crate::{auth::RequireAuth, AppState};
 use axum::{
-    extract::{State, Path, Query},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -16,10 +16,10 @@ use bytes::Bytes;
 use std::sync::Arc;
 // use std::path::PathBuf;
 // use std::fs;
-use tokio::fs::File;
-use tokio_util::io::ReaderStream;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
 
 // Autenticación: por header Authorization global y opcionalmente por query `?token=` en rutas de streaming si STREAM_TOKEN_IN_QUERY=true
 
@@ -30,7 +30,9 @@ pub async fn stream_hls_handler(
 ) -> impl IntoResponse {
     // Sirve archivos HLS desde STORAGE_PATH/hls
     let mut rel = path.trim_start_matches('/').to_string();
-    if rel.is_empty() { rel = "stream.m3u8".to_string(); }
+    if rel.is_empty() {
+        rel = "stream.m3u8".to_string();
+    }
     let hls_root = state.storage_path.join("hls");
     let candidate = hls_root.join(&rel);
     let Ok(full_path) = candidate.canonicalize() else {
@@ -39,13 +41,24 @@ pub async fn stream_hls_handler(
     let Ok(root) = hls_root.canonicalize() else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "").into_response();
     };
-    if !full_path.starts_with(&root) { return (StatusCode::FORBIDDEN, "").into_response(); }
+    if !full_path.starts_with(&root) {
+        return (StatusCode::FORBIDDEN, "").into_response();
+    }
 
-    let file = match File::open(&full_path).await { Ok(f)=> f, Err(_)=> return (StatusCode::NOT_FOUND, "").into_response() };
+    let file = match File::open(&full_path).await {
+        Ok(f) => f,
+        Err(_) => return (StatusCode::NOT_FOUND, "").into_response(),
+    };
     let stream = ReaderStream::new(file);
     let mut resp = Response::new(Body::from_stream(stream));
     let headers = resp.headers_mut();
-    let ctype = if rel.ends_with(".m3u8") { "application/vnd.apple.mpegurl" } else if rel.ends_with(".ts") { "video/mp2t" } else { "application/octet-stream" };
+    let ctype = if rel.ends_with(".m3u8") {
+        "application/vnd.apple.mpegurl"
+    } else if rel.ends_with(".ts") {
+        "video/mp2t"
+    } else {
+        "application/octet-stream"
+    };
     headers.insert(axum::http::header::CONTENT_TYPE, ctype.parse().unwrap());
     resp
 }
@@ -87,7 +100,11 @@ pub async fn stream_mjpeg_handler(
     let boundary = "frame";
     let mut first = true;
     let target_fps = params.fps.unwrap_or(0);
-    let frame_interval = if target_fps > 0 { Some(Duration::from_secs_f64(1.0 / target_fps as f64)) } else { None };
+    let frame_interval = if target_fps > 0 {
+        Some(Duration::from_secs_f64(1.0 / target_fps as f64))
+    } else {
+        None
+    };
     let mut last_sent: Option<Instant> = None;
     let stream = async_stream::stream! {
         while let Ok(jpeg) = rx.recv().await {
@@ -117,8 +134,16 @@ pub async fn stream_mjpeg_handler(
 
     let mut resp = Response::new(Body::from_stream(stream));
     let headers = resp.headers_mut();
-    headers.insert(axum::http::header::CONTENT_TYPE, format!("multipart/x-mixed-replace; boundary={}", boundary).parse().unwrap());
-    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        format!("multipart/x-mixed-replace; boundary={}", boundary)
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        "no-cache".parse().unwrap(),
+    );
     Ok(resp)
 }
 
@@ -126,10 +151,10 @@ pub async fn stream_mjpeg_handler(
 pub struct MjpegParams {
     pub fps: Option<u32>,
     pub preset: Option<String>, // "high" (default) o "low"
-    // Futuro: calidad/resolución. Por ahora no re-comprimimos para evitar alto CPU.
-    // pub quality: Option<u8>,
-    // pub width: Option<u32>,
-    // pub height: Option<u32>,
+                                // Futuro: calidad/resolución. Por ahora no re-comprimimos para evitar alto CPU.
+                                // pub quality: Option<u8>,
+                                // pub width: Option<u32>,
+                                // pub height: Option<u32>,
 }
 
 // Live audio endpoint over chunked HTTP (MP3)
@@ -149,8 +174,14 @@ pub async fn stream_audio_handler(
 
     let mut resp = Response::new(Body::from_stream(stream));
     let headers = resp.headers_mut();
-    headers.insert(axum::http::header::CONTENT_TYPE, "audio/mpeg".parse().unwrap());
-    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "audio/mpeg".parse().unwrap(),
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        "no-cache".parse().unwrap(),
+    );
     Ok(resp)
 }
 // HLS ahora es generado dentro del pipeline principal (camera.rs)

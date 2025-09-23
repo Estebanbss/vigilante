@@ -1,9 +1,12 @@
-use axum::{extract::State, http::StatusCode, response::Response};
+use crate::AppState;
 use axum::body::Body;
+use axum::{extract::State, http::StatusCode, response::Response};
 use serde::Deserialize;
 use std::sync::Arc;
-use tokio::{io::{AsyncBufReadExt, BufReader}, process::Command};
-use crate::AppState;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::Command,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct LogsParams {
@@ -17,10 +20,10 @@ pub struct LogsParams {
 pub async fn stream_journal_logs(
     State(_state): State<Arc<AppState>>,
     axum::extract::Query(params): axum::extract::Query<LogsParams>,
-)
--> Result<Response, StatusCode> {
-
-    let unit = params.unit.unwrap_or_else(|| "vigilante.service".to_string());
+) -> Result<Response, StatusCode> {
+    let unit = params
+        .unit
+        .unwrap_or_else(|| "vigilante.service".to_string());
     let n = params.n.unwrap_or(0).to_string();
 
     // Spawn journalctl -f
@@ -31,7 +34,10 @@ pub async fn stream_journal_logs(
         .spawn()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let stdout = child.stdout.take().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut reader = BufReader::new(stdout);
 
     let stream = async_stream::stream! {
@@ -53,9 +59,18 @@ pub async fn stream_journal_logs(
 
     let mut resp = Response::new(Body::from_stream(stream));
     let headers = resp.headers_mut();
-    headers.insert(axum::http::header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
-    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache".parse().unwrap());
-    headers.insert(axum::http::header::CONNECTION, "keep-alive".parse().unwrap());
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "text/event-stream".parse().unwrap(),
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        "no-cache".parse().unwrap(),
+    );
+    headers.insert(
+        axum::http::header::CONNECTION,
+        "keep-alive".parse().unwrap(),
+    );
     headers.insert("X-Accel-Buffering", "no".parse().unwrap());
     Ok(resp)
 }

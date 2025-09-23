@@ -1,22 +1,22 @@
-use crate::{AppState, auth::RequireAuth};
+use crate::{auth::RequireAuth, AppState};
+use axum::http::header;
+use axum::response::sse::Event;
 use axum::{
-    extract::{Path, State, Query},
+    body::Body,
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response, Sse},
     Json,
-    body::Body,
 };
-use axum::response::sse::Event;
-use futures::Stream;
-use serde::{Serialize, Deserialize};
-use std::{fs, path::PathBuf, sync::Arc, time::Duration, convert::Infallible};
-use fs2;
-use chrono::{DateTime, Utc};
-use tokio::{fs::File, time::sleep};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader, AsyncBufReadExt};
 use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use fs2;
+use futures::Stream;
+use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use axum::http::header;
+use std::{convert::Infallible, fs, path::PathBuf, sync::Arc, time::Duration};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::{fs::File, time::sleep};
 
 // Estructura para la respuesta estándar de la API
 #[derive(Serialize)]
@@ -56,10 +56,14 @@ pub async fn get_storage_info(
         }
         Err(e) => {
             eprintln!("❌ Error al obtener info de almacenamiento: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse {
-                status: "error".to_string(),
-                message: "Failed to get storage info".to_string(),
-            })).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse {
+                    status: "error".to_string(),
+                    message: "Failed to get storage info".to_string(),
+                }),
+            )
+                .into_response()
         }
     }
 }
@@ -99,7 +103,7 @@ fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
                     if file_name_str.ends_with("-log.txt") {
                         continue;
                     }
-                    
+
                     if let Ok(metadata) = fs::metadata(&entry_path) {
                         if let Ok(modified_time) = metadata.modified() {
                             let recording = Recording {
@@ -126,7 +130,7 @@ pub async fn list_recordings(
 ) -> impl IntoResponse {
     // Obtenemos todas las grabaciones de forma recursiva
     let mut all_recordings = get_recordings_recursively(&state.storage_path);
-    
+
     // Filtramos por fecha si se provee el parámetro
     if let Some(filter_date) = &params.date {
         all_recordings.retain(|rec| rec.name.starts_with(filter_date));
@@ -137,12 +141,9 @@ pub async fn list_recordings(
     let limit = params.limit.unwrap_or(20) as usize;
     let start = (page - 1) * limit;
 
-    let paginated_recordings: Vec<Recording> = all_recordings
-        .into_iter()
-        .skip(start)
-        .take(limit)
-        .collect();
-    
+    let paginated_recordings: Vec<Recording> =
+        all_recordings.into_iter().skip(start).take(limit).collect();
+
     (StatusCode::OK, Json(paginated_recordings)).into_response()
 }
 
@@ -154,35 +155,67 @@ pub async fn delete_recording(
     let candidate = PathBuf::from(&state.storage_path).join(&file_path);
     // Canonicalize to avoid .. traversal and ensure it's within storage root
     let Ok(full_path) = candidate.canonicalize() else {
-        return (StatusCode::BAD_REQUEST, Json(ApiResponse { status: "error".into(), message: "Invalid path".into()})).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                status: "error".into(),
+                message: "Invalid path".into(),
+            }),
+        )
+            .into_response();
     };
     let Ok(root) = state.storage_path.canonicalize() else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse { status: "error".into(), message: "Storage misconfigured".into()})).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse {
+                status: "error".into(),
+                message: "Storage misconfigured".into(),
+            }),
+        )
+            .into_response();
     };
     if !full_path.starts_with(&root) {
-        return (StatusCode::FORBIDDEN, Json(ApiResponse { status: "error".into(), message: "Path not allowed".into()})).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse {
+                status: "error".into(),
+                message: "Path not allowed".into(),
+            }),
+        )
+            .into_response();
     }
 
     if full_path.exists() && full_path.is_file() {
         match fs::remove_file(&full_path) {
-            Ok(_) => (StatusCode::OK, Json(ApiResponse {
-                status: "success".to_string(),
-                message: "File deleted successfully".to_string(),
-            })).into_response(),
+            Ok(_) => (
+                StatusCode::OK,
+                Json(ApiResponse {
+                    status: "success".to_string(),
+                    message: "File deleted successfully".to_string(),
+                }),
+            )
+                .into_response(),
             Err(e) => {
                 eprintln!("❌ Error al eliminar el archivo: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse {
-                    status: "error".to_string(),
-                    message: "Failed to delete file".to_string(),
-                })).into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse {
+                        status: "error".to_string(),
+                        message: "Failed to delete file".to_string(),
+                    }),
+                )
+                    .into_response()
             }
         }
     } else {
-        (StatusCode::NOT_FOUND, Json(ApiResponse {
-            status: "error".to_string(),
-            message: "File not found".to_string(),
-        })).into_response()
-        
+        (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse {
+                status: "error".to_string(),
+                message: "File not found".to_string(),
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -193,24 +226,36 @@ pub async fn stream_recording(
     Path(file_path): Path<String>,
 ) -> Result<Response, StatusCode> {
     // Autenticación ya validada por middleware global
-    
+
     let candidate = PathBuf::from(&state.storage_path).join(&file_path);
     // Canonicalize to avoid .. traversal and ensure it's within storage root
-    let full_path = candidate.canonicalize().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let root = state.storage_path.canonicalize().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let full_path = candidate
+        .canonicalize()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let root = state
+        .storage_path
+        .canonicalize()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !full_path.starts_with(&root) {
         return Err(StatusCode::FORBIDDEN);
     }
 
     // Tamaño del archivo para rangos
-    let meta = match tokio::fs::metadata(&full_path).await { Ok(m)=> m, Err(_)=> return Err(StatusCode::NOT_FOUND) };
+    let meta = match tokio::fs::metadata(&full_path).await {
+        Ok(m) => m,
+        Err(_) => return Err(StatusCode::NOT_FOUND),
+    };
     let file_size = meta.len();
 
     // Soporte para Range: bytes=START-END
-    let range_hdr = headers.get(axum::http::header::RANGE).and_then(|v| v.to_str().ok());
+    let range_hdr = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|v| v.to_str().ok());
     let (status, start, end) = if let Some(r) = range_hdr {
         // Parseo simple del primer rango
-        if !r.starts_with("bytes=") { return Err(StatusCode::RANGE_NOT_SATISFIABLE); }
+        if !r.starts_with("bytes=") {
+            return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+        }
         let spec = &r[6..];
         let mut parts = spec.splitn(2, '-');
         let a = parts.next().unwrap_or("");
@@ -218,24 +263,39 @@ pub async fn stream_recording(
         let (start, end) = if a.is_empty() {
             // Sufijo: bytes=-N (últimos N bytes)
             let n: u64 = b.parse().unwrap_or(0);
-            if n == 0 { (0, file_size.saturating_sub(1)) } else {
+            if n == 0 {
+                (0, file_size.saturating_sub(1))
+            } else {
                 let s = file_size.saturating_sub(n);
                 (s, file_size.saturating_sub(1))
             }
         } else {
             let s: u64 = a.parse().unwrap_or(0);
-            let e: u64 = if b.is_empty() { file_size.saturating_sub(1) } else { b.parse().unwrap_or(0) };
+            let e: u64 = if b.is_empty() {
+                file_size.saturating_sub(1)
+            } else {
+                b.parse().unwrap_or(0)
+            };
             (s, e.min(file_size.saturating_sub(1)))
         };
-        if start > end || start >= file_size { return Err(StatusCode::RANGE_NOT_SATISFIABLE); }
+        if start > end || start >= file_size {
+            return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+        }
         (StatusCode::PARTIAL_CONTENT, start, end)
     } else {
         (StatusCode::OK, 0u64, file_size.saturating_sub(1))
     };
 
     // Abrir y posicionar
-    let mut file = match File::open(&full_path).await { Ok(f)=> f, Err(_)=> return Err(StatusCode::NOT_FOUND) };
-    if start > 0 { if let Err(_) = file.seek(std::io::SeekFrom::Start(start)).await { return Err(StatusCode::INTERNAL_SERVER_ERROR); } }
+    let mut file = match File::open(&full_path).await {
+        Ok(f) => f,
+        Err(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    if start > 0 {
+        if let Err(_) = file.seek(std::io::SeekFrom::Start(start)).await {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
 
     // Construir stream limitado al rango solicitado
     let total_len = end.saturating_sub(start).saturating_add(1);
@@ -263,10 +323,19 @@ pub async fn stream_recording(
 
     let mut resp = Response::new(Body::from_stream(stream));
     let h = resp.headers_mut();
-    h.insert(axum::http::header::CONTENT_TYPE, "video/mp4".parse().unwrap());
-    h.insert(axum::http::header::CONTENT_DISPOSITION, "inline".parse().unwrap());
+    h.insert(
+        axum::http::header::CONTENT_TYPE,
+        "video/mp4".parse().unwrap(),
+    );
+    h.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        "inline".parse().unwrap(),
+    );
     h.insert(axum::http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    h.insert(axum::http::header::CONTENT_LENGTH, total_len.to_string().parse().unwrap());
+    h.insert(
+        axum::http::header::CONTENT_LENGTH,
+        total_len.to_string().parse().unwrap(),
+    );
     if status == StatusCode::PARTIAL_CONTENT {
         let cr = format!("bytes {}-{}/{}", start, end, file_size);
         h.insert(axum::http::header::CONTENT_RANGE, cr.parse().unwrap());
@@ -289,7 +358,11 @@ pub async fn get_log_file(
     };
     let full_path_new = day_dir.join(&file_name);
     // Compat: fallback a raíz si no existe
-    let full_path = if full_path_new.exists() { full_path_new } else { state.storage_path.join(&file_name) };
+    let full_path = if full_path_new.exists() {
+        full_path_new
+    } else {
+        state.storage_path.join(&file_name)
+    };
 
     match tokio::fs::read_to_string(&full_path).await {
         Ok(content) => (StatusCode::OK, content).into_response(),
@@ -298,7 +371,11 @@ pub async fn get_log_file(
             if e.kind() == std::io::ErrorKind::NotFound {
                 (StatusCode::NOT_FOUND, "".to_string()).into_response()
             } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Error interno del servidor".to_string()).into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Error interno del servidor".to_string(),
+                )
+                    .into_response()
             }
         }
     }
@@ -312,12 +389,21 @@ pub async fn stream_recording_tail(
     // Autenticación ya validada por middleware flexible
 
     let candidate = PathBuf::from(&state.storage_path).join(&file_path);
-    let full_path = candidate.canonicalize().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let root = state.storage_path.canonicalize().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if !full_path.starts_with(&root) { return Err(StatusCode::FORBIDDEN); }
+    let full_path = candidate
+        .canonicalize()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let root = state
+        .storage_path
+        .canonicalize()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !full_path.starts_with(&root) {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     // Abrir archivo y crear stream que sigue leyendo mientras crece
-    let mut file = File::open(&full_path).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    let mut file = File::open(&full_path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
 
     // Posición inicial: desde el principio (para incluir ftyp+moov) y que el reproductor pueda decodificar
     let mut pos: u64 = 0;
@@ -338,7 +424,7 @@ pub async fn stream_recording_tail(
                     // Leer los primeros 2MB para asegurar tener ftyp+moov
                     let header_size = std::cmp::min(len, 2 * 1024 * 1024) as usize;
                     let mut header_buf = vec![0u8; header_size];
-                    
+
                     if let Err(e) = file.seek(std::io::SeekFrom::Start(0)).await {
                         eprintln!("header seek err: {}", e);
                         break;
@@ -375,9 +461,9 @@ pub async fn stream_recording_tail(
                 let available = len - pos;
                 if available >= 32 * 1024 { // Esperar al menos 32KB antes de enviar
                     let to_read = std::cmp::min(buf.len() as u64, available) as usize;
-                    if let Err(e) = file.seek(std::io::SeekFrom::Start(pos)).await { 
-                        eprintln!("seek err: {}", e); 
-                        break; 
+                    if let Err(e) = file.seek(std::io::SeekFrom::Start(pos)).await {
+                        eprintln!("seek err: {}", e);
+                        break;
                     }
                     match file.read_exact(&mut buf[..to_read]).await {
                         Ok(_) => {
@@ -404,9 +490,18 @@ pub async fn stream_recording_tail(
 
     let mut resp = Response::new(Body::from_stream(stream));
     let headers = resp.headers_mut();
-    headers.insert(axum::http::header::CONTENT_TYPE, "video/mp4".parse().unwrap());
-    headers.insert(axum::http::header::CONTENT_DISPOSITION, "inline; filename=live.mp4".parse().unwrap());
-    headers.insert(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate".parse().unwrap());
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "video/mp4".parse().unwrap(),
+    );
+    headers.insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        "inline; filename=live.mp4".parse().unwrap(),
+    );
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        "no-cache, no-store, must-revalidate".parse().unwrap(),
+    );
     headers.insert(axum::http::header::PRAGMA, "no-cache".parse().unwrap());
     headers.insert(axum::http::header::EXPIRES, "0".parse().unwrap());
     // Importante: headers para streaming (sin Accept-Ranges para evitar skips del moov)
@@ -417,7 +512,6 @@ pub async fn stream_recording_tail(
     headers.insert("Connection", "keep-alive".parse().unwrap());
     Ok(resp)
 }
-
 
 // Background task to automatically manage storage space
 pub async fn start_cleanup_task(storage_path: PathBuf) {
@@ -436,24 +530,28 @@ pub async fn start_cleanup_task(storage_path: PathBuf) {
             // Si el uso de almacenamiento está por encima del umbral alto (90%)
             if used_percentage > 90.0 {
                 println!("⚠️ Uso de almacenamiento crítico, iniciando limpieza...");
-                
+
                 let mut all_recordings = get_recordings_recursively(&storage_path);
                 // Ordena las grabaciones por fecha de modificación (las más antiguas primero)
                 all_recordings.sort_by_key(|rec| rec.last_modified);
-                
+
                 // Sigue eliminando los archivos más antiguos hasta que el uso esté por debajo del umbral bajo (85%)
                 while let Ok(current_stats) = fs2::statvfs(&storage_path) {
                     let current_used = current_stats.total_space() - current_stats.free_space();
-                    let current_percentage = (current_used as f64 / current_stats.total_space() as f64) * 100.0;
-                    
+                    let current_percentage =
+                        (current_used as f64 / current_stats.total_space() as f64) * 100.0;
+
                     if current_percentage < 85.0 {
-                        println!("✅ Limpieza completa. Almacenamiento actual: {:.2}%", current_percentage);
+                        println!(
+                            "✅ Limpieza completa. Almacenamiento actual: {:.2}%",
+                            current_percentage
+                        );
                         break;
                     }
-                    
+
                     if let Some(recording) = all_recordings.pop() {
                         let log_path = PathBuf::from(&recording.path.replace(".mp4", "-log.txt"));
-                        
+
                         // Eliminar archivo de video
                         if let Err(e) = fs::remove_file(&recording.path) {
                             eprintln!("❌ Error al eliminar el video {}: {}", recording.path, e);
@@ -464,7 +562,11 @@ pub async fn start_cleanup_task(storage_path: PathBuf) {
                         // Eliminar archivo de log
                         if log_path.exists() {
                             if let Err(e) = fs::remove_file(&log_path) {
-                                eprintln!("❌ Error al eliminar el log {}: {}", log_path.display(), e);
+                                eprintln!(
+                                    "❌ Error al eliminar el log {}: {}",
+                                    log_path.display(),
+                                    e
+                                );
                             } else {
                                 println!("🗑️ Log eliminado: {}", log_path.display());
                             }
@@ -483,7 +585,8 @@ pub async fn start_cleanup_task(storage_path: PathBuf) {
 // SSE para información de almacenamiento en tiempo real
 pub async fn storage_stream_sse(
     State(state): State<Arc<AppState>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {    let stream = async_stream::stream! {
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = async_stream::stream! {
         let mut last_hash = String::new();
 
         // Enviar evento de conexión
@@ -539,7 +642,7 @@ pub async fn storage_stream_sse(
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(1))
-            .text("keep-alive")
+            .text("keep-alive"),
     )
 }
 
@@ -547,7 +650,6 @@ pub async fn storage_stream_sse(
 pub async fn recordings_stream_sse(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-
     let stream = async_stream::stream! {
         let mut last_hash = String::new();
 
@@ -586,7 +688,7 @@ pub async fn recordings_stream_sse(
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(1))
-            .text("keep-alive")
+            .text("keep-alive"),
     )
 }
 
@@ -603,7 +705,11 @@ pub async fn stream_recording_logs_sse(
         Err(_) => state.storage_path.clone(),
     };
     let full_path_new = day_dir.join(&file_name);
-    let log_path = if full_path_new.exists() { full_path_new } else { state.storage_path.join(&file_name) };
+    let log_path = if full_path_new.exists() {
+        full_path_new
+    } else {
+        state.storage_path.join(&file_name)
+    };
 
     // Verificar que el archivo existe
     if !log_path.exists() {
@@ -611,7 +717,9 @@ pub async fn stream_recording_logs_sse(
     }
 
     // Abrir el archivo para lectura
-    let file = File::open(&log_path).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let file = File::open(&log_path)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut reader = BufReader::new(file);
 
     // Crear stream SSE

@@ -1,46 +1,33 @@
-use std::{env, net::SocketAddr, sync::Arc, path::PathBuf};
 use axum::{
     routing::{get, post},
     Router,
 };
-use tower_http::cors::{CorsLayer, Any};
-use dotenvy::dotenv;
-use tokio::sync::Mutex;
 use bytes::Bytes;
+use dotenvy::dotenv;
+use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
+use tokio::sync::Mutex;
+use tower_http::cors::{Any, CorsLayer};
 
-mod auth;
-mod storage;
-mod stream;
-mod camera;
-mod ptz;
-mod logs;
+use vigilante::{auth, camera, logs, ptz, storage, stream, AppState};
 
-use storage::{get_storage_info, list_recordings, delete_recording, stream_recording, start_cleanup_task, get_log_file, stream_recording_tail, storage_stream_sse, recordings_stream_sse, stream_recording_logs_sse};
-use stream::{stream_hls_handler, stream_hls_index, stream_webrtc_handler, stream_mjpeg_handler, stream_audio_handler};
-use logs::stream_journal_logs;
-use camera::{start_camera_pipeline};
-use ptz::{pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, ptz_stop};
-use axum::middleware::from_fn_with_state;
 use auth::flexible_auth_middleware;
+use axum::middleware::from_fn_with_state;
+use camera::start_camera_pipeline;
+use logs::stream_journal_logs;
+use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
+use storage::{
+    delete_recording, get_log_file, get_storage_info, list_recordings, recordings_stream_sse,
+    start_cleanup_task, storage_stream_sse, stream_recording, stream_recording_logs_sse,
+    stream_recording_tail,
+};
+use stream::{
+    stream_audio_handler, stream_hls_handler, stream_hls_index, stream_mjpeg_handler,
+    stream_webrtc_handler,
+};
 
 // Dependencias de GStreamer
 use gstreamer as gst;
 use tokio::sync::broadcast;
-
-#[derive(Clone)]
-pub struct AppState {
-    pub camera_rtsp_url: String,
-    pub camera_onvif_url: String,
-    pub proxy_token: String,
-    pub storage_path: PathBuf,
-    pub pipeline: Arc<Mutex<Option<gst::Pipeline>>>,
-    pub mjpeg_tx: broadcast::Sender<Bytes>,
-    pub mjpeg_low_tx: broadcast::Sender<Bytes>,
-    pub audio_mp3_tx: broadcast::Sender<Bytes>,
-    pub enable_hls: bool,
-    // Permite validar token por query (p.ej., ?token=...) en rutas de streaming
-    pub allow_query_token_streams: bool,
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -53,11 +40,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proxy_token = env::var("PROXY_TOKEN")?;
     let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let storage_path = env::var("STORAGE_PATH")?;
-    let enable_hls = env::var("ENABLE_HLS").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    let enable_hls = env::var("ENABLE_HLS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     // Soporte de compatibilidad: STREAM_MJPEG_TOKEN_IN_QUERY también habilita el modo de token en query
-    let allow_query_token_streams =
-        env::var("STREAM_TOKEN_IN_QUERY").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
-        || env::var("STREAM_MJPEG_TOKEN_IN_QUERY").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    let allow_query_token_streams = env::var("STREAM_TOKEN_IN_QUERY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        || env::var("STREAM_MJPEG_TOKEN_IN_QUERY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -101,13 +93,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/logs/stream", get(stream_journal_logs))
         .route("/api/storage/stream", get(storage_stream_sse))
         .route("/api/recordings/stream", get(recordings_stream_sse))
-        .route("/api/recordings/stream/tail/*path", get(stream_recording_tail))
+        .route(
+            "/api/recordings/stream/tail/*path",
+            get(stream_recording_tail),
+        )
         .route("/api/storage", get(get_storage_info))
         .route("/api/storage/list", get(list_recordings))
         .route("/api/storage/delete/*path", get(delete_recording))
         .route("/api/recordings/stream/*path", get(stream_recording))
         .route("/api/recordings/log/:date", get(get_log_file))
-        .route("/api/recordings/log/:date/stream", get(stream_recording_logs_sse))
+        .route(
+            "/api/recordings/log/:date/stream",
+            get(stream_recording_logs_sse),
+        )
         // Rutas para el control PTZ
         .route("/api/ptz/pan/left", post(pan_left))
         .route("/api/ptz/pan/right", post(pan_right))
