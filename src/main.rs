@@ -44,6 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let enable_hls = env::var("ENABLE_HLS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    // Detección manual de movimiento (desactivada por defecto cuando se usa ONVIF)
+    let enable_manual_motion_detection = env::var("ENABLE_MANUAL_MOTION_DETECTION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     // Soporte de compatibilidad: STREAM_MJPEG_TOKEN_IN_QUERY también habilita el modo de token en query
     let allow_query_token_streams = env::var("STREAM_TOKEN_IN_QUERY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -73,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mjpeg_low_tx,
         audio_mp3_tx,
         enable_hls,
+        enable_manual_motion_detection,
         allow_query_token_streams,
         log_writer: Arc::new(Mutex::new(None)),
     });

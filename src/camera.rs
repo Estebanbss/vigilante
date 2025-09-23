@@ -228,8 +228,11 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         };
 
         // Callbacks (tolerantes a ausencia de elementos por plantilla)
-        if pipeline.by_name("detector").is_some() {
+        if pipeline.by_name("detector").is_some() && state.enable_manual_motion_detection {
+            println!("🎯 Activando detección manual de movimiento");
             setup_motion_detection(&pipeline, &state, &log_writer);
+        } else if pipeline.by_name("detector").is_some() {
+            println!("📡 Usando solo detección nativa de cámara ONVIF (detección manual desactivada)");
         }
         if pipeline.by_name("mjpeg_sink").is_some() || pipeline.by_name("mjpeg_low_sink").is_some() {
             setup_mjpeg_sinks(&pipeline, &state, &log_writer);

@@ -25,6 +25,8 @@ pub struct AppState {
     pub mjpeg_low_tx: broadcast::Sender<Bytes>,
     pub audio_mp3_tx: broadcast::Sender<Bytes>,
     pub enable_hls: bool,
+    // Detección manual de movimiento (cuando ONVIF no está disponible)
+    pub enable_manual_motion_detection: bool,
     // Permite validar token por query (p.ej., ?token=...) en rutas de streaming
     pub allow_query_token_streams: bool,
     // Writer para logging de eventos de movimiento
