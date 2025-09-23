@@ -732,20 +732,49 @@ fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<M
     );
 }
 fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<Mutex<BufWriter<std::fs::File>>>) {
-    let audio_sink_app = pipeline
-        .by_name("audio_mp3_sink")
-        .unwrap()
-        .downcast::<gst_app::AppSink>()
-        .unwrap();
+    let audio_sink_app = match pipeline
+        .by_name("audio_mp3_sink") {
+        Some(sink) => match sink.downcast::<gst_app::AppSink>() {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("❌ Error downcasting audio_mp3_sink to AppSink");
+                return;
+            }
+        },
+        None => {
+            eprintln!("❌ No se encontró audio_mp3_sink en el pipeline (posiblemente no hay audio en el stream)");
+            return;
+        }
+    };
     let tx_audio = state.audio_mp3_tx.clone();
     audio_sink_app.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             .new_sample(move |s| {
-                let sample = s.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                let sample = match s.pull_sample() {
+                    Ok(samp) => samp,
+                    Err(e) => {
+                        eprintln!("❌ Error pulling sample from audio_mp3_sink: {:?}", e);
+                        return Err(gst::FlowError::Eos);
+                    }
+                };
+                let buffer = match sample.buffer() {
+                    Some(buf) => buf,
+                    None => {
+                        eprintln!("❌ No buffer in audio sample");
+                        return Err(gst::FlowError::Error);
+                    }
+                };
+                let map = match buffer.map_readable() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("❌ Error mapping audio buffer: {:?}", e);
+                        return Err(gst::FlowError::Error);
+                    }
+                };
                 let data = Bytes::copy_from_slice(map.as_ref());
-                let _ = tx_audio.send(data);
+                if let Err(e) = tx_audio.send(data) {
+                    eprintln!("❌ Error sending audio data to broadcast channel: {:?}", e);
+                }
                 Ok(gst::FlowSuccess::Ok)
             })
             .build(),

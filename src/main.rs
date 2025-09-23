@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Iniciar servicio de eventos ONVIF para detección nativa de movimiento
     if let Err(e) = events::start_onvif_events_service(state.clone()).await {
-        println!("⚠️  Error iniciando eventos ONVIF: {}", e);
+        eprintln!("⚠️  Error iniciando eventos ONVIF: {}", e);
         println!("📝 Continuando con detección manual de movimiento");
     }
 

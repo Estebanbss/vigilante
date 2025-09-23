@@ -144,7 +144,7 @@ where
                         // Auth OK - no log para reducir ruido
                         return Ok(RequireAuth);
                     } else {
-                        println!("🚫 Token query inválido (extractor) en {} {}", method, path);
+                        eprintln!("🚫 Token query inválido (extractor) en {} {}", method, path);
                     }
                 }
             }
@@ -193,7 +193,7 @@ where
                         .get("x-forwarded-for")
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("");
-                    println!("🚫 Header Authorization inválido (extractor): {} {} | UA='{}' CF-IP='{}' XFF='{}'", method, path, ua, cfip, xff);
+                    eprintln!("🚫 Header Authorization inválido (extractor): {} {} | UA='{}' CF-IP='{}' XFF='{}'", method, path, ua, cfip, xff);
                     Err((StatusCode::UNAUTHORIZED, "Unauthorized"))
                 }
             }
@@ -208,13 +208,13 @@ where
                         // Auth OK - no log para reducir ruido
                         return Ok(RequireAuth);
                     } else {
-                        println!("🚫 Query token inválido (extractor): {} {}", method, path);
+                        eprintln!("🚫 Query token inválido (extractor): {} {}", method, path);
                     }
                 } else {
-                    println!("🚫 No hay token en query (extractor): {} {}", method, path);
+                    eprintln!("🚫 No hay token en query (extractor): {} {}", method, path);
                 }
             } else {
-                println!(
+                eprintln!(
                     "🚫 No hay header ni query token (extractor): {} {}",
                     method, path
                 );
@@ -231,7 +231,7 @@ where
                 .get("x-forwarded-for")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            println!(
+            eprintln!(
                 "🚫 Auth FAIL (extractor): {} {} | UA='{}' CF-IP='{}' XFF='{}'",
                 method, path, ua, cfip, xff
             );
@@ -258,7 +258,7 @@ pub async fn flexible_auth_middleware(
             // Auth OK - no log para reducir ruido
             return next.run(request).await;
         } else {
-            println!("🚫 Header Authorization inválido: {}", uri.path());
+            eprintln!("🚫 Header Authorization inválido: {}", uri.path());
         }
     } else {
         // Si NO hay header, verificar token en query
@@ -271,13 +271,13 @@ pub async fn flexible_auth_middleware(
                     // Auth OK - no log para reducir ruido
                     return next.run(request).await;
                 } else {
-                    println!("🚫 Query token inválido: {}", uri.path());
+                    eprintln!("🚫 Query token inválido: {}", uri.path());
                 }
             } else {
-                println!("🚫 No hay token en query: {}", uri.path());
+                eprintln!("🚫 No hay token en query: {}", uri.path());
             }
         } else {
-            println!("🚫 No hay header ni query token: {}", uri.path());
+            eprintln!("🚫 No hay header ni query token: {}", uri.path());
         }
     }
 
@@ -294,7 +294,7 @@ pub async fn flexible_auth_middleware(
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    println!(
+    eprintln!(
         "🚫 Auth FAIL (flexible): {} | UA='{}' CF-IP='{}' XFF='{}'",
         uri.path(),
         ua,

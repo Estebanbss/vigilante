@@ -167,8 +167,18 @@ pub async fn stream_audio_handler(
     let mut rx = state.audio_mp3_tx.subscribe();
 
     let stream = async_stream::stream! {
-        while let Ok(chunk) = rx.recv().await {
-            yield Ok::<Bytes, std::io::Error>(chunk);
+        loop {
+            match rx.recv().await {
+                Ok(chunk) => yield Ok::<Bytes, std::io::Error>(chunk),
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    eprintln!("❌ Audio broadcast channel closed");
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    eprintln!("⚠️ Audio stream lagged, skipping frames");
+                    continue;
+                }
+            }
         }
     };
 
