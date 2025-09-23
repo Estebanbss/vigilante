@@ -182,6 +182,8 @@ pub async fn stream_audio_handler(
         axum::http::header::CACHE_CONTROL,
         "no-cache".parse().unwrap(),
     );
+    headers.insert(axum::http::header::PRAGMA, "no-cache".parse().unwrap());
+    headers.insert(axum::http::header::EXPIRES, "0".parse().unwrap());
     Ok(resp)
 }
 // HLS ahora es generado dentro del pipeline principal (camera.rs)

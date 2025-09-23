@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mjpeg_tx, _mjpeg_rx) = broadcast::channel::<Bytes>(32);
     let (mjpeg_low_tx, _mjpeg_low_rx) = broadcast::channel::<Bytes>(32);
-    let (audio_mp3_tx, _audio_rx) = broadcast::channel::<Bytes>(32);
+    let (audio_mp3_tx, _audio_rx) = broadcast::channel::<Bytes>(2);
 
     let state = Arc::new(AppState {
         camera_rtsp_url: camera_rtsp_url.clone(),

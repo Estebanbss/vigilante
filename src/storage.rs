@@ -381,6 +381,8 @@ pub async fn stream_recording(
         axum::http::header::CONTENT_LENGTH,
         total_len.to_string().parse().unwrap(),
     );
+    h.insert(axum::http::header::PRAGMA, "no-cache".parse().unwrap());
+    h.insert(axum::http::header::EXPIRES, "0".parse().unwrap());
     if status == StatusCode::PARTIAL_CONTENT {
         let cr = format!("bytes {}-{}/{}", start, end, file_size);
         h.insert(axum::http::header::CONTENT_RANGE, cr.parse().unwrap());
