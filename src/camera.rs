@@ -89,7 +89,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
             // Grabación MP4 - video con caps explícitos antes del muxer
             "t_video. ! queue name=recq max-size-buffers=50 max-size-time=1000000000 max-size-bytes=10000000 ! ", // Reducido buffers y tiempo para menor latencia
-            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true fragment-duration=1000 ! ", // Reducido fragment-duration para más frecuencia
+            "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=false streamable=true fragment-duration=1000 ! ", // Evita buffering de faststart durante grabación continua
             "filesink location=\"{}\" sync=false ",
 
             // Audio: selecciona RTP de audio PCMA (ALaw); si tu cámara usa PCMU, cambia encoding-name=PCMU y depay/decoder
@@ -184,9 +184,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 });
                 srcpad.add_probe(PadProbeType::BUFFER, move |_pad, _info| {
                     let n = buf_count_cl.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n == 1 || n % 100 == 0 {
-                        println!("🎥 Buffers hacia mp4mux: {}", n);
-                    }
+                    if n == 1 { println!("🎥 Buffers hacia mp4mux: {}", n); }
                     PadProbeReturn::Ok
                 });
             } else {
@@ -205,9 +203,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 let out_count_cl = out_count.clone();
                 srcpad.add_probe(PadProbeType::BUFFER, move |_pad, _info| {
                     let n = out_count_cl.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n == 1 || n % 100 == 0 {
-                        println!("💽 Buffers después de mp4mux hacia filesink: {}", n);
-                    }
+                    if n == 1 { println!("💽 Buffers después de mp4mux hacia filesink: {}", n); }
                     PadProbeReturn::Ok
                 });
             }
@@ -237,7 +233,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 use tokio::time::{sleep, Duration, Instant};
                 let start = Instant::now();
                 let mut last = 0u64;
-                let mut last_log = Instant::now();
+                let mut stagnant_checks = 0u32;
                 // primera espera breve para permitir escritura inicial
                 sleep(Duration::from_secs(15)).await;
                 while start.elapsed() < duration {
@@ -246,13 +242,14 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                             let size = meta.len();
                             if size > last {
                                 let delta = size - last;
-                                if last_log.elapsed() >= Duration::from_secs(60) {
-                                    println!("📈 Archivo creciendo: {} (+{} bytes en último periodo)", size, delta);
-                                    last_log = Instant::now();
-                                }
+                                println!("📈 Archivo creciendo: {} (+{} bytes)", size, delta);
                                 last = size;
+                                stagnant_checks = 0;
                             } else {
-                                eprintln!("⚠️ Archivo no crece ({} bytes). Verificar rama hacia mp4mux.", size);
+                                stagnant_checks += 1;
+                                if stagnant_checks == 3 {
+                                    eprintln!("⚠️ Archivo no crece ({} bytes) tras 3 chequeos. Verificar rama hacia mp4mux/filesink.", size);
+                                }
                             }
                         }
                         Err(e) => eprintln!("⚠️ No se puede acceder al archivo de video: {}", e),

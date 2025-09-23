@@ -74,6 +74,7 @@ pub struct Recording {
     pub path: String,
     pub size: u64,
     pub last_modified: DateTime<Utc>,
+    pub duration: Option<f64>,
 }
 
 // Estructura para los parámetros de la consulta de paginación y filtrado
@@ -84,8 +85,44 @@ pub struct ListRecordingsParams {
     pub date: Option<String>,
 }
 
-// Auth helper via query param (?token=) to ease VLC/players
-// Autenticación via middleware global; no se acepta token por query
+// Función auxiliar para obtener la duración de un archivo MP4 usando ffprobe
+fn get_mp4_duration(file_path: &PathBuf) -> Option<f64> {
+    use std::process::Command;
+
+    // Intentar usar ffprobe para obtener la duración
+    let output = match Command::new("ffprobe")
+        .args(&[
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            file_path.to_str()?,
+        ])
+        .output()
+    {
+        Ok(out) => out,
+        Err(_) => {
+            // ffprobe no está disponible, devolver None silenciosamente
+            return None;
+        }
+    };
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let json_str = String::from_utf8(output.stdout).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+
+    if let Some(format_obj) = json.get("format") {
+        if let Some(duration_str) = format_obj.get("duration") {
+            if let Some(duration_str) = duration_str.as_str() {
+                return duration_str.parse::<f64>().ok();
+            }
+        }
+    }
+
+    None
+}
 
 // Función auxiliar recursiva para obtener grabaciones de todos los subdirectorios
 fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
@@ -106,11 +143,19 @@ fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
 
                     if let Ok(metadata) = fs::metadata(&entry_path) {
                         if let Ok(modified_time) = metadata.modified() {
+                            // Calcular duración solo para archivos MP4
+                            let duration = if file_name_str.ends_with(".mp4") {
+                                get_mp4_duration(&entry_path)
+                            } else {
+                                None
+                            };
+
                             let recording = Recording {
                                 name: file_name_str.to_string(),
                                 path: entry_path.to_str().unwrap_or_default().to_string(),
                                 size: metadata.len(),
                                 last_modified: modified_time.into(),
+                                duration,
                             };
                             recordings.push(recording);
                         }
