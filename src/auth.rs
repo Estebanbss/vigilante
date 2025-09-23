@@ -15,33 +15,12 @@ use url;
 /// - "Bearer <token>"
 /// - "<token>" (solo el token crudo)
 pub async fn check_auth(headers: &HeaderMap, token: &str) -> Result<(), StatusCode> {
-    // Helper: mask token to avoid leaking secrets in logs
-    fn mask_token(tok: &str) -> String {
-        if tok.is_empty() {
-            return "".into();
-        }
-        let n = tok.chars().count();
-        if n <= 4 {
-            return "*".repeat(n);
-        }
-        let prefix: String = tok.chars().take(3).collect();
-        let suffix: String = tok
-            .chars()
-            .rev()
-            .take(2)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
-        format!("{}{}{}", prefix, "*".repeat(n.saturating_sub(5)), suffix)
+    // Helper: show full token for debugging (no masking)
+    fn show_token(tok: &str) -> String {
+        tok.to_string()
     }
-    fn mask_auth_header(val: &str) -> String {
-        let bearer = "Bearer ";
-        if let Some(rest) = val.strip_prefix(bearer) {
-            format!("{}{}", bearer, mask_token(rest))
-        } else {
-            mask_token(val)
-        }
+    fn show_auth_header(val: &str) -> String {
+        val.to_string()
     }
 
     // Busca el encabezado "Authorization".
@@ -63,11 +42,11 @@ pub async fn check_auth(headers: &HeaderMap, token: &str) -> Result<(), StatusCo
                 .get("x-forwarded-for")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            let expected_bearer_masked = mask_auth_header(&format!("Bearer {}", token));
-            let expected_raw_masked = mask_token(token);
+            let expected_bearer = show_auth_header(&format!("Bearer {}", token));
+            let expected_raw = show_token(token);
             eprintln!(
                 "❌ Falta encabezado Authorization | header_esperado_bearer='{}' header_esperado_raw='{}' | UA='{}' CF-IP='{}' XFF='{}'",
-                expected_bearer_masked, expected_raw_masked, ua, cfip, xff
+                expected_bearer, expected_raw, ua, cfip, xff
             );
             return Err(StatusCode::UNAUTHORIZED);
         }
@@ -91,9 +70,9 @@ pub async fn check_auth(headers: &HeaderMap, token: &str) -> Result<(), StatusCo
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        let provided = mask_auth_header(auth_header);
-        let expected_b = mask_auth_header(&expected_bearer);
-        let expected_r = mask_token(token);
+        let provided = show_auth_header(auth_header);
+        let expected_b = show_auth_header(&expected_bearer);
+        let expected_r = show_token(token);
         let scheme = if auth_header.starts_with("Bearer ") {
             "Bearer"
         } else {
@@ -208,7 +187,7 @@ where
                         // Auth OK - no log para reducir ruido
                         return Ok(RequireAuth);
                     } else {
-                        eprintln!("🚫 Query token inválido (extractor): {} {}", method, path);
+                        eprintln!("🚫 Query token inválido (extractor): {} {} | token_proporcionado='{}'", method, path, tok);
                     }
                 } else {
                     eprintln!("🚫 No hay token en query (extractor): {} {}", method, path);
@@ -258,7 +237,7 @@ pub async fn flexible_auth_middleware(
             // Auth OK - no log para reducir ruido
             return next.run(request).await;
         } else {
-            eprintln!("🚫 Header Authorization inválido: {}", uri.path());
+            eprintln!("🚫 Header Authorization inválido: {} | header_proporcionado='{}'", uri.path(), headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).unwrap_or(""));
         }
     } else {
         // Si NO hay header, verificar token en query
@@ -271,7 +250,7 @@ pub async fn flexible_auth_middleware(
                     // Auth OK - no log para reducir ruido
                     return next.run(request).await;
                 } else {
-                    eprintln!("🚫 Query token inválido: {}", uri.path());
+                    eprintln!("🚫 Query token inválido: {} | token_proporcionado='{}'", uri.path(), tok);
                 }
             } else {
                 eprintln!("🚫 No hay token en query: {}", uri.path());
