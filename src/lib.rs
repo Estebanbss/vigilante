@@ -1,6 +1,5 @@
 pub mod auth;
 pub mod camera;
-pub mod events;
 pub mod logs;
 pub mod ptz;
 pub mod storage;
