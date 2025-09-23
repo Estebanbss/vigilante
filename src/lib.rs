@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod camera;
+pub mod events;
 pub mod logs;
 pub mod ptz;
 pub mod storage;
@@ -26,4 +27,6 @@ pub struct AppState {
     pub enable_hls: bool,
     // Permite validar token por query (p.ej., ?token=...) en rutas de streaming
     pub allow_query_token_streams: bool,
+    // Writer para logging de eventos de movimiento
+    pub log_writer: Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
 }

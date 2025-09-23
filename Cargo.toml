@@ -24,6 +24,8 @@ bytes = "1"
 shell-escape = "0.1"
 quick-xml = "0.31"
 url = "2"
+log = "0.4"
+simplelog = "0.12"
 
 # GStreamer dependencies unified to version 0.22
 gstreamer = "0.22"

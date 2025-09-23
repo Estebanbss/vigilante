@@ -3,7 +3,16 @@ use bytes::Bytes;
 use chrono::Local;
 use gstreamer::{self as gst, prelude::*, MessageView, Pipeline};
 use gstreamer_app as gst_app;
-use std::sync::Arc;
+use std::io::{BufWriter, Write};
+use std::sync::{Arc, Mutex};
+
+fn log_to_file(writer: &Arc<Mutex<BufWriter<std::fs::File>>>, emoji: &str, msg: String) {
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let line = format!("[{}] {} {}", timestamp, emoji, msg);
+    println!("{}", line);
+    writeln!(&mut *writer.lock().unwrap(), "{}", line).unwrap();
+    writer.lock().unwrap().flush().unwrap();
+}
 
 pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
     loop {
@@ -62,6 +71,17 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             .signed_duration_since(now.naive_local())
             .to_std()
             .unwrap_or(std::time::Duration::from_secs(86400));
+
+        // Configurar logging a archivo del día
+        let log_file_path = day_dir.join(format!("{}-log.txt", date_str));
+        let log_file = std::fs::OpenOptions::new().create(true).append(true).open(&log_file_path).unwrap();
+        let log_writer = Arc::new(Mutex::new(BufWriter::new(log_file)));
+
+        // Inicializar log_writer en el estado global para que lo usen los eventos ONVIF
+        *state.log_writer.lock().await = Some(BufWriter::new(std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file_path).unwrap()));
 
         println!(
             "📹 Iniciando grabación diaria: {} (hasta medianoche: {:.0}s)",
@@ -209,13 +229,13 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
         // Callbacks (tolerantes a ausencia de elementos por plantilla)
         if pipeline.by_name("detector").is_some() {
-            setup_motion_detection(&pipeline, &state);
+            setup_motion_detection(&pipeline, &state, &log_writer);
         }
         if pipeline.by_name("mjpeg_sink").is_some() || pipeline.by_name("mjpeg_low_sink").is_some() {
-            setup_mjpeg_sinks(&pipeline, &state);
+            setup_mjpeg_sinks(&pipeline, &state, &log_writer);
         }
         if pipeline.by_name("audio_mp3_sink").is_some() {
-            setup_audio_mp3_sink(&pipeline, &state);
+            setup_audio_mp3_sink(&pipeline, &state, &log_writer);
         }
 
         // Añadir sondas (probes) a la rama de grabación para diagnosticar CAPS/BUFFERS
@@ -227,6 +247,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 let caps_seen = Arc::new(AtomicU64::new(0));
                 let buf_count_cl = buf_count.clone();
                 let caps_seen_cl = caps_seen.clone();
+                let _log_writer_cl = log_writer.clone();
                 srcpad.add_probe(PadProbeType::EVENT_DOWNSTREAM, move |_pad, info| {
                     if let Some(PadProbeData::Event(ref ev)) = info.data {
                         if let EventView::Caps(c) = ev.view() {
@@ -238,6 +259,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                     }
                     PadProbeReturn::Ok
                 });
+                let _log_writer_cl2 = log_writer.clone();
                 srcpad.add_probe(PadProbeType::BUFFER, move |_pad, _info| {
                     let n = buf_count_cl.fetch_add(1, Ordering::Relaxed) + 1;
                     if n == 1 { println!("🎥 Buffers hacia mp4mux: {}", n); }
@@ -257,6 +279,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 use gst::{PadProbeType, PadProbeReturn};
                 let out_count = Arc::new(AtomicU64::new(0));
                 let out_count_cl = out_count.clone();
+                let _log_writer_cl = log_writer.clone();
                 srcpad.add_probe(PadProbeType::BUFFER, move |_pad, _info| {
                     let n = out_count_cl.fetch_add(1, Ordering::Relaxed) + 1;
                     if n == 1 { println!("💽 Buffers después de mp4mux hacia filesink: {}", n); }
@@ -282,6 +305,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         println!("🎬 Grabación activa - esperando datos...");
 
         // Verificar que la salida esté creciendo de forma periódica (soporta segmentación)
+        let _log_writer_spawn = log_writer.clone();
         tokio::spawn({
             let daily_path = daily_path.clone();
             let day_dir = day_dir.clone();
@@ -395,7 +419,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
     }
 }
 
-fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>) {
+fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>, writer: &Arc<Mutex<BufWriter<std::fs::File>>>) {
     use std::{env, sync::{Arc, Mutex}, time::{Duration, Instant}};
 
     let detector_sink = pipeline
@@ -408,30 +432,56 @@ fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>) {
     let diff_min: u8 = env::var("MOTION_PIXEL_DIFF_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
     let percent_threshold: f32 = env::var("MOTION_PIXEL_PERCENT").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
     let debounce_ms: u64 = env::var("MOTION_DEBOUNCE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
+    let block_size: usize = env::var("MOTION_BLOCK_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
     let ignore_rect_env = env::var("MOTION_IGNORE_RECT").ok(); // "x,y,w,h" en coords del frame 320x180
+    let ignore_rects_env = env::var("MOTION_IGNORE_RECTS").ok(); // múltiples: "x1,y1,w1,h1;x2,y2,w2,h2"
 
     #[derive(Default)]
     struct BgModel {
         bg: Vec<f32>, // fondo como float para EMA
+        variance: Vec<f32>, // varianza por píxel para adaptación dinámica
         last_emit: Option<Instant>,
-        ignore: Option<(usize, usize, usize, usize)>,
+        ignore_rects: Vec<(usize, usize, usize, usize)>, // múltiples zonas ignoradas
+        motion_history: Vec<(f32, f32)>, // historial de movimiento (dx, dy) para dirección
+        frame_count: u64, // contador de frames procesados
+        last_frame_brightness: f32, // brillo promedio del frame anterior
     }
     let model = Arc::new(Mutex::new(BgModel::default()));
 
-    // Parse ignore rect
+    // Parse ignore rects (soporte para múltiples)
+    let mut ignore_rects = Vec::new();
+
+    // Parse single rect (legacy)
     if let Some(s) = ignore_rect_env {
-        if let Some(mut st) = model.lock().ok() {
-            let parts: Vec<_> = s.split(',').collect();
+        let parts: Vec<_> = s.split(',').collect();
+        if parts.len() == 4 {
+            let x = parts[0].trim().parse().unwrap_or(0);
+            let y = parts[1].trim().parse().unwrap_or(0);
+            let w = parts[2].trim().parse().unwrap_or(0);
+            let h = parts[3].trim().parse().unwrap_or(0);
+            ignore_rects.push((x, y, w, h));
+        }
+    }
+
+    // Parse multiple rects
+    if let Some(s) = ignore_rects_env {
+        for rect_str in s.split(';') {
+            let parts: Vec<_> = rect_str.split(',').collect();
             if parts.len() == 4 {
                 let x = parts[0].trim().parse().unwrap_or(0);
                 let y = parts[1].trim().parse().unwrap_or(0);
                 let w = parts[2].trim().parse().unwrap_or(0);
                 let h = parts[3].trim().parse().unwrap_or(0);
-                st.ignore = Some((x, y, w, h));
+                ignore_rects.push((x, y, w, h));
             }
         }
     }
 
+    if let Some(mut st) = model.lock().ok() {
+        st.ignore_rects = ignore_rects;
+    }
+
+    let writer_cloned = writer.clone();
     detector_sink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
@@ -448,41 +498,186 @@ fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>) {
                 // Inicializar fondo si hace falta
                 if st.bg.len() != width * height {
                     st.bg = data[..width*height].iter().map(|&v| v as f32).collect();
+                    st.variance = vec![10.0; width * height]; // varianza inicial
                     st.last_emit = None;
+                    st.motion_history.clear();
+                    st.frame_count = 0;
+                    st.last_frame_brightness = data.iter().map(|&x| x as f32).sum::<f32>() / data.len() as f32;
                     return Ok(gst::FlowSuccess::Ok);
                 }
 
-                // EMA para el fondo
-                let alpha = 0.02f32; // peso de actualización del fondo
-                let step = 3usize; // muestreo
-                let mut changed = 0usize;
-                let mut total = 0usize;
-                let ignore = st.ignore;
+                st.frame_count += 1;
 
-                for y in (0..height).step_by(step) {
-                    for x in (0..width).step_by(step) {
-                        if let Some((ix, iy, iw, ih)) = ignore {
-                            if x >= ix && x < ix+iw && y >= iy && y < iy+ih { continue; }
+                // Calcular brillo actual y cambio de iluminación
+                let current_brightness = data.iter().map(|&x| x as f32).sum::<f32>() / data.len() as f32;
+                let brightness_change = (current_brightness - st.last_frame_brightness).abs();
+                st.last_frame_brightness = current_brightness;
+
+                // Análisis avanzado de movimiento por bloques
+                let mut changed_blocks = 0usize;
+                let mut total_blocks = 0usize;
+                let mut block_vectors = Vec::new(); // para análisis de coherencia
+                let mut total_motion_magnitude = 0.0f32;
+                let mut max_block_motion = 0.0f32;
+                let ignore_rects = st.ignore_rects.clone();
+
+                // Procesar en bloques para análisis detallado
+                for by in (0..height).step_by(block_size) {
+                    for bx in (0..width).step_by(block_size) {
+                        let block_end_y = (by + block_size).min(height);
+                        let block_end_x = (bx + block_size).min(width);
+                        let mut block_changed_pixels = 0usize;
+                        let mut block_total_pixels = 0usize;
+                        let mut block_motion = (0.0f32, 0.0f32);
+                        let mut block_brightness_change = 0.0f32;
+
+                        // Verificar si el bloque está en zona ignorada
+                        let block_ignored = ignore_rects.iter().any(|(ix, iy, iw, ih)| {
+                            bx < ix + iw && bx + block_size > *ix && by < iy + ih && by + block_size > *iy
+                        });
+
+                        if block_ignored { continue; }
+
+                        // Analizar cada píxel en el bloque
+                        for y in by..block_end_y {
+                            for x in bx..block_end_x {
+                                let idx = y * width + x;
+                                let prev = st.bg[idx];
+                                let cur = data[idx] as f32;
+                                let diff = (cur - prev).abs();
+
+                                // Adaptación dinámica del fondo
+                                let var = st.variance[idx];
+                                let adaptive_threshold = (diff_min as f32).max(var * 2.0);
+
+                                if diff >= adaptive_threshold {
+                                    block_changed_pixels += 1;
+
+                                    // Estimar movimiento usando gradientes simples
+                                    let dx = if x > 0 && x < width - 1 {
+                                        (data[idx + 1] as f32 - data[idx - 1] as f32) * 0.5
+                                    } else { 0.0 };
+                                    let dy = if y > 0 && y < height - 1 {
+                                        (data[idx + width] as f32 - data[idx - width] as f32) * 0.5
+                                    } else { 0.0 };
+
+                                    block_motion.0 += dx;
+                                    block_motion.1 += dy;
+                                }
+
+                                // Actualizar fondo con alpha dinámico
+                                let alpha = if var > 50.0 { 0.05 } else { 0.02 };
+                                st.bg[idx] = prev * (1.0 - alpha) + cur * alpha;
+
+                                // Actualizar varianza
+                                let error = cur - prev;
+                                st.variance[idx] = var * 0.99 + error * error * 0.01;
+
+                                block_total_pixels += 1;
+                                block_brightness_change += (cur - prev).abs();
+                            }
                         }
-                        let idx = y*width + x;
-                        let prev = st.bg[idx];
-                        let cur = data[idx] as f32;
-                        let diff = (cur - prev).abs() as f32;
-                        if diff >= diff_min as f32 { changed += 1; }
-                        // actualizar fondo
-                        st.bg[idx] = prev * (1.0 - alpha) + cur * alpha;
-                        total += 1;
+
+                        // Calcular métricas del bloque
+                        let block_change_percent = (block_changed_pixels as f32) * 100.0 / (block_total_pixels.max(1) as f32);
+                        let _avg_block_brightness_change = block_brightness_change / block_total_pixels as f32;
+
+                        // Normalizar vector de movimiento del bloque
+                        if block_changed_pixels > 0 {
+                            block_motion.0 /= block_changed_pixels as f32;
+                            block_motion.1 /= block_changed_pixels as f32;
+                        }
+
+                        let block_motion_magnitude = (block_motion.0 * block_motion.0 + block_motion.1 * block_motion.1).sqrt();
+
+                        // Decidir si el bloque tiene movimiento significativo
+                        if block_change_percent >= 10.0 && block_motion_magnitude > 5.0 {
+                            changed_blocks += 1;
+                            block_vectors.push((block_motion.0, block_motion.1, block_motion_magnitude));
+                            total_motion_magnitude += block_motion_magnitude;
+                            max_block_motion = max_block_motion.max(block_motion_magnitude);
+                        }
+
+                        total_blocks += 1;
                     }
                 }
-                let percent = (changed as f32) * 100.0 / (total.max(1) as f32);
 
-                if percent >= percent_threshold {
+                // Análisis global del movimiento
+                let motion_percent = (changed_blocks as f32) * 100.0 / (total_blocks.max(1) as f32);
+                let avg_motion_magnitude = if changed_blocks > 0 { total_motion_magnitude / changed_blocks as f32 } else { 0.0 };
+
+                // Calcular coherencia del movimiento (qué tan alineados están los vectores)
+                let mut coherence_score = 0.0f32;
+                if block_vectors.len() > 1 {
+                    let avg_vector = block_vectors.iter()
+                        .fold((0.0f32, 0.0f32), |acc, (dx, dy, _)| (acc.0 + dx, acc.1 + dy));
+                    let avg_mag = (avg_vector.0 * avg_vector.0 + avg_vector.1 * avg_vector.1).sqrt();
+                    if avg_mag > 0.0 {
+                        let normalized_avg = (avg_vector.0 / avg_mag, avg_vector.1 / avg_mag);
+                        coherence_score = block_vectors.iter()
+                            .map(|(dx, dy, mag)| {
+                                if *mag > 0.0 {
+                                    let dot_product = dx * normalized_avg.0 + dy * normalized_avg.1;
+                                    dot_product.abs() // coherencia direccional
+                                } else { 0.0 }
+                            })
+                            .sum::<f32>() / block_vectors.len() as f32;
+                    }
+                }
+
+                // Clasificar tipo de movimiento
+                let motion_type = if motion_percent < 1.0 {
+                    "Sin movimiento"
+                } else if brightness_change > 30.0 && motion_percent < 5.0 {
+                    "Cambio de iluminación"
+                } else if coherence_score > 0.8 && changed_blocks > (total_blocks * 3 / 4) && avg_motion_magnitude > 15.0 {
+                    "Movimiento de cámara"
+                } else if coherence_score > 0.6 && changed_blocks > (total_blocks / 2) && avg_motion_magnitude > 10.0 {
+                    "Movimiento masivo"
+                } else if changed_blocks <= 3 && avg_motion_magnitude > 8.0 {
+                    "Movimiento localizado pequeño"
+                } else if changed_blocks <= 6 && avg_motion_magnitude > 12.0 {
+                    "Movimiento localizado mediano"
+                } else {
+                    "Movimiento general"
+                };
+
+                // Determinar dirección principal
+                let direction = if avg_motion_magnitude > 10.0 && block_vectors.len() > 0 {
+                    let avg_dx = block_vectors.iter().map(|(dx, _, _)| dx).sum::<f32>() / block_vectors.len() as f32;
+                    let avg_dy = block_vectors.iter().map(|(_, dy, _)| dy).sum::<f32>() / block_vectors.len() as f32;
+
+                    if avg_dx.abs() > avg_dy.abs() {
+                        if avg_dx > 5.0 { "→ Este" } else if avg_dx < -5.0 { "← Oeste" } else { "○ Estacionario" }
+                    } else {
+                        if avg_dy > 5.0 { "↓ Sur" } else if avg_dy < -5.0 { "↑ Norte" } else { "○ Estacionario" }
+                    }
+                } else { "○ Sin dirección clara" };
+
+                // Logging detallado si hay movimiento significativo
+                if motion_percent >= percent_threshold {
                     let now = Instant::now();
                     let allow = match st.last_emit { Some(t) => now.duration_since(t) >= Duration::from_millis(debounce_ms), None => true };
                     if allow {
                         st.last_emit = Some(now);
                         let ts = Local::now().format("%H:%M:%S").to_string();
-                        println!("🚶 Movimiento detectado ({}% cambios) a las {}", percent as u32, ts);
+
+                        // Actualizar historial de movimiento
+                        if block_vectors.len() > 0 {
+                            let avg_vector = (block_vectors.iter().map(|(dx, _, _)| dx).sum::<f32>() / block_vectors.len() as f32,
+                                            block_vectors.iter().map(|(_, dy, _)| dy).sum::<f32>() / block_vectors.len() as f32);
+                            st.motion_history.push(avg_vector);
+                            if st.motion_history.len() > 5 {
+                                st.motion_history.remove(0);
+                            }
+                        }
+
+                        log_to_file(&writer_cloned, "🚶", format!(
+                            "{} ({}% bloques, {:.1} mag, {:.2} coh) {} | Ilum: {:.1} | Bloques: {}/{} | Frame: {} | {}",
+                            motion_type, motion_percent as u32, avg_motion_magnitude,
+                            coherence_score, direction, brightness_change,
+                            changed_blocks, total_blocks, st.frame_count, ts
+                        ));
                     }
                 }
 
@@ -492,7 +687,7 @@ fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>) {
     );
 }
 
-fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>) {
+fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<Mutex<BufWriter<std::fs::File>>>) {
     // MJPEG high quality
     let mjpeg_sink = pipeline
         .by_name("mjpeg_sink")
@@ -533,7 +728,7 @@ fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>) {
             .build(),
     );
 }
-fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>) {
+fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<Mutex<BufWriter<std::fs::File>>>) {
     let audio_sink_app = pipeline
         .by_name("audio_mp3_sink")
         .unwrap()

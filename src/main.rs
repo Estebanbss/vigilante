@@ -8,11 +8,12 @@ use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
-use vigilante::{auth, camera, logs, ptz, storage, stream, AppState};
+use vigilante::{auth, camera, events, logs, ptz, storage, stream, AppState};
 
 use auth::flexible_auth_middleware;
 use axum::middleware::from_fn_with_state;
 use camera::start_camera_pipeline;
+use events::motion_event_callback;
 use logs::stream_journal_logs;
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
@@ -73,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio_mp3_tx,
         enable_hls,
         allow_query_token_streams,
+        log_writer: Arc::new(Mutex::new(None)),
     });
 
     // Iniciar la tarea de limpieza de almacenamiento en segundo plano
@@ -80,6 +82,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Iniciar el pipeline de la cámara para la grabación 24/7 y detección de eventos
     tokio::spawn(start_camera_pipeline(camera_rtsp_url, state.clone()));
+
+    // Iniciar servicio de eventos ONVIF para detección nativa de movimiento
+    if let Err(e) = events::start_onvif_events_service(state.clone()).await {
+        println!("⚠️  Error iniciando eventos ONVIF: {}", e);
+        println!("📝 Continuando con detección manual de movimiento");
+    }
 
     // HLS ahora se genera dentro del pipeline principal en camera.rs mediante un branch del tee
 
@@ -114,6 +122,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/ptz/zoom/in", post(zoom_in))
         .route("/api/ptz/zoom/out", post(zoom_out))
         .route("/api/ptz/stop", post(ptz_stop))
+        // Ruta para eventos de movimiento ONVIF (sin autenticación)
+        .route("/api/events/motion", post(motion_event_callback))
         .layer(cors)
         // Middleware flexible: valida token por header O por query
         .layer(from_fn_with_state(state.clone(), flexible_auth_middleware))
