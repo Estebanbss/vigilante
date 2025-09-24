@@ -29,4 +29,8 @@ pub struct AppState {
     pub allow_query_token_streams: bool,
     // Writer para logging de eventos de movimiento
     pub log_writer: Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
+    // Dominio base para bypass de autenticación (host exacto o subdominios). Ej: "nubellesalon.com"
+    pub bypass_base_domain: Option<String>,
+    // Secreto adicional para validar bypass (header X-Bypass-Secret). Si definido, se exige para bypass.
+    pub bypass_domain_secret: Option<String>,
 }

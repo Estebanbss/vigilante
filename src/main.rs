@@ -55,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -79,6 +80,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         enable_manual_motion_detection,
         allow_query_token_streams,
         log_writer: Arc::new(Mutex::new(None)),
+        bypass_base_domain: env::var("BYPASS_DOMAIN").ok().map(|d| d.to_lowercase()),
+        bypass_domain_secret: env::var("BYPASS_DOMAIN_SECRET").ok(),
     });
 
     // Iniciar la tarea de limpieza de almacenamiento en segundo plano
