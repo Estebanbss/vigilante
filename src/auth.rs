@@ -233,6 +233,23 @@ pub async fn flexible_auth_middleware(
     if request.method() == axum::http::Method::OPTIONS {
         return next.run(request).await;
     }
+    // BYPASS por dominio permitido: si Origin o Referer contienen nubellesalon.com
+    // Se concede acceso sin requerir token ni header Authorization.
+    const BYPASS_DOMAIN: &str = "nubellesalon.com";
+    let origin_ok = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|o| o.contains(BYPASS_DOMAIN))
+        .unwrap_or(false);
+    let referer_ok = headers
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .map(|r| r.contains(BYPASS_DOMAIN))
+        .unwrap_or(false);
+    if origin_ok || referer_ok {
+        // Autorización automática por dominio.
+        return next.run(request).await;
+    }
     // Verificar si hay header Authorization
     let has_auth_header = headers.get(header::AUTHORIZATION).is_some();
 
