@@ -9,6 +9,42 @@ use axum::response::Response;
 use std::sync::Arc;
 use url;
 
+/// Determina si aplica bypass de autenticación según dominio y secreto.
+fn is_bypass_auth(headers: &HeaderMap, state: &AppState) -> bool {
+    // Si no hay dominio configurado, no hay bypass
+    let Some(base) = &state.bypass_base_domain else { return false; };
+    let base_str = base.as_str();
+
+    // Helper para extraer host de Origin / Referer
+    fn extract_host(value: Option<&str>) -> Option<String> {
+        value.and_then(|v| url::Url::parse(v).ok()).and_then(|u| u.host_str().map(|s| s.to_lowercase()))
+    }
+
+    let host_header = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_lowercase());
+    let xfh_header = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_lowercase());
+    let origin_host = extract_host(headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()));
+    let referer_host = extract_host(headers.get(header::REFERER).and_then(|v| v.to_str().ok()));
+
+    let domain_ok = [host_header.as_ref(), xfh_header.as_ref(), origin_host.as_ref(), referer_host.as_ref()]
+        .iter()
+        .filter_map(|o| o.as_ref())
+        .any(|h| h == &base_str || h.ends_with(&format!(".{base_str}")));
+    if !domain_ok { return false; }
+
+    // Si hay secreto, exigirlo
+    if let Some(secret) = &state.bypass_domain_secret {
+        let provided_secret = headers.get("x-bypass-secret").and_then(|v| v.to_str().ok());
+        return provided_secret == Some(secret.as_str());
+    }
+    true
+}
+
 /// Comprueba la validez del token de autenticación en los encabezados de la petición.
 ///
 /// La función espera un encabezado `Authorization` con uno de estos formatos:
@@ -107,6 +143,11 @@ where
         let headers = &parts.headers;
         let method = parts.method.clone();
         let path = parts.uri.path().to_string();
+
+        // Bypass temprano por dominio + secreto
+        if is_bypass_auth(headers, &app_state) {
+            return Ok(RequireAuth);
+        }
 
         // Igual que el middleware: aceptar token en query para rutas de stream si está habilitado
         let is_stream_route = path.starts_with("/api/live/")
@@ -233,63 +274,7 @@ pub async fn flexible_auth_middleware(
     if request.method() == axum::http::Method::OPTIONS {
         return next.run(request).await;
     }
-    // BYPASS por dominio o subdominio en Host / X-Forwarded-Host / Origin / Referer (configurable)
-    // helper para extraer host de una URL (Origin/Referer)
-    fn extract_host(value: Option<&str>) -> Option<String> {
-        value.and_then(|v| url::Url::parse(v).ok()).and_then(|u| u.host_str().map(|s| s.to_lowercase()))
-    }
-    let host_header = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_lowercase());
-    let xfh_header = headers
-        .get("x-forwarded-host")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_lowercase());
-    let origin_host = extract_host(headers.get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()));
-    let referer_host = extract_host(headers.get(axum::http::header::REFERER).and_then(|v| v.to_str().ok()));
-
-    let bypass = if let Some(base) = &state.bypass_base_domain {
-        let base_str = base.as_str();
-        let domain_ok = [host_header.as_ref(), xfh_header.as_ref(), origin_host.as_ref(), referer_host.as_ref()]
-            .iter()
-            .filter_map(|o| o.as_ref())
-            .any(|h| h == &base_str || h.ends_with(&format!(".{base_str}")));
-        if domain_ok {
-            // Si hay secreto configurado, exigir header X-Bypass-Secret
-            if let Some(secret) = &state.bypass_domain_secret {
-                let provided_secret = headers
-                    .get("x-bypass-secret")
-                    .and_then(|v| v.to_str().ok());
-                provided_secret == Some(secret)
-            } else {
-                // Sin secreto configurado, bypass solo por dominio (menos seguro)
-                true
-            }
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    if bypass {
-        return next.run(request).await;
-    }
-    // BYPASS por dominio permitido: si Origin o Referer contienen nubellesalon.com
-    // Se concede acceso sin requerir token ni header Authorization.
-    const BYPASS_DOMAIN: &str = "nubellesalon.com";
-    let origin_ok = headers
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        .map(|o| o.contains(BYPASS_DOMAIN))
-        .unwrap_or(false);
-    let referer_ok = headers
-        .get(header::REFERER)
-        .and_then(|v| v.to_str().ok())
-        .map(|r| r.contains(BYPASS_DOMAIN))
-        .unwrap_or(false);
-    if origin_ok || referer_ok {
-        // Autorización automática por dominio.
+    if is_bypass_auth(&headers, &state) {
         return next.run(request).await;
     }
     // Verificar si hay header Authorization
