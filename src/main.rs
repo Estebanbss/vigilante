@@ -143,7 +143,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // HLS ahora se genera dentro del pipeline principal en camera.rs mediante un branch del tee
 
-    // Router único con autenticación flexible (header o query token)
+    // Router PÚBLICO sin autenticación
+    let public_routes = Router::new()
+        .route("/test", get(|| async { "OK - Vigilante API funcionando sin auth" }))
+        .layer(cors.clone())
+        .with_state(state.clone());
+
+    // Router PROTEGIDO con autenticación flexible (header o query token)
     let app = Router::new()
         .route("/hls", get(stream_hls_index))
         .route("/hls/*path", get(stream_hls_handler))
@@ -181,13 +187,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/status/audio", get(get_audio_status))
         .route("/api/status/storage", get(get_storage_status))
         .route("/api/status/ws", get(status_websocket))
-        // Endpoint de test SIN seguridad
-        .route("/test", get(|| async { "OK - Vigilante API funcionando" }))
         // CORS middleware debe ir ANTES de autenticación para manejar preflight OPTIONS
         .layer(cors)
         // Middleware flexible: valida token por header O por query
         .layer(from_fn_with_state(state.clone(), flexible_auth_middleware))
         .with_state(state);
+
+    // Combinar routers: público + protegido
+    let app = public_routes.merge(app);
 
     let addr: SocketAddr = listen_addr.parse()?;
     println!("🚀 API y Streamer escuchando en http://{}", addr);
