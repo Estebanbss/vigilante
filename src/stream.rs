@@ -177,19 +177,45 @@ pub async fn stream_audio_handler(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, StatusCode> {
+    // Verificar si el audio está disponible
+    if !*state.audio_available.lock().unwrap() {
+        eprintln!("❌ Audio no disponible en el stream RTSP");
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     // Suscripción al canal de audio
     let mut rx = state.audio_mp3_tx.subscribe();
 
     let stream = async_stream::stream! {
+        let mut consecutive_errors = 0;
+        let max_consecutive_errors = 5;
+
         loop {
-            match rx.changed().await {
-                Ok(_) => {
+            match tokio::time::timeout(Duration::from_secs(30), rx.changed()).await {
+                Ok(Ok(_)) => {
                     let chunk = rx.borrow().clone();
-                    yield Ok::<Bytes, std::io::Error>(chunk);
+                    if !chunk.is_empty() {
+                        consecutive_errors = 0; // Reset error counter on success
+                        yield Ok::<Bytes, std::io::Error>(chunk);
+                    } else {
+                        eprintln!("⚠️  Chunk de audio vacío recibido");
+                    }
                 }
-                Err(_) => {
+                Ok(Err(_)) => {
                     eprintln!("❌ Audio watch channel closed");
                     break;
+                }
+                Err(_) => {
+                    consecutive_errors += 1;
+                    eprintln!("⏰ Timeout esperando datos de audio (error #{})", consecutive_errors);
+
+                    if consecutive_errors >= max_consecutive_errors {
+                        eprintln!("❌ Demasiados timeouts consecutivos, cerrando stream de audio");
+                        break;
+                    }
+
+                    // Enviar un chunk vacío para mantener la conexión viva
+                    yield Ok::<Bytes, std::io::Error>(Bytes::new());
                 }
             }
         }
@@ -211,6 +237,8 @@ pub async fn stream_audio_handler(
     headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
     headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
     headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
+    headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+    headers.insert("Transfer-Encoding", "chunked".parse().unwrap());
     Ok(resp)
 }
 // HLS ahora es generado dentro del pipeline principal (camera.rs)

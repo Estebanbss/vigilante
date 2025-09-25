@@ -1,21 +1,19 @@
 use crate::{auth::RequireAuth, AppState};
 use axum::http::header;
-use axum::response::sse::Event;
 use axum::{
     body::Body,
     extract::{Path, Query, State, ws::{WebSocket, WebSocketUpgrade}},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response, Sse},
+    response::{IntoResponse, Response},
     Json,
 };
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use fs2;
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
-use std::{convert::Infallible, fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
-use tokio::{fs::File, time::sleep};
+use tokio::fs::File;
 
 // Estructura para la respuesta estándar de la API
 #[derive(Serialize)]
@@ -124,7 +122,7 @@ fn get_mp4_duration(file_path: &PathBuf) -> Option<f64> {
 }
 
 // Función auxiliar recursiva para obtener grabaciones de todos los subdirectorios
-fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
+pub fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
     let mut recordings = Vec::new();
 
     if let Ok(entries) = fs::read_dir(path) {
@@ -726,10 +724,8 @@ async fn send_recordings_summary(
     let mut date_counts: HashMap<String, usize> = HashMap::new();
 
     for recording in &recordings {
-        if let Some(date_str) = recording.modified.as_ref()
-            .and_then(|dt| dt.split('T').next()) {
-            *date_counts.entry(date_str.to_string()).or_insert(0) += 1;
-        }
+        let date_str = recording.last_modified.to_rfc3339().split('T').next().unwrap_or("").to_string();
+        *date_counts.entry(date_str).or_insert(0) += 1;
     }
 
     // Convertir a vector ordenado por fecha descendente
@@ -802,12 +798,8 @@ async fn send_recordings_list(
 
     // Ordenar por fecha modificada descendente
     recordings.sort_by(|a, b| {
-        let a_date = a.modified.as_ref()
-            .and_then(|dt| DateTime::parse_from_rfc3339(dt).ok())
-            .unwrap_or_else(|| DateTime::parse_from_rfc3339("1900-01-01T00:00:00Z").unwrap());
-        let b_date = b.modified.as_ref()
-            .and_then(|dt| DateTime::parse_from_rfc3339(dt).ok())
-            .unwrap_or_else(|| DateTime::parse_from_rfc3339("1900-01-01T00:00:00Z").unwrap());
+        let a_date = a.last_modified;
+        let b_date = b.last_modified;
         b_date.cmp(&a_date)
     });
 

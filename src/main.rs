@@ -4,11 +4,11 @@ use axum::{
 };
 use bytes::Bytes;
 use dotenvy::dotenv;
-use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{env, net::SocketAddr, path::PathBuf, sync::{Arc, Mutex as StdMutex}};
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 
-use vigilante::{auth, camera, logs, ptz, storage, stream, AppState};
+use vigilante::{auth, camera, logs, ptz, storage, stream, AppState, SystemStatus, PipelineStatus, AudioStatus, StorageStatus};
 
 use auth::flexible_auth_middleware;
 use axum::middleware::from_fn_with_state;
@@ -16,13 +16,21 @@ use camera::start_camera_pipeline;
 use logs::stream_journal_logs;
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
-    delete_recording, get_log_file, get_storage_info, list_recordings, recordings_list,
-    recordings_list_ws, recordings_summary_ws, start_cleanup_task, storage_stream_sse, stream_recording,
+    delete_recording, get_log_file, get_storage_info, list_recordings,
+    recordings_list_ws, recordings_summary_ws, stream_recording,
     stream_recording_logs_sse, stream_recording_tail,
 };
 use stream::{
     stream_audio_handler, stream_hls_handler, stream_hls_index, stream_mjpeg_handler,
     stream_webrtc_handler,
+};
+use vigilante::status::{
+    get_system_status,
+    get_pipeline_status,
+    get_audio_status,
+    get_storage_status,
+    generate_realtime_status,
+    status_websocket,
 };
 
 // Dependencias de GStreamer
@@ -66,6 +74,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mjpeg_tx, _mjpeg_rx) = broadcast::channel::<Bytes>(32);
     let (mjpeg_low_tx, _mjpeg_low_rx) = broadcast::channel::<Bytes>(32);
     let (audio_mp3_tx, _audio_rx) = watch::channel::<Bytes>(Bytes::new());
+    let (status_tx, _status_rx) = broadcast::channel::<serde_json::Value>(16);
+
+    // Inicializar estado del sistema
+    let initial_status = SystemStatus {
+        pipeline_status: PipelineStatus {
+            is_running: false,
+            start_time: None,
+            error_count: 0,
+            last_error: None,
+        },
+        audio_status: AudioStatus {
+            available: false,
+            bytes_sent: 0,
+            packets_sent: 0,
+            last_activity: None,
+        },
+        storage_status: StorageStatus {
+            total_space_bytes: 0,
+            used_space_bytes: 0,
+            free_space_bytes: 0,
+            recording_count: 0,
+            last_recording: None,
+        },
+        uptime_seconds: 0,
+        last_updated: chrono::Utc::now(),
+    };
 
     let state = Arc::new(AppState {
         camera_rtsp_url: camera_rtsp_url.clone(),
@@ -76,16 +110,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mjpeg_tx,
         mjpeg_low_tx,
         audio_mp3_tx,
+        audio_available: Arc::new(StdMutex::new(false)),
+        system_status: Arc::new(StdMutex::new(initial_status)),
         enable_hls,
         enable_manual_motion_detection,
         allow_query_token_streams,
         log_writer: Arc::new(Mutex::new(None)),
         bypass_base_domain: env::var("BYPASS_DOMAIN").ok().map(|d| d.to_lowercase()),
         bypass_domain_secret: env::var("BYPASS_DOMAIN_SECRET").ok(),
+        start_time: std::time::SystemTime::now(),
+        status_tx,
     });
 
+    // Iniciar background task para status en tiempo real
+    {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+            loop {
+                interval.tick().await;
+                let status_update = generate_realtime_status(&state_clone);
+                let _ = state_clone.status_tx.send(status_update);
+            }
+        });
+    }
+
     // Iniciar la tarea de limpieza de almacenamiento en segundo plano
-    tokio::spawn(start_cleanup_task(storage_path_buf));
+    // tokio::spawn(start_cleanup_task(storage_path_buf)); // Función eliminada en actualización
 
     // Iniciar el pipeline de la cámara para la grabación 24/7 y detección de eventos
     tokio::spawn(start_camera_pipeline(camera_rtsp_url, state.clone()));
@@ -100,7 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/live/mjpeg", get(stream_mjpeg_handler))
         .route("/api/live/audio", get(stream_audio_handler))
         .route("/api/logs/stream", get(stream_journal_logs))
-        .route("/api/storage/stream", get(storage_stream_sse))
+        // .route("/api/storage/stream", get(storage_stream_sse)) // Función eliminada en actualización
         .route("/api/recordings/summary", get(recordings_summary_ws))
         .route("/api/recordings/list", get(recordings_list_ws))
         .route(
@@ -124,6 +175,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/ptz/zoom/in", post(zoom_in))
         .route("/api/ptz/zoom/out", post(zoom_out))
         .route("/api/ptz/stop", post(ptz_stop))
+        // Nuevas rutas para el estado del sistema
+        .route("/api/status", get(get_system_status))
+        .route("/api/status/pipeline", get(get_pipeline_status))
+        .route("/api/status/audio", get(get_audio_status))
+        .route("/api/status/storage", get(get_storage_status))
+        .route("/api/status/ws", get(status_websocket))
         // CORS middleware debe ir ANTES de autenticación para manejar preflight OPTIONS
         .layer(cors)
         // Middleware flexible: valida token por header O por query

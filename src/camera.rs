@@ -15,6 +15,7 @@ fn log_to_file(writer: &Arc<Mutex<BufWriter<std::fs::File>>>, emoji: &str, msg: 
 }
 
 pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
+    let state = Arc::clone(&state); // Clonamos para que tenga lifetime 'static
     loop {
         let now = chrono::Local::now();
 
@@ -130,8 +131,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             // Rama de audio hacia grabación MP4 (AAC)
             "t_audio. ! queue max-size-buffers=20 max-size-time=500000000 ! voaacenc ! aacparse ! queue ! mux.audio_0 ",
 
-            // Rama de audio hacia streaming MP3 (live)
-            "t_audio. ! queue max-size-buffers=5 max-size-time=100000000 ! lamemp3enc quality=9 ! appsink name=audio_mp3_sink sync=false max-buffers=1 drop=true ",
+            // Rama de audio hacia streaming MP3 (live) - Optimizado para baja latencia
+            "t_audio. ! queue max-size-buffers=10 max-size-time=20000000 leaky=downstream ! lamemp3enc quality=4 bitrate=128 ! appsink name=audio_mp3_sink sync=false max-buffers=5 drop=false ",
 
             // Detección de movimiento (GRAY8 downscaled)
             "t_video. ! queue max-size-buffers=10 max-size-time=500000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
@@ -167,8 +168,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             "src. ! application/x-rtp,media=audio,encoding-name=PCMA ! rtppcmadepay ! alawdec ! audioconvert ! audioresample ! tee name=t_audio ",
             "t_audio. ! queue max-size-buffers=20 max-size-time=500000000 ! voaacenc ! aacparse ! queue ! spl.audio_0 ",
 
-            // Rama de audio hacia streaming MP3 (live)
-            "t_audio. ! queue max-size-buffers=5 max-size-time=100000000 ! lamemp3enc quality=9 ! appsink name=audio_mp3_sink sync=false max-buffers=1 drop=true ",
+            // Rama de audio hacia streaming MP3 (live) - Optimizado para baja latencia
+            "t_audio. ! queue max-size-buffers=10 max-size-time=20000000 leaky=downstream ! lamemp3enc quality=4 bitrate=128 ! appsink name=audio_mp3_sink sync=false max-buffers=5 drop=false ",
 
             // Detección de movimiento
             "t_video. ! queue max-size-buffers=10 max-size-time=500000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
@@ -382,10 +383,16 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                         break;
                     }
                     MessageView::Error(err) => {
-                        eprintln!("❌ Error del pipeline: {}", err.error());
-                        if let Some(debug) = err.debug() {
-                            eprintln!("🧩 Debug: {}", debug);
+                        let error_msg = format!("{}: {}", err.error(), err.debug().unwrap_or_else(|| "".into()));
+                        eprintln!("❌ Error del pipeline: {}", error_msg);
+
+                        // Actualizar estado del sistema con el error
+                        {
+                            let mut system_status = state.system_status.lock().unwrap();
+                            system_status.pipeline_status.error_count += 1;
+                            system_status.pipeline_status.last_error = Some(error_msg);
                         }
+
                         should_restart = true;
                         break;
                     }
@@ -746,7 +753,18 @@ fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Ar
             return;
         }
     };
+
+    // Marcar que el audio está disponible y actualizar estado del sistema
+    *state.audio_available.lock().unwrap() = true;
+    if let Ok(mut status) = state.system_status.lock() {
+        status.audio_status.available = true;
+        status.audio_status.last_activity = Some(chrono::Utc::now());
+        status.last_updated = chrono::Utc::now();
+    }
+    println!("🎵 Audio MP3 streaming configurado correctamente");
+
     let tx_audio = state.audio_mp3_tx.clone();
+    let state_clone = Arc::clone(state);
     audio_sink_app.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             .new_sample(move |s| {
@@ -764,14 +782,41 @@ fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Ar
                         return Err(gst::FlowError::Error);
                     }
                 };
-                let map = match buffer.map_readable() {
-                    Ok(m) => m,
-                    Err(e) => {
-                        eprintln!("❌ Error mapping audio buffer: {:?}", e);
-                        return Err(gst::FlowError::Error);
+
+                // Optimización: usar map_readable solo si necesitamos acceder a los datos
+                let data = if buffer.size() > 0 {
+                    match buffer.map_readable() {
+                        Ok(map) => {
+                            let bytes = Bytes::copy_from_slice(map.as_ref());
+                            // Log de debug cada 100 paquetes para monitoreo
+                            use std::sync::atomic::{AtomicU64, Ordering};
+                            static COUNTER: AtomicU64 = AtomicU64::new(0);
+                            let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+                            if count % 100 == 0 {
+                                println!("🎵 Audio MP3: {} bytes enviados (paquete #{})", bytes.len(), count);
+                            }
+
+                            // Actualizar estadísticas de audio
+                            if let Ok(mut status) = state_clone.system_status.lock() {
+                                status.audio_status.bytes_sent += bytes.len() as u64;
+                                status.audio_status.packets_sent = count;
+                                status.audio_status.last_activity = Some(chrono::Utc::now());
+                                status.last_updated = chrono::Utc::now();
+                            }
+
+                            bytes
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Error mapping audio buffer: {:?}", e);
+                            return Err(gst::FlowError::Error);
+                        }
                     }
+                } else {
+                    eprintln!("⚠️  Buffer de audio vacío recibido");
+                    return Ok(gst::FlowSuccess::Ok);
                 };
-                let data = Bytes::copy_from_slice(map.as_ref());
+
+                // Enviar datos de audio de forma no-bloqueante
                 let _ = tx_audio.send_replace(data);
                 Ok(gst::FlowSuccess::Ok)
             })
