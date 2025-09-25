@@ -154,7 +154,9 @@ where
             || path.starts_with("/hls")
             || path.starts_with("/webrtc/")
             || path.starts_with("/api/storage/")
-            || path.starts_with("/api/recordings/");
+            || path.starts_with("/api/recordings/")
+            || path.starts_with("/api/status/")
+            || path.starts_with("/api/logs/");
         if app_state.allow_query_token_streams && is_stream_route {
             // 1) Intentar con query propia
             if let Some(q) = parts.uri.query() {
