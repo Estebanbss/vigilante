@@ -181,6 +181,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/status/audio", get(get_audio_status))
         .route("/api/status/storage", get(get_storage_status))
         .route("/api/status/ws", get(status_websocket))
+        // Endpoint de test SIN seguridad
+        .route("/test", get(|| async { "OK - Vigilante API funcionando" }))
         // CORS middleware debe ir ANTES de autenticación para manejar preflight OPTIONS
         .layer(cors)
         // Middleware flexible: valida token por header O por query
