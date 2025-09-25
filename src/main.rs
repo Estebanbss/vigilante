@@ -16,9 +16,9 @@ use camera::start_camera_pipeline;
 use logs::stream_journal_logs;
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
-    delete_recording, get_log_file, get_storage_info, list_recordings, recordings_stream_sse,
-    start_cleanup_task, storage_stream_sse, stream_recording, stream_recording_logs_sse,
-    stream_recording_tail,
+    delete_recording, get_log_file, get_storage_info, list_recordings, recordings_list,
+    recordings_list_ws, recordings_summary_ws, start_cleanup_task, storage_stream_sse, stream_recording,
+    stream_recording_logs_sse, stream_recording_tail,
 };
 use stream::{
     stream_audio_handler, stream_hls_handler, stream_hls_index, stream_mjpeg_handler,
@@ -101,7 +101,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/live/audio", get(stream_audio_handler))
         .route("/api/logs/stream", get(stream_journal_logs))
         .route("/api/storage/stream", get(storage_stream_sse))
-        .route("/api/recordings/stream", get(recordings_stream_sse))
+        .route("/api/recordings/summary", get(recordings_summary_ws))
+        .route("/api/recordings/list", get(recordings_list_ws))
         .route(
             "/api/recordings/stream/tail/*path",
             get(stream_recording_tail),

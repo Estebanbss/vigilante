@@ -3,7 +3,7 @@ use axum::http::header;
 use axum::response::sse::Event;
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, ws::{WebSocket, WebSocketUpgrade}},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response, Sse},
     Json,
@@ -569,199 +569,14 @@ pub async fn stream_recording_tail(
     Ok(resp)
 }
 
-// Background task to automatically manage storage space
-pub async fn start_cleanup_task(storage_path: PathBuf) {
-    loop {
-        // Espera un período de tiempo antes de revisar de nuevo
-        sleep(Duration::from_secs(30 * 60)).await; // Revisa cada 30 minutos
-
-        // Obtiene las estadísticas de almacenamiento
-        if let Ok(stats) = fs2::statvfs(&storage_path) {
-            let total_space = stats.total_space();
-            let used_space = total_space - stats.free_space();
-            let used_percentage = (used_space as f64 / total_space as f64) * 100.0;
-
-            println!("✅ Almacenamiento usado: {:.2}%", used_percentage);
-
-            // Si el uso de almacenamiento está por encima del umbral alto (90%)
-            if used_percentage > 90.0 {
-                println!("⚠️ Uso de almacenamiento crítico, iniciando limpieza...");
-
-                let mut all_recordings = get_recordings_recursively(&storage_path);
-                // Ordena las grabaciones por fecha de modificación (las más antiguas primero)
-                all_recordings.sort_by_key(|rec| rec.last_modified);
-
-                // Sigue eliminando los archivos más antiguos hasta que el uso esté por debajo del umbral bajo (85%)
-                while let Ok(current_stats) = fs2::statvfs(&storage_path) {
-                    let current_used = current_stats.total_space() - current_stats.free_space();
-                    let current_percentage =
-                        (current_used as f64 / current_stats.total_space() as f64) * 100.0;
-
-                    if current_percentage < 85.0 {
-                        println!(
-                            "✅ Limpieza completa. Almacenamiento actual: {:.2}%",
-                            current_percentage
-                        );
-                        break;
-                    }
-
-                    if let Some(recording) = all_recordings.pop() {
-                        let log_path = PathBuf::from(&recording.path.replace(".mp4", "-log.txt"));
-
-                        // Eliminar archivo de video
-                        if let Err(e) = fs::remove_file(&recording.path) {
-                            eprintln!("❌ Error al eliminar el video {}: {}", recording.path, e);
-                        } else {
-                            println!("🗑️ Video eliminado: {}", recording.name);
-                        }
-
-                        // Eliminar archivo de log
-                        if log_path.exists() {
-                            if let Err(e) = fs::remove_file(&log_path) {
-                                eprintln!(
-                                    "❌ Error al eliminar el log {}: {}",
-                                    log_path.display(),
-                                    e
-                                );
-                            } else {
-                                println!("🗑️ Log eliminado: {}", log_path.display());
-                            }
-                        }
-                    } else {
-                        // No hay más grabaciones para eliminar
-                        println!("⚠️ No hay más grabaciones para eliminar, el disco sigue lleno.");
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
-// SSE para información de almacenamiento en tiempo real
-pub async fn storage_stream_sse(
+// Endpoint para lista completa de grabaciones con metadatos
+pub async fn recordings_list(
+    RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
-) -> Response {
-    let stream = async_stream::stream! {
-        let mut last_hash = String::new();
-
-        // Enviar evento de conexión
-        yield Ok::<_, Infallible>(Event::default().data(":connected"));
-
-        loop {
-            // Obtener info de storage
-            let info = match fs2::statvfs(&state.storage_path) {
-                Ok(stats) => {
-                    let total_space = stats.total_space();
-                    let free_space = stats.free_space();
-                    let used_space = total_space - free_space;
-
-                    StorageInfo {
-                        total_space_bytes: total_space,
-                        used_space_bytes: used_space,
-                        storage_path: state.storage_path.to_str().unwrap_or_default().to_string(),
-                        storage_name: "Disco de Grabaciones".to_string(),
-                    }
-                }
-                Err(e) => {
-                    eprintln!("❌ Error al obtener info de almacenamiento: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
-
-            // Serializar y calcular hash
-            let json = match serde_json::to_string(&info) {
-                Ok(j) => j,
-                Err(e) => {
-                    eprintln!("❌ Error serializando storage info: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
-
-            let mut hasher = Sha1::new();
-            hasher.update(json.as_bytes());
-            let hash = format!("{:x}", hasher.finalize());
-
-            // Enviar solo si cambió
-            if hash != last_hash {
-                yield Ok(Event::default().data(json));
-                last_hash = hash;
-            }
-
-            // Pequeño delay para no sobrecargar CPU
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-    };
-
-    let sse = Sse::new(stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(Duration::from_secs(1))
-            .text("keep-alive"),
-    );
-    
-    let mut resp = sse.into_response();
-    let headers = resp.headers_mut();
-    // CORS headers for streaming
-    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
-    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
-    resp
-}
-
-// SSE para lista de grabaciones en tiempo real
-pub async fn recordings_stream_sse(
-    State(state): State<Arc<AppState>>,
-) -> Response {
-    let stream = async_stream::stream! {
-        let mut last_hash = String::new();
-
-        // Enviar evento de conexión
-        yield Ok::<_, Infallible>(Event::default().data(":connected"));
-
-        loop {
-            // Obtener lista de recordings
-            let recordings = get_recordings_recursively(&state.storage_path);
-
-            // Serializar y calcular hash
-            let json = match serde_json::to_string(&recordings) {
-                Ok(j) => j,
-                Err(e) => {
-                    eprintln!("❌ Error serializando recordings: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
-
-            let mut hasher = Sha1::new();
-            hasher.update(json.as_bytes());
-            let hash = format!("{:x}", hasher.finalize());
-
-            // Enviar solo si cambió
-            if hash != last_hash {
-                yield Ok(Event::default().data(json));
-                last_hash = hash;
-            }
-
-            // Pequeño delay para no sobrecargar CPU
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        }
-    };
-
-    let sse = Sse::new(stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(Duration::from_secs(1))
-            .text("keep-alive"),
-    );
-    
-    let mut resp = sse.into_response();
-    let headers = resp.headers_mut();
-    // CORS headers for streaming
-    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
-    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
-    resp
+) -> impl IntoResponse {
+    // Obtener todas las grabaciones sin paginación
+    let recordings = get_recordings_recursively(&state.storage_path);
+    (StatusCode::OK, Json(recordings))
 }
 
 // Nueva función SSE para streaming de logs de grabaciones en tiempo real
@@ -850,4 +665,158 @@ pub async fn stream_recording_logs_sse(
     headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
 
     Ok(resp)
+}
+
+// Nueva función WebSocket para streaming de resumen de grabaciones por fechas
+pub async fn recordings_summary_ws(
+    ws: WebSocketUpgrade,
+    RequireAuth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_recordings_summary_ws(socket, state))
+}
+
+async fn handle_recordings_summary_ws(mut socket: WebSocket, state: Arc<AppState>) {
+    println!("🎯 WebSocket: Recordings summary stream started");
+
+    // Enviar resumen inicial
+    if let Err(e) = send_recordings_summary(&mut socket, &state).await {
+        println!("Error sending initial summary: {}", e);
+        return;
+    }
+
+    // Mantener conexión abierta y enviar actualizaciones periódicas
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                if let Err(e) = send_recordings_summary(&mut socket, &state).await {
+                    println!("Error sending summary update: {}", e);
+                    break;
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(axum::extract::ws::Message::Close(_))) => {
+                        println!("WebSocket closed by client");
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        println!("WebSocket error: {}", e);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    println!("🎯 WebSocket: Recordings summary stream ended");
+}
+
+async fn send_recordings_summary(
+    socket: &mut WebSocket,
+    state: &Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let recordings = get_recordings_recursively(&state.storage_path);
+
+    // Crear mapa de fechas con conteo
+    use std::collections::HashMap;
+    let mut date_counts: HashMap<String, usize> = HashMap::new();
+
+    for recording in &recordings {
+        if let Some(date_str) = recording.modified.as_ref()
+            .and_then(|dt| dt.split('T').next()) {
+            *date_counts.entry(date_str.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    // Convertir a vector ordenado por fecha descendente
+    let mut summary: Vec<(String, usize)> = date_counts.into_iter().collect();
+    summary.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let summary_data = serde_json::json!({
+        "type": "summary",
+        "data": summary,
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    });
+
+    socket.send(axum::extract::ws::Message::Text(summary_data.to_string())).await?;
+    Ok(())
+}
+
+// Nueva función WebSocket para streaming de lista completa de grabaciones
+pub async fn recordings_list_ws(
+    ws: WebSocketUpgrade,
+    RequireAuth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_recordings_list_ws(socket, state))
+}
+
+async fn handle_recordings_list_ws(mut socket: WebSocket, state: Arc<AppState>) {
+    println!("🎯 WebSocket: Recordings list stream started");
+
+    // Enviar lista inicial
+    if let Err(e) = send_recordings_list(&mut socket, &state).await {
+        println!("Error sending initial list: {}", e);
+        return;
+    }
+
+    // Mantener conexión abierta y enviar actualizaciones periódicas
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                if let Err(e) = send_recordings_list(&mut socket, &state).await {
+                    println!("Error sending list update: {}", e);
+                    break;
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(axum::extract::ws::Message::Close(_))) => {
+                        println!("WebSocket closed by client");
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        println!("WebSocket error: {}", e);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    println!("🎯 WebSocket: Recordings list stream ended");
+}
+
+async fn send_recordings_list(
+    socket: &mut WebSocket,
+    state: &Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut recordings = get_recordings_recursively(&state.storage_path);
+
+    // Ordenar por fecha modificada descendente
+    recordings.sort_by(|a, b| {
+        let a_date = a.modified.as_ref()
+            .and_then(|dt| DateTime::parse_from_rfc3339(dt).ok())
+            .unwrap_or_else(|| DateTime::parse_from_rfc3339("1900-01-01T00:00:00Z").unwrap());
+        let b_date = b.modified.as_ref()
+            .and_then(|dt| DateTime::parse_from_rfc3339(dt).ok())
+            .unwrap_or_else(|| DateTime::parse_from_rfc3339("1900-01-01T00:00:00Z").unwrap());
+        b_date.cmp(&a_date)
+    });
+
+    let list_data = serde_json::json!({
+        "type": "list",
+        "data": recordings,
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    });
+
+    socket.send(axum::extract::ws::Message::Text(list_data.to_string())).await?;
+    Ok(())
 }
