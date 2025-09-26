@@ -258,7 +258,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             setup_mjpeg_sinks(&pipeline, &state, &log_writer);
         }
         if pipeline.by_name("audio_mp3_sink").is_some() {
-            setup_audio_mp3_sink(&pipeline, &state, &log_writer);
+            setup_audio_mp3_sink(&pipeline, &state, &log_writer).await;
         }
 
         // Añadir sondas (probes) a la rama de grabación para diagnosticar CAPS/BUFFERS
@@ -407,7 +407,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
                         // Actualizar estado del sistema con el error
                         {
-                            let mut system_status = state.system_status.lock().unwrap();
+                            let mut system_status = state.system_status.lock().await;
                             system_status.pipeline_status.error_count += 1;
                             system_status.pipeline_status.last_error = Some(error_msg);
                         }
@@ -757,7 +757,7 @@ fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<M
             .build(),
     );
 }
-fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<Mutex<Option<BufWriter<std::fs::File>>>>) {
+async fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<Mutex<Option<BufWriter<std::fs::File>>>>) {
     let audio_sink_app = match pipeline
         .by_name("audio_mp3_sink") {
         Some(sink) => match sink.downcast::<gst_app::AppSink>() {
@@ -774,12 +774,11 @@ fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Ar
     };
 
     // Marcar que el audio está disponible y actualizar estado del sistema
-    *state.audio_available.lock().unwrap() = true;
-    if let Ok(mut status) = state.system_status.lock() {
-        status.audio_status.available = true;
-        status.audio_status.last_activity = Some(chrono::Utc::now());
-        status.last_updated = chrono::Utc::now();
-    }
+    *state.audio_available.lock().await = true;
+    let mut status = state.system_status.lock().await;
+    status.audio_status.available = true;
+    status.audio_status.last_activity = Some(chrono::Utc::now());
+    status.last_updated = chrono::Utc::now();
     println!("🎵 Audio MP3 streaming configurado correctamente");
 
     let tx_audio = state.audio_mp3_tx.clone();
@@ -816,12 +815,15 @@ fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Ar
                             }
 
                             // Actualizar estadísticas de audio
-                            if let Ok(mut status) = state_clone.system_status.lock() {
-                                status.audio_status.bytes_sent += bytes.len() as u64;
+                            let state_clone_for_spawn = Arc::clone(&state_clone);
+                            let bytes_len = bytes.len();
+                            tokio::spawn(async move {
+                                let mut status = state_clone_for_spawn.system_status.lock().await;
+                                status.audio_status.bytes_sent += bytes_len as u64;
                                 status.audio_status.packets_sent = count;
                                 status.audio_status.last_activity = Some(chrono::Utc::now());
                                 status.last_updated = chrono::Utc::now();
-                            }
+                            });
 
                             bytes
                         }

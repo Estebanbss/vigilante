@@ -9,7 +9,7 @@ pub async fn get_system_status(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Json<SystemStatus> {
-    let mut status = state.system_status.lock().unwrap().clone();
+    let mut status = state.system_status.lock().await.clone();
 
     // Actualizar uptime y timestamp
     status.uptime_seconds = std::time::SystemTime::now()
@@ -48,7 +48,7 @@ pub async fn get_pipeline_status(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Json<crate::PipelineStatus> {
-    let status = state.system_status.lock().unwrap().clone();
+    let status = state.system_status.lock().await.clone();
 
     // Verificar estado actual del pipeline
     let mut pipeline_status = status.pipeline_status;
@@ -63,8 +63,8 @@ pub async fn get_audio_status(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Json<crate::AudioStatus> {
-    let mut audio_status = state.system_status.lock().unwrap().audio_status.clone();
-    audio_status.available = *state.audio_available.lock().unwrap();
+    let mut audio_status = state.system_status.lock().await.audio_status.clone();
+    audio_status.available = *state.audio_available.lock().await;
     Json(audio_status)
 }
 
@@ -73,7 +73,7 @@ pub async fn get_storage_status(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Json<crate::StorageStatus> {
-    let mut storage_status = state.system_status.lock().unwrap().storage_status.clone();
+    let mut storage_status = state.system_status.lock().await.storage_status.clone();
 
     // Actualizar información en tiempo real
     if let Ok(stats) = fs2::statvfs(&state.storage_path) {
@@ -97,8 +97,8 @@ pub async fn get_storage_status(
 }
 
 // Función helper para generar status simplificado (camara, audio, storage)
-pub fn generate_realtime_status(state: &Arc<AppState>) -> serde_json::Value {
-    let mut status = state.system_status.lock().unwrap().clone();
+pub async fn generate_realtime_status(state: &Arc<AppState>) -> serde_json::Value {
+    let mut status = state.system_status.lock().await.clone();
 
     // Actualizar uptime real
     status.uptime_seconds = std::time::SystemTime::now()
@@ -111,7 +111,7 @@ pub fn generate_realtime_status(state: &Arc<AppState>) -> serde_json::Value {
     let is_running = pipeline_guard.as_ref().map(|g| g.is_some()).unwrap_or(false);
 
     // Actualizar audio disponible
-    let audio_available = *state.audio_available.lock().unwrap();
+    let audio_available = *state.audio_available.lock().await;
 
     // Contar grabaciones (simplificado, sin detalles)
     let recording_count = crate::storage::get_recordings_recursively(&state.storage_path).len();

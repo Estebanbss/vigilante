@@ -5,7 +5,7 @@ use axum::{
 };
 use bytes::Bytes;
 use dotenvy::dotenv;
-use std::{env, net::SocketAddr, path::PathBuf, sync::{Arc, Mutex as StdMutex}};
+use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::sync::{broadcast, watch, Mutex};
 use tower_http::cors::CorsLayer;
 
@@ -133,8 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mjpeg_tx,
         mjpeg_low_tx,
         audio_mp3_tx,
-        audio_available: Arc::new(StdMutex::new(false)),
-        system_status: Arc::new(StdMutex::new(initial_status)),
+        audio_available: Arc::new(Mutex::new(false)),
+        system_status: Arc::new(Mutex::new(initial_status)),
         enable_hls,
         enable_manual_motion_detection,
         allow_query_token_streams,
@@ -152,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
             loop {
                 interval.tick().await;
-                let status_update = generate_realtime_status(&state_clone);
+                let status_update = generate_realtime_status(&state_clone).await;
                 let _ = state_clone.status_tx.send(status_update);
             }
         });

@@ -178,7 +178,7 @@ pub async fn stream_audio_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, StatusCode> {
     // Verificar si el audio está disponible
-    if !*state.audio_available.lock().unwrap() {
+    if !*state.audio_available.lock().await {
         eprintln!("❌ Audio no disponible en el stream RTSP");
         return Err(StatusCode::NOT_FOUND);
     }
