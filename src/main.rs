@@ -5,7 +5,8 @@ use axum::{
 };
 use bytes::Bytes;
 use dotenvy::dotenv;
-use std::{env, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{env, net::SocketAddr, path::PathBuf, sync::{Arc, Mutex as StdMutex}};
+use std::sync::atomic::AtomicU64;
 use tokio::sync::{broadcast, watch, Mutex};
 use tower_http::cors::CorsLayer;
 
@@ -135,10 +136,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio_mp3_tx,
         audio_available: Arc::new(Mutex::new(false)),
         system_status: Arc::new(Mutex::new(initial_status)),
+        audio_bytes_sent: AtomicU64::new(0),
+        audio_packets_sent: AtomicU64::new(0),
         enable_hls,
         enable_manual_motion_detection,
         allow_query_token_streams,
-        log_writer: Arc::new(Mutex::new(None)),
+        log_writer: Arc::new(StdMutex::new(None)),
         bypass_base_domain: env::var("BYPASS_DOMAIN").ok().map(|d| d.to_lowercase()),
         bypass_domain_secret: env::var("BYPASS_DOMAIN_SECRET").ok(),
         start_time: std::time::SystemTime::now(),

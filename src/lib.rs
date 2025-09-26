@@ -7,8 +7,9 @@ pub mod storage;
 pub mod stream;
 
 use bytes::Bytes;
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::{Arc, Mutex as StdMutex}};
 use tokio::sync::{broadcast, watch, Mutex};
+use std::sync::atomic::AtomicU64;
 
 // Dependencias de GStreamer
 use gstreamer as gst;
@@ -47,7 +48,7 @@ pub struct StorageStatus {
     pub last_recording: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Debug)]
 pub struct AppState {
     pub camera_rtsp_url: String,
     pub camera_onvif_url: String,
@@ -59,13 +60,15 @@ pub struct AppState {
     pub audio_mp3_tx: watch::Sender<Bytes>,
     pub audio_available: Arc<Mutex<bool>>,
     pub system_status: Arc<Mutex<SystemStatus>>,
+    pub audio_bytes_sent: AtomicU64,
+    pub audio_packets_sent: AtomicU64,
     pub enable_hls: bool,
     // Detección manual de movimiento (cuando ONVIF no está disponible)
     pub enable_manual_motion_detection: bool,
     // Permite validar token por query (p.ej., ?token=...) en rutas de streaming
     pub allow_query_token_streams: bool,
     // Writer para logging de eventos de movimiento
-    pub log_writer: Arc<Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
+    pub log_writer: Arc<StdMutex<Option<std::io::BufWriter<std::fs::File>>>>,
     // Dominio base para bypass de autenticación (host exacto o subdominios). Ej: "nubellesalon.com"
     pub bypass_base_domain: Option<String>,
     // Secreto adicional para validar bypass (header X-Bypass-Secret). Si definido, se exige para bypass.

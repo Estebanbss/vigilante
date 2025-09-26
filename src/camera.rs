@@ -4,9 +4,9 @@ use chrono::Local;
 use gstreamer::{self as gst, prelude::*, MessageView, Pipeline};
 use gstreamer_app as gst_app;
 use std::io::{BufWriter, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex as StdMutex};
 
-fn log_to_file(writer: &Arc<Mutex<Option<BufWriter<std::fs::File>>>>, emoji: &str, msg: String) {
+fn log_to_file(writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>, emoji: &str, msg: String) {
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     let line = format!("[{}] {} {}", timestamp, emoji, msg);
     println!("{}", line);
@@ -80,14 +80,14 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         // Configurar logging a archivo del día
         let log_file_path = day_dir.join(format!("{}-log.txt", date_str));
         let log_file_result = std::fs::OpenOptions::new().create(true).append(true).open(&log_file_path);
-        let log_writer: Arc<Mutex<Option<BufWriter<std::fs::File>>>> = match log_file_result {
+        let log_writer: Arc<StdMutex<Option<BufWriter<std::fs::File>>>> = match log_file_result {
             Ok(file) => {
                 println!("📝 Logging habilitado en: {}", log_file_path.display());
-                Arc::new(Mutex::new(Some(BufWriter::new(file))))
+                Arc::new(StdMutex::new(Some(BufWriter::new(file))))
             },
             Err(e) => {
                 eprintln!("⚠️ No se pudo crear archivo de log {}: {}. Logging solo a consola", log_file_path.display(), e);
-                Arc::new(Mutex::new(None))
+                Arc::new(StdMutex::new(None))
             }
         };
 
@@ -95,11 +95,11 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         let log_file_result2 = std::fs::OpenOptions::new().create(true).append(true).open(&log_file_path);
         match log_file_result2 {
             Ok(file) => {
-                *state.log_writer.lock().await = Some(BufWriter::new(file));
+                *state.log_writer.lock().unwrap() = Some(BufWriter::new(file));
             },
             Err(e) => {
                 eprintln!("⚠️ No se pudo inicializar log_writer global: {}", e);
-                *state.log_writer.lock().await = None;
+                *state.log_writer.lock().unwrap() = None;
             }
         }
 
@@ -448,7 +448,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
     }
 }
 
-fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>, writer: &Arc<Mutex<Option<BufWriter<std::fs::File>>>>) {
+fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>, writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>) {
     use std::{env, sync::{Arc, Mutex}, time::{Duration, Instant}};
 
     let detector_sink = pipeline
@@ -716,7 +716,7 @@ fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>, writer: &
     );
 }
 
-fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<Mutex<Option<BufWriter<std::fs::File>>>>) {
+fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>) {
     // MJPEG high quality
     let mjpeg_sink = pipeline
         .by_name("mjpeg_sink")
@@ -757,7 +757,7 @@ fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<M
             .build(),
     );
 }
-async fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<Mutex<Option<BufWriter<std::fs::File>>>>) {
+async fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>) {
     let audio_sink_app = match pipeline
         .by_name("audio_mp3_sink") {
         Some(sink) => match sink.downcast::<gst_app::AppSink>() {
@@ -814,16 +814,10 @@ async fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _write
                                 println!("🎵 Audio MP3: {} bytes enviados (paquete #{})", bytes.len(), count);
                             }
 
-                            // Actualizar estadísticas de audio
-                            let state_clone_for_spawn = Arc::clone(&state_clone);
                             let bytes_len = bytes.len();
-                            tokio::spawn(async move {
-                                let mut status = state_clone_for_spawn.system_status.lock().await;
-                                status.audio_status.bytes_sent += bytes_len as u64;
-                                status.audio_status.packets_sent = count;
-                                status.audio_status.last_activity = Some(chrono::Utc::now());
-                                status.last_updated = chrono::Utc::now();
-                            });
+                            // Actualizar estadísticas de audio
+                            state_clone.audio_bytes_sent.fetch_add(bytes_len as u64, Ordering::Relaxed);
+                            state_clone.audio_packets_sent.fetch_add(1, Ordering::Relaxed);
 
                             bytes
                         }

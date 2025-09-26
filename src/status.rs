@@ -3,6 +3,7 @@ use axum::{extract::State, Json};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 // Endpoint general de estado del sistema
 pub async fn get_system_status(
@@ -63,8 +64,13 @@ pub async fn get_audio_status(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Json<crate::AudioStatus> {
-    let mut audio_status = state.system_status.lock().await.audio_status.clone();
-    audio_status.available = *state.audio_available.lock().await;
+    let status = state.system_status.lock().await;
+    let audio_status = crate::AudioStatus {
+        available: *state.audio_available.lock().await,
+        bytes_sent: state.audio_bytes_sent.load(Ordering::Relaxed),
+        packets_sent: state.audio_packets_sent.load(Ordering::Relaxed),
+        last_activity: status.audio_status.last_activity,
+    };
     Json(audio_status)
 }
 
@@ -125,9 +131,9 @@ pub async fn generate_realtime_status(state: &Arc<AppState>) -> serde_json::Valu
         },
         "audio": {
             "available": audio_available,
-            "bytes_sent": status.audio_status.bytes_sent,
-            "packets_sent": status.audio_status.packets_sent,
-            "last_activity": status.audio_status.last_activity.map(|dt| dt.to_rfc3339())
+            "bytes_sent": state.audio_bytes_sent.load(Ordering::Relaxed),
+            "packets_sent": state.audio_packets_sent.load(Ordering::Relaxed),
+            "last_activity": if audio_available { Some(chrono::Utc::now().to_rfc3339()) } else { None }
         },
         "storage": {
             "recording_count": recording_count,
