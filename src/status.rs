@@ -3,15 +3,60 @@ use axum::{extract::State, Json};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use std::sync::Arc;
-use log::info;
 use std::sync::atomic::Ordering;
+use std::process::Command;
+
+// Función helper para obtener estadísticas de grabaciones usando comandos del sistema
+fn get_recording_stats(storage_path: &std::path::Path) -> (usize, Option<String>) {
+    // Obtener conteo de grabaciones
+    let count_cmd = format!("find '{}' -type f ! -name '*-log.txt' | wc -l", storage_path.display());
+    let count_output = Command::new("sh")
+        .arg("-c")
+        .arg(&count_cmd)
+        .output();
+
+    let count = if let Ok(output) = count_output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout.trim().parse::<usize>().unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    // Obtener la última grabación
+    let last_cmd = format!("find '{}' -type f ! -name '*-log.txt' -printf '%T@ %p\\n' | sort -n | tail -1 | cut -d' ' -f2-", storage_path.display());
+    let last_output = Command::new("sh")
+        .arg("-c")
+        .arg(&last_cmd)
+        .output();
+
+    let last = if let Ok(output) = last_output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if stdout.is_empty() {
+                None
+            } else {
+                std::path::Path::new(&stdout).file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    (count, last)
+}
 
 // Endpoint general de estado del sistema
 pub async fn get_system_status(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Json<SystemStatus> {
-    info!("Processing /api/status request");
     let mut status = state.system_status.lock().await.clone();
 
     // Actualizar uptime y timestamp
@@ -25,27 +70,18 @@ pub async fn get_system_status(
     let pipeline_guard = state.pipeline.lock().await;
     status.pipeline_status.is_running = pipeline_guard.is_some();
 
-    // Actualizar información de almacenamiento
+    // Actualizar información de almacenamiento (usando fs2 para espacio)
     if let Ok(stats) = fs2::statvfs(&state.storage_path) {
         status.storage_status.total_space_bytes = stats.total_space();
         status.storage_status.free_space_bytes = stats.free_space();
         status.storage_status.used_space_bytes = stats.total_space() - stats.free_space();
     }
 
-    // Contar grabaciones (esto es costoso, hacerlo cada cierto tiempo)
-    info!("Starting file listing for recordings");
-    let recordings = crate::storage::get_recordings_recursively(&state.storage_path);
-    info!("File listing done, found {} recordings", recordings.len());
-    status.storage_status.recording_count = recordings.len();
+    // Obtener estadísticas de grabaciones usando comandos del sistema
+    let (recording_count, last_recording) = get_recording_stats(&state.storage_path);
+    status.storage_status.recording_count = recording_count;
+    status.storage_status.last_recording = last_recording;
 
-    if let Some(last_recording) = recordings
-        .iter()
-        .max_by_key(|r| r.last_modified)
-    {
-        status.storage_status.last_recording = Some(last_recording.name.clone());
-    }
-
-    info!("Completed /api/status request");
     Json(status)
 }
 
@@ -93,16 +129,10 @@ pub async fn get_storage_status(
         storage_status.used_space_bytes = stats.total_space() - stats.free_space();
     }
 
-    // Contar grabaciones
-    let recordings = crate::storage::get_recordings_recursively(&state.storage_path);
-    storage_status.recording_count = recordings.len();
-
-    if let Some(last_recording) = recordings
-        .iter()
-        .max_by_key(|r| r.last_modified)
-    {
-        storage_status.last_recording = Some(last_recording.name.clone());
-    }
+    // Obtener estadísticas de grabaciones usando comandos del sistema
+    let (recording_count, last_recording) = get_recording_stats(&state.storage_path);
+    storage_status.recording_count = recording_count;
+    storage_status.last_recording = last_recording;
 
     Json(storage_status)
 }
@@ -125,7 +155,7 @@ pub async fn generate_realtime_status(state: &Arc<AppState>) -> serde_json::Valu
     let audio_available = *state.audio_available.lock().await;
 
     // Contar grabaciones (simplificado, sin detalles)
-    let recording_count = crate::storage::get_recordings_recursively(&state.storage_path).len();
+    let (recording_count, last_recording) = get_recording_stats(&state.storage_path);
 
     // Crear JSON simplificado
     serde_json::json!({
@@ -142,7 +172,7 @@ pub async fn generate_realtime_status(state: &Arc<AppState>) -> serde_json::Valu
         },
         "storage": {
             "recording_count": recording_count,
-            "last_recording": status.storage_status.last_recording
+            "last_recording": last_recording
         }
     })
 }
