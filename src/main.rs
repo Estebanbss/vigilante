@@ -1,12 +1,13 @@
 use axum::{
+    http::{HeaderValue, Method, header},
     routing::{get, post},
     Router,
 };
 use bytes::Bytes;
 use dotenvy::dotenv;
 use std::{env, net::SocketAddr, path::PathBuf, sync::{Arc, Mutex as StdMutex}};
-use tokio::sync::Mutex;
-use tower_http::cors::{Any, CorsLayer};
+use tokio::sync::{broadcast, watch, Mutex};
+use tower_http::cors::CorsLayer;
 
 use vigilante::{auth, camera, logs, ptz, storage, stream, AppState, SystemStatus, PipelineStatus, AudioStatus, StorageStatus};
 
@@ -35,19 +36,30 @@ use vigilante::status::{
 
 // Dependencias de GStreamer
 use gstreamer as gst;
-use tokio::sync::{broadcast, watch};
+use log::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
 
+    simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default()).unwrap();
+
     gst::init()?;
 
-    let camera_rtsp_url = env::var("CAMERA_RTSP_URL")?;
-    let camera_onvif_url = env::var("CAMERA_ONVIF_URL")?;
-    let proxy_token = env::var("PROXY_TOKEN")?;
+    info!("GStreamer initialized successfully");
+
+    let camera_rtsp_url = env::var("CAMERA_RTSP_URL")
+        .expect("CAMERA_RTSP_URL environment variable must be set");
+    let camera_onvif_url = env::var("CAMERA_ONVIF_URL")
+        .expect("CAMERA_ONVIF_URL environment variable must be set");
+    let proxy_token = env::var("PROXY_TOKEN")
+        .expect("PROXY_TOKEN environment variable must be set");
+    if proxy_token.is_empty() {
+        panic!("PROXY_TOKEN cannot be empty");
+    }
     let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let storage_path = env::var("STORAGE_PATH")?;
+    let storage_path = env::var("STORAGE_PATH")
+        .expect("STORAGE_PATH environment variable must be set");
     let enable_hls = env::var("ENABLE_HLS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -63,11 +75,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+    // Configuración de CORS: orígenes permitidos desde variable de entorno
+    let allowed_origins_str = env::var("ALLOWED_ORIGINS").unwrap_or_else(|_| "http://localhost:3000,http://localhost:8080".to_string());
+    let mut allowed_origins: Vec<HeaderValue> = allowed_origins_str
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    if allowed_origins.is_empty() {
+        eprintln!("Warning: No valid origins in ALLOWED_ORIGINS, defaulting to localhost");
+        allowed_origins.push(HeaderValue::from_static("http://localhost:3000"));
+        allowed_origins.push(HeaderValue::from_static("http://localhost:8080"));
+    }
 
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin(allowed_origins)
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT, header::USER_AGENT]);
 
     let storage_path_buf = PathBuf::from(&storage_path);
 
@@ -135,17 +158,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    info!("Real-time status background task started");
+
     // Iniciar la tarea de limpieza de almacenamiento en segundo plano
     // tokio::spawn(start_cleanup_task(storage_path_buf)); // Función eliminada en actualización
 
     // Iniciar el pipeline de la cámara para la grabación 24/7 y detección de eventos
     tokio::spawn(start_camera_pipeline(camera_rtsp_url, state.clone()));
 
+    info!("Camera pipeline started");
+
     // HLS ahora se genera dentro del pipeline principal en camera.rs mediante un branch del tee
 
     // Router PÚBLICO sin autenticación
     let public_routes = Router::new()
         .route("/test", get(|| async { "OK - Vigilante API funcionando sin auth" }))
+        .route("/api/health", get(|| async { "OK" }))
         .layer(cors.clone())
         .with_state(state.clone());
 
@@ -197,10 +225,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = public_routes.merge(app);
 
     let addr: SocketAddr = listen_addr.parse()?;
-    println!("🚀 API y Streamer escuchando en http://{}", addr);
+    info!("🚀 API y Streamer escuchando en http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.expect("failed to listen for shutdown signal");
+            info!("Shutdown signal received, stopping server...");
+        })
+        .await?;
 
+    info!("Server shut down gracefully");
     Ok(())
 }
