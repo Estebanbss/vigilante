@@ -4,16 +4,17 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::process::Command;
+use tokio::process::Command;
 
 // Función helper para obtener estadísticas de grabaciones usando comandos del sistema
-fn get_recording_stats(storage_path: &std::path::Path) -> (usize, Option<String>) {
+async fn get_recording_stats(storage_path: &std::path::Path) -> (usize, Option<String>) {
     // Obtener conteo de grabaciones
     let count_cmd = format!("find '{}' -type f ! -name '*-log.txt' | wc -l", storage_path.display());
     let count_output = Command::new("sh")
         .arg("-c")
         .arg(&count_cmd)
-        .output();
+        .output()
+        .await;
 
     let count = if let Ok(output) = count_output {
         if output.status.success() {
@@ -31,7 +32,8 @@ fn get_recording_stats(storage_path: &std::path::Path) -> (usize, Option<String>
     let last_output = Command::new("sh")
         .arg("-c")
         .arg(&last_cmd)
-        .output();
+        .output()
+        .await;
 
     let last = if let Ok(output) = last_output {
         if output.status.success() {
@@ -78,7 +80,7 @@ pub async fn get_system_status(
     }
 
     // Obtener estadísticas de grabaciones usando comandos del sistema
-    let (recording_count, last_recording) = get_recording_stats(&state.storage_path);
+    let (recording_count, last_recording) = get_recording_stats(&state.storage_path).await;
     status.storage_status.recording_count = recording_count;
     status.storage_status.last_recording = last_recording;
 
@@ -130,7 +132,7 @@ pub async fn get_storage_status(
     }
 
     // Obtener estadísticas de grabaciones usando comandos del sistema
-    let (recording_count, last_recording) = get_recording_stats(&state.storage_path);
+    let (recording_count, last_recording) = get_recording_stats(&state.storage_path).await;
     storage_status.recording_count = recording_count;
     storage_status.last_recording = last_recording;
 
@@ -155,7 +157,7 @@ pub async fn generate_realtime_status(state: &Arc<AppState>) -> serde_json::Valu
     let audio_available = *state.audio_available.lock().await;
 
     // Contar grabaciones (simplificado, sin detalles)
-    let (recording_count, last_recording) = get_recording_stats(&state.storage_path);
+    let (recording_count, last_recording) = get_recording_stats(&state.storage_path).await;
 
     // Crear JSON simplificado
     serde_json::json!({

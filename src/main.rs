@@ -156,6 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
             loop {
                 interval.tick().await;
+                info!("Background status task running at {}", chrono::Utc::now());
                 let status_update = generate_realtime_status(&state_clone).await;
                 let _ = state_clone.status_tx.send(status_update);
             }
@@ -164,8 +165,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Real-time status background task started");
 
-    // Iniciar la tarea de limpieza de almacenamiento en segundo plano
-    // tokio::spawn(start_cleanup_task(storage_path_buf)); // Función eliminada en actualización
+    // Iniciar tarea de monitoreo de salud del backend
+    {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                info!("Backend health check: alive at {}", chrono::Utc::now());
+            }
+        });
+    }
+
+    info!("Backend health monitoring started");
 
     // Iniciar el pipeline de la cámara para la grabación 24/7 y detección de eventos
     tokio::spawn(start_camera_pipeline(camera_rtsp_url, state.clone()));
@@ -177,7 +188,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Router PÚBLICO sin autenticación
     let public_routes = Router::new()
         .route("/test", get(|| async { "OK - Vigilante API funcionando sin auth" }))
-        .route("/api/health", get(|| async { "OK" }))
+        .route("/api/health", get(|| async {
+            info!("Health check received at {}", chrono::Utc::now());
+            "OK"
+        }))
         .layer(TraceLayer::new_for_http())
         .layer(cors.clone())
         .with_state(state.clone());
@@ -237,6 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
+            info!("Shutdown signal received, stopping server...");
             tokio::signal::ctrl_c().await.expect("failed to listen for shutdown signal");
             info!("Shutdown signal received, stopping server...");
         })
