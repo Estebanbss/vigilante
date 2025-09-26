@@ -5,6 +5,7 @@ use gstreamer::{self as gst, prelude::*, MessageView, Pipeline};
 use gstreamer_app as gst_app;
 use std::io::{BufWriter, Write};
 use std::sync::{Arc, Mutex as StdMutex};
+use tokio::process::Command;
 
 fn log_to_file(writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>, emoji: &str, msg: String) {
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -49,19 +50,22 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         // Siguiente número incremental del día
         let date_str = now.format("%Y-%m-%d").to_string();
         let mut next_num = 1;
-        if let Ok(entries) = std::fs::read_dir(&day_dir) {
-            for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with(&date_str) && name.ends_with(".mp4") {
-                        if let Some(num_str) = name
-                            .strip_prefix(&format!("{}-", date_str))
-                            .and_then(|s| s.strip_suffix(".mp4"))
-                        {
-                            if let Ok(num) = num_str.parse::<i32>() {
-                                next_num = next_num.max(num + 1);
-                            }
-                        }
-                    }
+        
+        // Usar find para obtener el número más alto de forma eficiente
+        let find_cmd = format!(
+            "find '{}' -maxdepth 1 -name '{}-*.mp4' -printf '%P\\n' | awk -F'-' '{{print $(NF)}}' | sed 's/\\.mp4$//' | sort -n | tail -1",
+            day_dir.display(), date_str
+        );
+        if let Ok(output) = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&find_cmd)
+            .output()
+            .await
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Ok(max_num) = stdout.trim().parse::<i32>() {
+                    next_num = max_num + 1;
                 }
             }
         }
@@ -345,29 +349,28 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 sleep(Duration::from_secs(15)).await;
                 while start.elapsed() < duration {
                     let cur_size = if record_segment_seconds > 0 {
-                        // Buscar el segmento más reciente YYYY-MM-DD-xxxxx.mp4
-                        let mut newest: Option<(u32, u64)> = None; // (index, size)
-                        if let Ok(entries) = fs::read_dir(&day_dir) {
-                            for ent in entries.flatten() {
-                                let p = ent.path();
-                                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                                    if name.starts_with(&format!("{}-", date_str)) && name.ends_with(".mp4") {
-                                        // extraer índice
-                                        if let Some(num_str) = name.trim_end_matches(".mp4").split('-').last() {
-                                            if let Ok(idx) = num_str.parse::<u32>() {
-                                                if let Ok(meta) = fs::metadata(&p) {
-                                                    let size = meta.len();
-                                                    if newest.as_ref().map(|(i, _)| idx > *i).unwrap_or(true) {
-                                                        newest = Some((idx, size));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                        // Usar find para obtener el tamaño del archivo más reciente de forma eficiente
+                        let find_cmd = format!(
+                            "find '{}' -maxdepth 1 -name '{}-*.mp4' -type f -printf '%T@ %s %P\\n' | sort -n | tail -1 | awk '{{print $2}}'",
+                            day_dir.display(), date_str
+                        );
+                        if let Ok(output) = Command::new("sh")
+                            .arg("-c")
+                            .arg(&find_cmd)
+                            .output()
+                            .await
+                        {
+                            if output.status.success() {
+                                String::from_utf8_lossy(&output.stdout)
+                                    .trim()
+                                    .parse::<u64>()
+                                    .unwrap_or(0)
+                            } else {
+                                0
                             }
+                        } else {
+                            0
                         }
-                        newest.map(|(_, s)| s).unwrap_or(0)
                     } else {
                         fs::metadata(&daily_path).map(|m| m.len()).unwrap_or(0)
                     };

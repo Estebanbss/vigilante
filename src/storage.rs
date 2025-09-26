@@ -83,80 +83,83 @@ pub struct ListRecordingsParams {
 }
 
 // Función auxiliar para obtener la duración de un archivo MP4 usando ffprobe
-fn get_mp4_duration(file_path: &PathBuf) -> Option<f64> {
-    use std::process::Command;
+// Deshabilitada por rendimiento - usar None por ahora
+// fn get_mp4_duration(file_path: &PathBuf) -> Option<f64> {
+//     use std::process::Command;
 
-    // Intentar usar ffprobe para obtener la duración
-    let output = match Command::new("ffprobe")
-        .args(&[
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_format",
-            file_path.to_str()?,
-        ])
-        .output()
-    {
-        Ok(out) => out,
-        Err(_) => {
-            // ffprobe no está disponible, devolver None silenciosamente
-            return None;
-        }
-    };
+//     // Intentar usar ffprobe para obtener la duración
+//     let output = match Command::new("ffprobe")
+//         .args(&[
+//             "-v", "quiet",
+//             "-print_format", "json",
+//             "-show_format",
+//             file_path.to_str()?,
+//         ])
+//         .output()
+//     {
+//         Ok(out) => out,
+//         Err(_) => {
+//             // ffprobe no está disponible, devolver None silenciosamente
+//             return None;
+//         }
+//     };
 
-    if !output.status.success() {
-        return None;
-    }
+//     if !output.status.success() {
+//         return None;
+//     }
 
-    let json_str = String::from_utf8(output.stdout).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+//     let json_str = String::from_utf8(output.stdout).ok()?;
+//     let json: serde_json::Value = serde_json::from_str(&json_str).ok()?;
 
-    if let Some(format_obj) = json.get("format") {
-        if let Some(duration_str) = format_obj.get("duration") {
-            if let Some(duration_str) = duration_str.as_str() {
-                return duration_str.parse::<f64>().ok();
-            }
-        }
-    }
+//     if let Some(format_obj) = json.get("format") {
+//         if let Some(duration_str) = format_obj.get("duration") {
+//             if let Some(duration_str) = duration_str.as_str() {
+//                 return duration_str.parse::<f64>().ok();
+//             }
+//         }
+//     }
 
-    None
-}
+//     None
+// }
 
 // Función auxiliar recursiva para obtener grabaciones de todos los subdirectorios
-pub fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
+pub async fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
+    use tokio::process::Command;
+
     let mut recordings = Vec::new();
 
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            if entry_path.is_dir() {
-                // Si es un directorio, llamamos a la función de nuevo
-                recordings.append(&mut get_recordings_recursively(&entry_path));
-            } else if entry_path.is_file() {
-                if let Some(file_name_str) = entry_path.file_name().and_then(|s| s.to_str()) {
-                    // Filtramos los archivos de log
-                    if file_name_str.ends_with("-log.txt") {
-                        continue;
-                    }
+    // Usar find para obtener archivos de forma eficiente
+    let find_cmd = format!("find '{}' -type f ! -name '*-log.txt' -printf '%P\\t%s\\t%T@\\n'", path.display());
+    if let Ok(output) = Command::new("sh")
+        .arg("-c")
+        .arg(&find_cmd)
+        .output()
+        .await
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split('\t').collect();
+                if parts.len() == 3 {
+                    let relative_path = parts[0];
+                    let size: u64 = parts[1].parse().unwrap_or(0);
+                    let mtime_seconds: f64 = parts[2].parse().unwrap_or(0.0);
+                    let mtime = chrono::DateTime::from_timestamp(mtime_seconds as i64, 0).unwrap_or_else(|| chrono::Utc::now());
 
-                    if let Ok(metadata) = fs::metadata(&entry_path) {
-                        if let Ok(modified_time) = metadata.modified() {
-                            // Calcular duración solo para archivos MP4
-                            let duration = if file_name_str.ends_with(".mp4") {
-                                get_mp4_duration(&entry_path)
-                            } else {
-                                None
-                            };
+                    // Calcular duración solo para archivos MP4 (deshabilitado por rendimiento)
+                    let duration = None; // if relative_path.ends_with(".mp4") { get_mp4_duration(&path.join(relative_path)) } else { None };
 
-                            let recording = Recording {
-                                name: file_name_str.to_string(),
-                                path: entry_path.to_str().unwrap_or_default().to_string(),
-                                size: metadata.len(),
-                                last_modified: modified_time.into(),
-                                duration,
-                            };
-                            recordings.push(recording);
-                        }
-                    }
+                    let recording = Recording {
+                        name: std::path::Path::new(relative_path).file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string(),
+                        path: path.join(relative_path).to_string_lossy().to_string(),
+                        size,
+                        last_modified: mtime,
+                        duration,
+                    };
+                    recordings.push(recording);
                 }
             }
         }
@@ -171,7 +174,7 @@ pub async fn list_recordings(
     Query(params): Query<ListRecordingsParams>,
 ) -> impl IntoResponse {
     // Obtenemos todas las grabaciones de forma recursiva
-    let mut all_recordings = get_recordings_recursively(&state.storage_path);
+    let mut all_recordings = get_recordings_recursively(&state.storage_path).await;
 
     // Filtramos por fecha si se provee el parámetro
     if let Some(filter_date) = &params.date {
@@ -187,6 +190,31 @@ pub async fn list_recordings(
         all_recordings.into_iter().skip(start).take(limit).collect();
 
     (StatusCode::OK, Json(paginated_recordings)).into_response()
+}
+
+pub async fn get_recordings_by_date(
+    RequireAuth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+    Path(date): Path<String>,
+) -> impl IntoResponse {
+    // Validar formato de fecha (YYYY-MM-DD)
+    if date.len() != 10 || !date.chars().all(|c| c.is_numeric() || c == '-') {
+        return (StatusCode::BAD_REQUEST, Json(ApiResponse {
+            status: "error".to_string(),
+            message: "Formato de fecha inválido. Use YYYY-MM-DD".to_string(),
+        })).into_response();
+    }
+
+    // Obtenemos todas las grabaciones de forma recursiva
+    let all_recordings = get_recordings_recursively(&state.storage_path).await;
+
+    // Filtramos por fecha (los nombres empiezan con YYYY-MM-DD)
+    let filtered_recordings: Vec<Recording> = all_recordings
+        .into_iter()
+        .filter(|rec| rec.name.starts_with(&format!("{}-", date)))
+        .collect();
+
+    (StatusCode::OK, Json(filtered_recordings)).into_response()
 }
 
 pub async fn delete_recording(
@@ -573,7 +601,7 @@ pub async fn recordings_list(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // Obtener todas las grabaciones sin paginación
-    let recordings = get_recordings_recursively(&state.storage_path);
+    let recordings = get_recordings_recursively(&state.storage_path).await;
     (StatusCode::OK, Json(recordings))
 }
 
@@ -717,7 +745,7 @@ async fn send_recordings_summary(
     socket: &mut WebSocket,
     state: &Arc<AppState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let recordings = get_recordings_recursively(&state.storage_path);
+    let recordings = get_recordings_recursively(&state.storage_path).await;
 
     // Crear mapa de fechas con conteo
     use std::collections::HashMap;
@@ -794,7 +822,7 @@ async fn send_recordings_list(
     socket: &mut WebSocket,
     state: &Arc<AppState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut recordings = get_recordings_recursively(&state.storage_path);
+    let mut recordings = get_recordings_recursively(&state.storage_path).await;
 
     // Ordenar por fecha modificada descendente
     recordings.sort_by(|a, b| {

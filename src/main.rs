@@ -21,7 +21,7 @@ use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
     delete_recording, get_log_file, get_storage_info, list_recordings,
     recordings_list_ws, recordings_summary_ws, stream_recording,
-    stream_recording_logs_sse, stream_recording_tail,
+    stream_recording_logs_sse, stream_recording_tail, get_recordings_by_date,
 };
 use stream::{
     stream_audio_handler, stream_hls_handler, stream_hls_index, stream_mjpeg_handler,
@@ -213,6 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/storage", get(get_storage_info))
         .route("/api/storage/list", get(list_recordings))
+        .route("/api/recordings/by-date/:date", get(get_recordings_by_date))
         .route("/api/storage/delete/*path", get(delete_recording))
         .route("/api/recordings/stream/*path", get(stream_recording))
         .route("/api/recordings/log/:date", get(get_log_file))
