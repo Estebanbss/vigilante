@@ -3,6 +3,7 @@ use axum::{extract::State, Json};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use std::sync::Arc;
+use log::info;
 use std::sync::atomic::Ordering;
 
 // Endpoint general de estado del sistema
@@ -10,6 +11,7 @@ pub async fn get_system_status(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
 ) -> Json<SystemStatus> {
+    info!("Processing /api/status request");
     let mut status = state.system_status.lock().await.clone();
 
     // Actualizar uptime y timestamp
@@ -31,7 +33,9 @@ pub async fn get_system_status(
     }
 
     // Contar grabaciones (esto es costoso, hacerlo cada cierto tiempo)
+    info!("Starting file listing for recordings");
     let recordings = crate::storage::get_recordings_recursively(&state.storage_path);
+    info!("File listing done, found {} recordings", recordings.len());
     status.storage_status.recording_count = recordings.len();
 
     if let Some(last_recording) = recordings
@@ -41,6 +45,7 @@ pub async fn get_system_status(
         status.storage_status.last_recording = Some(last_recording.name.clone());
     }
 
+    info!("Completed /api/status request");
     Json(status)
 }
 
