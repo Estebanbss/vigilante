@@ -9,6 +9,7 @@ use std::{env, net::SocketAddr, path::PathBuf, sync::{Arc, Mutex as StdMutex}};
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{broadcast, watch, Mutex};
 use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
 
 use vigilante::{auth, camera, logs, ptz, storage, stream, AppState, SystemStatus, PipelineStatus, AudioStatus, StorageStatus};
 
@@ -177,6 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let public_routes = Router::new()
         .route("/test", get(|| async { "OK - Vigilante API funcionando sin auth" }))
         .route("/api/health", get(|| async { "OK" }))
+        .layer(TraceLayer::new_for_http())
         .layer(cors.clone())
         .with_state(state.clone());
 
@@ -218,6 +220,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/status/audio", get(get_audio_status))
         .route("/api/status/storage", get(get_storage_status))
         .route("/api/status/ws", get(status_websocket))
+        // Logging de requests
+        .layer(TraceLayer::new_for_http())
         // CORS middleware debe ir ANTES de autenticación para manejar preflight OPTIONS
         .layer(cors)
         // Middleware flexible: valida token por header O por query

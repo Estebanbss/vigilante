@@ -810,7 +810,7 @@ async fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _write
                             use std::sync::atomic::{AtomicU64, Ordering};
                             static COUNTER: AtomicU64 = AtomicU64::new(0);
                             let count = COUNTER.fetch_add(1, Ordering::Relaxed);
-                            if count % 100 == 0 {
+                            if count % 1000 == 0 {
                                 println!("🎵 Audio MP3: {} bytes enviados (paquete #{})", bytes.len(), count);
                             }
 
