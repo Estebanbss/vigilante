@@ -19,6 +19,22 @@ fn log_to_file(writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>, emoji: 
     }
 }
 
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut idx = 0usize;
+    while size >= 1024.0 && idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        idx += 1;
+    }
+
+    if idx == 0 {
+        format!("{} {}", bytes, UNITS[idx])
+    } else {
+        format!("{:.2} {}", size, UNITS[idx])
+    }
+}
+
 pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
     let state = Arc::clone(&state); // Clonamos para que tenga lifetime 'static
     loop {
@@ -332,26 +348,28 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         println!("🎬 Grabación activa - esperando datos...");
 
         // Verificar que la salida esté creciendo de forma periódica (soporta segmentación)
-        let _log_writer_spawn = log_writer.clone();
+        let log_writer_spawn = log_writer.clone();
         tokio::spawn({
             let daily_path = daily_path.clone();
             let day_dir = day_dir.clone();
             let date_str = date_str.clone();
             let duration = duration_until_midnight;
             let record_segment_seconds = record_segment_seconds;
+            let daily_filename = daily_filename.clone();
             async move {
                 use tokio::time::{sleep, Duration, Instant};
                 use std::fs;
                 let start = Instant::now();
                 let mut last_size = 0u64;
+                let mut last_file: Option<String> = None;
                 let mut stagnant_checks = 0u32;
                 // primera espera breve para permitir escritura inicial
                 sleep(Duration::from_secs(15)).await;
                 while start.elapsed() < duration {
-                    let cur_size = if record_segment_seconds > 0 {
-                        // Usar find para obtener el tamaño del archivo más reciente de forma eficiente
+                    let (current_file, cur_size) = if record_segment_seconds > 0 {
+                        // Usar find para obtener el archivo más reciente (timestamp, size, nombre)
                         let find_cmd = format!(
-                            "find '{}' -maxdepth 1 -name '{}-*.mp4' -type f -printf '%T@ %s %P\\n' | sort -n | tail -1 | awk '{{print $2}}'",
+                            "find '{}' -maxdepth 1 -name '{}-*.mp4' -type f -printf '%T@ %s %P\\n' | sort -n | tail -1",
                             day_dir.display(), date_str
                         );
                         if let Ok(output) = Command::new("sh")
@@ -361,29 +379,82 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                             .await
                         {
                             if output.status.success() {
-                                String::from_utf8_lossy(&output.stdout)
-                                    .trim()
-                                    .parse::<u64>()
-                                    .unwrap_or(0)
+                                let stdout = String::from_utf8_lossy(&output.stdout);
+                                if let Some(line) = stdout.lines().last() {
+                                    let mut parts = line.split_whitespace();
+                                    let _timestamp = parts.next();
+                                    if let (Some(size_str), Some(name)) = (parts.next(), parts.next()) {
+                                        let size = size_str.parse::<u64>().unwrap_or(0);
+                                        (name.to_string(), size)
+                                    } else {
+                                        (daily_filename.clone(), 0)
+                                    }
+                                } else {
+                                    (daily_filename.clone(), 0)
+                                }
                             } else {
-                                0
+                                (daily_filename.clone(), 0)
                             }
                         } else {
-                            0
+                            (daily_filename.clone(), 0)
                         }
                     } else {
-                        fs::metadata(&daily_path).map(|m| m.len()).unwrap_or(0)
+                        let size = fs::metadata(&daily_path).map(|m| m.len()).unwrap_or(0);
+                        (daily_filename.clone(), size)
                     };
 
-                    if cur_size > last_size {
-                        let delta = cur_size - last_size;
-                        println!("📈 Archivo(s) creciendo: {} (+{} bytes)", cur_size, delta);
+                    let file_changed = last_file
+                        .as_ref()
+                        .map(|f| f.as_str() != current_file.as_str())
+                        .unwrap_or(false);
+                    let first_seen = last_file.is_none();
+                    if cur_size > last_size || file_changed || first_seen {
+                        let delta = if file_changed || first_seen {
+                            cur_size
+                        } else {
+                            cur_size.saturating_sub(last_size)
+                        };
+
+                        if first_seen {
+                            log_to_file(
+                                &log_writer_spawn,
+                                "🎞️",
+                                format!("Primer archivo de grabación detectado: {}", current_file.clone()),
+                            );
+                        } else if file_changed {
+                            log_to_file(
+                                &log_writer_spawn,
+                                "🎞️",
+                                format!("Nuevo segmento de grabación: {}", current_file.clone()),
+                            );
+                        }
+
+                        log_to_file(
+                            &log_writer_spawn,
+                            "🎥",
+                            format!(
+                                "Grabando exitosamente: {} creciendo a {} (+{})",
+                                current_file.clone(),
+                                format_bytes(cur_size),
+                                format_bytes(delta)
+                            ),
+                        );
                         last_size = cur_size;
+                        last_file = Some(current_file.clone());
                         stagnant_checks = 0;
                     } else {
                         stagnant_checks += 1;
                         if stagnant_checks == 3 {
-                            eprintln!("⚠️ Salida de grabación no crece ({} bytes) tras 3 chequeos.", cur_size);
+                            log_to_file(
+                                &log_writer_spawn,
+                                "⚠️",
+                                format!(
+                                    "Salida de grabación sin crecimiento para {} ({}).",
+                                    current_file.clone(),
+                                    format_bytes(cur_size)
+                                ),
+                            );
+                            stagnant_checks = 0;
                         }
                     }
 
