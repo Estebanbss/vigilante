@@ -356,6 +356,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             let duration = duration_until_midnight;
             let record_segment_seconds = record_segment_seconds;
             let daily_filename = daily_filename.clone();
+            let segmented = record_segment_seconds > 0;
             async move {
                 use tokio::time::{sleep, Duration, Instant};
                 use std::fs;
@@ -366,7 +367,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 // primera espera breve para permitir escritura inicial
                 sleep(Duration::from_secs(15)).await;
                 while start.elapsed() < duration {
-                    let (current_file, cur_size) = if record_segment_seconds > 0 {
+                    let (current_file, cur_size, file_exists) = if segmented {
                         // Usar find para obtener el archivo más reciente (timestamp, size, nombre)
                         let find_cmd = format!(
                             "find '{}' -maxdepth 1 -name '{}-*.mp4' -type f -printf '%T@ %s %P\\n' | sort -n | tail -1",
@@ -385,23 +386,28 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                                     let _timestamp = parts.next();
                                     if let (Some(size_str), Some(name)) = (parts.next(), parts.next()) {
                                         let size = size_str.parse::<u64>().unwrap_or(0);
-                                        (name.to_string(), size)
+                                        (name.to_string(), size, true)
                                     } else {
-                                        (daily_filename.clone(), 0)
+                                        (daily_filename.clone(), 0, false)
                                     }
                                 } else {
-                                    (daily_filename.clone(), 0)
+                                    (daily_filename.clone(), 0, false)
                                 }
                             } else {
-                                (daily_filename.clone(), 0)
+                                (daily_filename.clone(), 0, false)
                             }
                         } else {
-                            (daily_filename.clone(), 0)
+                            (daily_filename.clone(), 0, false)
                         }
                     } else {
-                        let size = fs::metadata(&daily_path).map(|m| m.len()).unwrap_or(0);
-                        (daily_filename.clone(), size)
+                        match fs::metadata(&daily_path) {
+                            Ok(meta) => (daily_filename.clone(), meta.len(), true),
+                            Err(_) => (daily_filename.clone(), 0, false),
+                        }
                     };
+
+                    let current_path = day_dir.join(&current_file);
+                    let label = if segmented { "segmento" } else { "archivo" };
 
                     let file_changed = last_file
                         .as_ref()
@@ -419,13 +425,13 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                             log_to_file(
                                 &log_writer_spawn,
                                 "🎞️",
-                                format!("Primer archivo de grabación detectado: {}", current_file.clone()),
+                                format!("Primer {} de grabación detectado: {}", label, current_path.display()),
                             );
                         } else if file_changed {
                             log_to_file(
                                 &log_writer_spawn,
                                 "🎞️",
-                                format!("Nuevo segmento de grabación: {}", current_file.clone()),
+                                format!("Nuevo {} de grabación: {}", label, current_path.display()),
                             );
                         }
 
@@ -433,8 +439,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                             &log_writer_spawn,
                             "🎥",
                             format!(
-                                "Grabando exitosamente: {} creciendo a {} (+{})",
-                                current_file.clone(),
+                                "Grabación activa en {}: {} (+{})",
+                                current_path.display(),
                                 format_bytes(cur_size),
                                 format_bytes(delta)
                             ),
@@ -444,13 +450,24 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                         stagnant_checks = 0;
                     } else {
                         stagnant_checks += 1;
+                        if !file_exists {
+                            log_to_file(
+                                &log_writer_spawn,
+                                "⏳",
+                                format!(
+                                    "Esperando creación del {} de grabación en {}...",
+                                    label,
+                                    current_path.display()
+                                ),
+                            );
+                        }
                         if stagnant_checks == 3 {
                             log_to_file(
                                 &log_writer_spawn,
                                 "⚠️",
                                 format!(
                                     "Salida de grabación sin crecimiento para {} ({}).",
-                                    current_file.clone(),
+                                    current_path.display(),
                                     format_bytes(cur_size)
                                 ),
                             );

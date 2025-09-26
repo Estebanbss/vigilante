@@ -276,7 +276,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
-            info!("Shutdown signal received, stopping server...");
+            info!("Shutdown handler armed; waiting for Ctrl+C or SIGTERM...");
             shutdown_signal().await;
             info!("Shutdown signal received, stopping server...");
         })
