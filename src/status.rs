@@ -11,7 +11,13 @@ pub struct SimpleStatus {
 
 async fn compute_simple_status(state: &Arc<AppState>) -> SimpleStatus {
     let camera_ok = state.pipeline.lock().await.is_some();
-    let audio_ok = *state.audio_available.lock().unwrap();
+    
+    // Audio: check both current flag and recent activity
+    let audio_current = *state.audio_available.lock().unwrap();
+    let audio_recent = state.last_audio_timestamp.lock().unwrap()
+        .map(|ts| ts.elapsed() < std::time::Duration::from_secs(30))
+        .unwrap_or(false);
+    let audio_ok = audio_current || audio_recent;
 
     let snapshot = { state.recording_snapshot.lock().await.clone() };
     let now = chrono::Utc::now();
@@ -20,6 +26,9 @@ async fn compute_simple_status(state: &Arc<AppState>) -> SimpleStatus {
         .latest_timestamp
         .map(|ts| now.signed_duration_since(ts) <= recent_threshold)
         .unwrap_or(false);
+    
+    // Camera: if we have recent recordings, camera must be working
+    let camera_ok = camera_ok || recordings_ok;
 
     let simple = SimpleStatus {
         audio: audio_ok,
