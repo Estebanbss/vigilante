@@ -36,6 +36,34 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn parse_rtsp_url(url: &str) -> (String, Option<String>, Option<String>) {
+    // Parse RTSP URL to extract location, user-id, and user-pw for GStreamer
+    // Input: rtsp://user:pass@host:port/path
+    // Output: (rtsp://host:port/path, Some(user), Some(pass))
+    
+    if let Some(at_pos) = url.find('@') {
+        if let Some(protocol_end) = url.find("://") {
+            let credentials = &url[protocol_end + 3..at_pos];
+            let location = format!("{}{}", &url[..protocol_end + 3], &url[at_pos + 1..]);
+            
+            if let Some(colon_pos) = credentials.find(':') {
+                let user_id = credentials[..colon_pos].to_string();
+                let user_pw = credentials[colon_pos + 1..].to_string();
+                (location, Some(user_id), Some(user_pw))
+            } else {
+                // No password, just username
+                (location, Some(credentials.to_string()), None)
+            }
+        } else {
+            // No protocol, return as-is
+            (url.to_string(), None, None)
+        }
+    } else {
+        // No credentials
+        (url.to_string(), None, None)
+    }
+}
+
 /// Ejecuta un comando ffmpeg con timeout y reintentos
 async fn ejecutar_ffmpeg_con_timeout(
     args: &[&str],
@@ -493,6 +521,9 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         println!("🎥 Archivo de video: {}", daily_path.display());
         println!("📡 URL RTSP: {}", camera_url);
 
+        // Parse RTSP URL to extract credentials for GStreamer
+        let (rtsp_location, user_id, user_pw) = parse_rtsp_url(&camera_url);
+        
         let daily_s = daily_path.to_string_lossy();
 
         // Pipeline por defecto (si no se provee plantilla por ENV/archivo)
@@ -513,9 +544,26 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             .and_then(|v| v.parse().ok())
             .unwrap_or(300);
 
+        // Configuración de audio optimizada para PCMA 8000Hz mono
+        let audio_mp3_bitrate = std::env::var("AUDIO_MP3_BITRATE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32); // Reducido de 128 a 32 kbps para audio de voz 8000Hz mono
+        let audio_aac_bitrate = std::env::var("AUDIO_AAC_BITRATE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64000); // 64 kbps para AAC de calidad
+
+        // Build rtspsrc with authentication if credentials present
+        let rtspsrc_part = if let (Some(user), Some(pw)) = (&user_id, &user_pw) {
+            format!("rtspsrc location={} latency=2000 protocols=tcp user-id={} user-pw={} name=src ", rtsp_location, user, pw)
+        } else {
+            format!("rtspsrc location={} latency=2000 protocols=tcp name=src ", rtsp_location)
+        };
+
         let pipeline_str_default = format!(concat!(
             // Fuente RTSP
-            "rtspsrc location={} latency=2000 protocols=tcp name=src ",
+            "{}",
 
             // Video: selecciona RTP de video H264 por caps
             "src. ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! h264parse config-interval=-1 ! tee name=t_video ",
@@ -525,14 +573,14 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             "video/x-h264,stream-format=avc,alignment=au ! mp4mux name=mux faststart=true streamable=true fragment-duration={} ! ",
             "filesink location=\"{}\" sync=false ",
 
-            // Audio: selecciona RTP de audio PCMA (ALaw)
+            // Audio: selecciona RTP de audio PCMA (ALaw) - Optimizado para baja latencia
             "src. ! application/x-rtp,media=audio,encoding-name=PCMA ! rtppcmadepay ! alawdec ! audioconvert ! audioresample ! tee name=t_audio ",
 
-            // Rama de audio hacia grabación MP4 (AAC)
-            "t_audio. ! queue max-size-buffers=20 max-size-time=500000000 ! voaacenc ! aacparse ! queue ! mux.audio_0 ",
+            // Rama de audio hacia grabación MP4 (AAC) - Calidad optimizada
+            "t_audio. ! queue max-size-buffers=15 max-size-time=300000000 ! voaacenc bitrate={} ! aacparse ! queue ! mux.audio_0 ",
 
-            // Rama de audio hacia streaming MP3 (live) - Optimizado para baja latencia
-            "t_audio. ! queue max-size-buffers=10 max-size-time=20000000 leaky=downstream ! lamemp3enc quality=4 bitrate=128 ! appsink name=audio_mp3_sink sync=false max-buffers=5 drop=false ",
+            // Rama de audio hacia streaming MP3 (live) - Optimizado para baja latencia y ancho de banda
+            "t_audio. ! queue max-size-buffers=8 max-size-time=15000000 leaky=downstream ! lamemp3enc quality=4 bitrate={} ! appsink name=audio_mp3_sink sync=false max-buffers=3 drop=false ",
 
             // Detección de movimiento (GRAY8 downscaled)
             "t_video. ! queue max-size-buffers=10 max-size-time=500000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
@@ -547,7 +595,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             "t_video. ! queue max-size-buffers=10 max-size-time=500000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
             "video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=8/1 ! jpegenc quality=70 ! ",
             "appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true "
-    ), camera_url, mp4_fragment_ms, daily_s);
+    ), rtspsrc_part, mp4_fragment_ms, daily_s, audio_aac_bitrate, audio_mp3_bitrate);
 
         // Pipeline con splitmuxsink (segmentos)
         let segments_location = day_dir.join(format!("{}-%05d.mp4", date_str));
@@ -555,7 +603,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         let max_size_time_ns = record_segment_seconds.saturating_mul(1_000_000_000);
         let pipeline_str_segmented = format!(concat!(
             // Fuente RTSP
-            "rtspsrc location={} latency=2000 protocols=tcp name=src ",
+            "{}",
 
             // Video
             "src. ! application/x-rtp,media=video,encoding-name=H264 ! rtph264depay ! h264parse config-interval=-1 ! tee name=t_video ",
@@ -564,12 +612,12 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             "t_video. ! queue name=recq max-size-buffers=50 max-size-time=500000000 max-size-bytes=10000000 ! ",
             "video/x-h264,stream-format=avc,alignment=au ! splitmuxsink name=spl muxer=mp4mux max-size-time={} location=\"{}\" ",
 
-            // Audio
+            // Audio - Optimizado para baja latencia
             "src. ! application/x-rtp,media=audio,encoding-name=PCMA ! rtppcmadepay ! alawdec ! audioconvert ! audioresample ! tee name=t_audio ",
-            "t_audio. ! queue max-size-buffers=20 max-size-time=500000000 ! voaacenc ! aacparse ! queue ! spl.audio_0 ",
+            "t_audio. ! queue max-size-buffers=15 max-size-time=300000000 ! voaacenc bitrate={} ! aacparse ! queue ! spl.audio_0 ",
 
-            // Rama de audio hacia streaming MP3 (live) - Optimizado para baja latencia
-            "t_audio. ! queue max-size-buffers=10 max-size-time=20000000 leaky=downstream ! lamemp3enc quality=4 bitrate=128 ! appsink name=audio_mp3_sink sync=false max-buffers=5 drop=false ",
+            // Rama de audio hacia streaming MP3 (live) - Optimizado para baja latencia y ancho de banda
+            "t_audio. ! queue max-size-buffers=8 max-size-time=15000000 leaky=downstream ! lamemp3enc quality=4 bitrate={} ! appsink name=audio_mp3_sink sync=false max-buffers=3 drop=false ",
 
             // Detección de movimiento
             "t_video. ! queue max-size-buffers=10 max-size-time=500000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
@@ -584,7 +632,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             "t_video. ! queue max-size-buffers=10 max-size-time=500000000 ! avdec_h264 ! videoconvert ! videoscale ! ",
             "video/x-raw,width=640,height=360 ! videorate ! video/x-raw,framerate=8/1 ! jpegenc quality=70 ! ",
             "appsink name=mjpeg_low_sink sync=false max-buffers=1 drop=true "
-        ), camera_url, max_size_time_ns, segments_location_s);
+        ), rtspsrc_part, max_size_time_ns, segments_location_s, audio_aac_bitrate, audio_mp3_bitrate);
 
         let default_pipeline = if record_segment_seconds > 0 {
             println!(
@@ -609,8 +657,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             .or_else(|| std::env::var("GST_PIPELINE_TEMPLATE").ok())
         {
             Some(tpl) => {
-                // Reemplazar placeholders básicos
-                tpl.replace("{CAMERA_URL}", &camera_url)
+                // Reemplazar placeholders básicos - usar location sin credenciales para plantillas
+                tpl.replace("{CAMERA_URL}", &rtsp_location)
                     .replace("{FILE_PATH}", &daily_s)
             }
             None => default_pipeline,
@@ -689,6 +737,27 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             }
         } else {
             eprintln!("⚠️ No se encontró 'recq' para instrumentación de rama MP4");
+        }
+
+        // Añadir sondas (probes) a la rama de audio para diagnosticar flujo de audio
+        if let Some(t_audio) = pipeline.by_name("t_audio") {
+            if let Some(srcpad) = t_audio.static_pad("src") {
+                use gst::{PadProbeReturn, PadProbeType};
+                use std::sync::{
+                    atomic::{AtomicU64, Ordering},
+                    Arc,
+                };
+                let audio_buf_count = Arc::new(AtomicU64::new(0));
+                let audio_buf_count_cl = audio_buf_count.clone();
+                let _log_writer_cl = log_writer.clone();
+                srcpad.add_probe(PadProbeType::BUFFER, move |_pad, _info| {
+                    let n = audio_buf_count_cl.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n == 1 {
+                        println!("🎵 Buffers de audio desde tee: {}", n);
+                    }
+                    PadProbeReturn::Ok
+                });
+            }
         }
 
         // Probe en la salida del mp4mux para verificar salida hacia filesink
