@@ -523,6 +523,10 @@ async fn build_enhanced_snapshot_event(snapshot: &RecordingSnapshot, state: &Arc
     });
 
     if let Some(storage) = storage_info {
+        payload["total_space_bytes"] = storage["total_space_bytes"].clone();
+        payload["used_space_bytes"] = serde_json::Value::from(snapshot.total_size_bytes);
+        payload["free_space_bytes"] = storage["free_space_bytes"].clone();
+        payload["storage_path"] = storage["storage_path"].clone();
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("storage_info".to_string(), storage);
         }
