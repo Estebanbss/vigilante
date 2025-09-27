@@ -1,4 +1,4 @@
-use crate::{auth::RequireAuth, AppState, DaySummary, RecordingSnapshot};
+use crate::{auth::RequireAuth, AppState, DayMeta, DaySummary, RecordingSnapshot};
 use axum::{
     body::Body,
     extract::{
@@ -6,7 +6,7 @@ use axum::{
         Path, State,
     },
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::{sse::{Event, KeepAlive, Sse}, IntoResponse, Response},
     Json,
 };
 use bytes::Bytes;
@@ -14,14 +14,18 @@ use chrono::{NaiveDate, Utc};
 use fs2;
 use log::info;
 use serde::Serialize;
+use rusqlite::{Connection, Result as SqlResult};
 use std::{
+    collections::{HashMap, HashSet},
+    convert::Infallible,
     fs,
     path::{Path as FsPath, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::broadcast;
 
 const MAX_SUMMARY_DAYS: usize = 120;
 
@@ -160,49 +164,130 @@ fn summarize_day_with_ls(day_path: &FsPath) -> DayScanResult {
             path.to_string_lossy().to_string(),
         )
     });
-
     DayScanResult { count, latest }
 }
 
-fn scan_recordings_sync(storage_path: &FsPath) -> RecordingSnapshot {
-    let mut snapshot = RecordingSnapshot::default();
-    let mut summaries: Vec<DaySummary> = Vec::new();
-    let mut total_count: usize = 0;
-    let mut latest_recording: Option<(chrono::DateTime<chrono::Utc>, String)> = None;
+fn scan_recordings(storage_path: PathBuf, previous: Option<RecordingSnapshot>, db_conn: Arc<Mutex<Connection>>) -> RecordingSnapshot {
     let started = std::time::Instant::now();
 
-    let day_dirs = list_recent_day_directories(storage_path);
+    let mut snapshot = RecordingSnapshot::default();
+    let mut meta_map: HashMap<String, DayMeta> = previous
+        .as_ref()
+        .map(|snap| snap.day_meta.clone())
+        .unwrap_or_default();
+    let initial_db_days: HashSet<String> = meta_map.keys().cloned().collect();
+    let mut updated_days: HashSet<String> = HashSet::new();
+
+    let storage_path_buf = storage_path;
+    let day_dirs = list_recent_day_directories(storage_path_buf.as_path());
     let scanned_days = day_dirs.len();
 
-    for (day_name, day_path) in day_dirs {
-        let day_result = summarize_day_with_ls(&day_path);
+    let mut valid_days: HashSet<String> = HashSet::with_capacity(day_dirs.len());
 
-        total_count += day_result.count;
+    for (day_name, day_path) in &day_dirs {
+        valid_days.insert(day_name.clone());
 
-        if let Some((ts, path)) = day_result.latest.as_ref() {
-            if latest_recording
+        let dir_metadata = fs::metadata(day_path).ok();
+        let dir_mtime = dir_metadata
+            .as_ref()
+            .and_then(|meta| meta.modified().ok());
+
+        let needs_refresh = match meta_map.get(day_name) {
+            Some(existing) => match (existing.last_scanned_mtime, dir_mtime) {
+                (Some(prev_mtime), Some(current_mtime)) => current_mtime > prev_mtime,
+                (None, Some(_)) => true,
+                (Some(_), None) => true,
+                (None, None) => true,
+            },
+            None => true,
+        };
+
+        let updated_meta = if needs_refresh {
+            let day_result = summarize_day_with_ls(day_path.as_path());
+            let latest_timestamp = day_result
+                .latest
                 .as_ref()
-                .map(|(current_ts, _)| ts > current_ts)
-                .unwrap_or(true)
-            {
-                latest_recording = Some((ts.clone(), path.clone()));
+                .map(|(ts, _)| ts.clone());
+            let latest_path = day_result
+                .latest
+                .map(|(_, path)| path);
+
+            DayMeta {
+                recording_count: day_result.count,
+                latest_timestamp,
+                latest_path,
+                last_scanned_mtime: dir_mtime,
+            }
+        } else {
+            let mut existing = meta_map.get(day_name).cloned().unwrap_or_default();
+            existing.last_scanned_mtime = dir_mtime;
+            existing
+        };
+
+        meta_map.insert(day_name.clone(), updated_meta);
+        if needs_refresh {
+            updated_days.insert(day_name.clone());
+        }
+    }
+
+    meta_map.retain(|day, _| valid_days.contains(day));
+
+    let mut summaries: Vec<DaySummary> = Vec::new();
+    let mut total_count: usize = 0;
+    let mut latest_recording_path: Option<String> = None;
+    let mut latest_timestamp: Option<chrono::DateTime<chrono::Utc>> = None;
+
+    for (day_name, _) in &day_dirs {
+        if let Some(meta) = meta_map.get(day_name) {
+            total_count += meta.recording_count;
+            summaries.push(DaySummary {
+                day: day_name.clone(),
+                recording_count: meta.recording_count,
+            });
+
+            if let Some(ts) = meta.latest_timestamp.as_ref() {
+                if latest_timestamp
+                    .as_ref()
+                    .map(|current| ts > current)
+                    .unwrap_or(true)
+                {
+                    latest_timestamp = Some(ts.clone());
+                    latest_recording_path = meta.latest_path.clone();
+                }
             }
         }
-
-        summaries.push(DaySummary {
-            day: day_name,
-            recording_count: day_result.count,
-        });
     }
 
     snapshot.total_count = total_count;
-    snapshot.last_recording = latest_recording.as_ref().map(|(_, path)| path.clone());
-    snapshot.latest_timestamp = latest_recording.map(|(ts, _)| ts);
+    snapshot.total_size_bytes = 0; // TODO: Calculate total size from DB metadata
+    snapshot.last_recording = latest_recording_path;
+    snapshot.latest_timestamp = latest_timestamp;
     snapshot.day_summaries = summaries;
+    snapshot.day_meta = meta_map;
     snapshot.last_scan = Some(Utc::now());
 
+    // Save updated days to DB
+    {
+        let conn = db_conn.lock().unwrap();
+        for day in &updated_days {
+            if let Some(meta) = snapshot.day_meta.get(day) {
+                if let Err(e) = save_day_meta_to_db(&conn, day, meta) {
+                    eprintln!("Error saving day {} to DB: {}", day, e);
+                }
+            }
+        }
+        // Delete days that are no longer valid
+        for day in &initial_db_days {
+            if !valid_days.contains(day) {
+                if let Err(e) = delete_day_from_db(&conn, day) {
+                    eprintln!("Error deleting day {} from DB: {}", day, e);
+                }
+            }
+        }
+    }
+
     log::debug!(
-        "scan_recordings_sync: {} files across {} recent days in {:.2?}",
+        "scan_recordings: {} files across {} recent days in {:.2?}",
         snapshot.total_count,
         scanned_days,
         started.elapsed()
@@ -211,34 +296,188 @@ fn scan_recordings_sync(storage_path: &FsPath) -> RecordingSnapshot {
     snapshot
 }
 
-pub async fn rebuild_recording_snapshot(storage_path: PathBuf) -> RecordingSnapshot {
-    tokio::task::spawn_blocking(move || scan_recordings_sync(&storage_path))
+pub fn init_recordings_db(db_path: &std::path::Path) -> SqlResult<Connection> {
+    let conn = Connection::open(db_path)?;
+    
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS day_meta (
+            day_name TEXT PRIMARY KEY,
+            recording_count INTEGER NOT NULL,
+            latest_timestamp TEXT,
+            latest_path TEXT,
+            last_scanned_mtime INTEGER
+        )",
+        [],
+    )?;
+    
+    Ok(conn)
+}
+
+fn load_snapshot_from_db(conn: &Connection) -> SqlResult<HashMap<String, DayMeta>> {
+    let mut stmt = conn.prepare("SELECT day_name, recording_count, latest_timestamp, latest_path, last_scanned_mtime FROM day_meta")?;
+    let mut rows = stmt.query([])?;
+    
+    let mut meta_map = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let day_name: String = row.get(0)?;
+        let recording_count: usize = row.get(1)?;
+        let latest_timestamp: Option<String> = row.get(2)?;
+        let latest_path: Option<String> = row.get(3)?;
+        let last_scanned_mtime: Option<i64> = row.get(4)?;
+        
+        let latest_timestamp_parsed = latest_timestamp
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+        
+        let meta = DayMeta {
+            recording_count,
+            latest_timestamp: latest_timestamp_parsed,
+            latest_path,
+            last_scanned_mtime: last_scanned_mtime.map(|t| std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(t as u64)),
+        };
+        
+        meta_map.insert(day_name, meta);
+    }
+    
+    Ok(meta_map)
+}
+
+fn save_day_meta_to_db(conn: &Connection, day_name: &str, meta: &DayMeta) -> SqlResult<()> {
+    let latest_timestamp_str = meta.latest_timestamp
+        .map(|dt| dt.to_rfc3339());
+    let mtime_secs = meta.last_scanned_mtime
+        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64);
+    
+    conn.execute(
+        "INSERT OR REPLACE INTO day_meta (day_name, recording_count, latest_timestamp, latest_path, last_scanned_mtime)
+         VALUES (?, ?, ?, ?, ?)",
+        rusqlite::params![day_name, meta.recording_count, latest_timestamp_str, meta.latest_path, mtime_secs],
+    )?;
+    
+    Ok(())
+}
+
+fn delete_day_from_db(conn: &Connection, day_name: &str) -> SqlResult<()> {
+    conn.execute("DELETE FROM day_meta WHERE day_name = ?", [day_name])?;
+    Ok(())
+}
+
+fn update_day_after_delete(conn: &Connection, day_name: &str, deleted_path: &str) -> SqlResult<()> {
+    // Load current meta
+    let mut meta = match load_snapshot_from_db(conn)?.get(day_name).cloned() {
+        Some(m) => m,
+        None => return Ok(()), // Day not in DB
+    };
+    
+    // Decrement count
+    if meta.recording_count > 0 {
+        meta.recording_count -= 1;
+    }
+    
+    // If this was the latest file, need to find new latest
+    if meta.latest_path.as_ref() == Some(&deleted_path.to_string()) {
+        // Need to rescan the day to find new latest
+        // For now, set to None and let next scan fix it
+        meta.latest_timestamp = None;
+        meta.latest_path = None;
+    }
+    
+    // Save updated meta
+    save_day_meta_to_db(conn, day_name, &meta)?;
+    
+    Ok(())
+}
+
+pub async fn rebuild_recording_snapshot(
+    storage_path: PathBuf,
+    db_conn: Arc<Mutex<Connection>>,
+) -> RecordingSnapshot {
+    let existing_meta = {
+        let conn = db_conn.lock().unwrap();
+        load_snapshot_from_db(&conn).unwrap_or_default()
+    };
+    
+    let previous_snapshot = if existing_meta.is_empty() {
+        None
+    } else {
+        let mut snapshot = RecordingSnapshot::default();
+        snapshot.day_meta = existing_meta;
+        // Recalculate totals from meta
+        for (_day, meta) in &snapshot.day_meta {
+            snapshot.total_count += meta.recording_count;
+            snapshot.total_size_bytes = 0; // TODO: Calculate from DB
+            if let Some(ts) = meta.latest_timestamp {
+                if snapshot.latest_timestamp.map(|current| ts > current).unwrap_or(true) {
+                    snapshot.latest_timestamp = Some(ts);
+                    snapshot.last_recording = meta.latest_path.clone();
+                }
+            }
+        }
+        Some(snapshot)
+    };
+    
+    tokio::task::spawn_blocking(move || scan_recordings(storage_path, previous_snapshot, db_conn))
         .await
         .unwrap_or_default()
 }
 
 pub async fn refresh_recording_snapshot(state: &Arc<AppState>) -> RecordingSnapshot {
     let start = std::time::Instant::now();
-    let snapshot = rebuild_recording_snapshot(state.storage_root.clone()).await;
+    let snapshot = rebuild_recording_snapshot(
+        state.storage_root.clone(),
+        state.db_conn.clone(),
+    )
+    .await;
     let elapsed = start.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+
+    // Record metrics
+    crate::metrics::DURACION_REFRESCO_SNAPSHOT.observe(elapsed_secs);
+    crate::metrics::CONTEO_ARCHIVOS_SNAPSHOT.set(snapshot.total_count as i64);
+
+    if snapshot.total_count > 0 {
+        crate::metrics::REFRESCO_SNAPSHOT_EXITOSO.inc();
+    } else {
+        crate::metrics::REFRESCO_SNAPSHOT_FALLIDO.inc();
+    }
 
     {
         let mut cache = state.recording_snapshot.lock().await;
         *cache = snapshot.clone();
     }
 
-    {
-        let mut system = state.system_status.lock().await;
-        system.storage_status.recording_count = snapshot.total_count;
-        system.storage_status.last_recording = snapshot.last_recording.clone();
-    }
+    let _ = state.notifications.send_snapshot(snapshot.clone());
 
     info!(
         "📊 Snapshot de grabaciones actualizado en {:.2?} ({} archivos)",
         elapsed, snapshot.total_count
     );
 
+    // Structured logging for metrics
+    log::info!(
+        target: "metrics",
+        "refresco_snapshot_completado duracion_segundos={} conteo_archivos={}",
+        elapsed_secs, snapshot.total_count
+    );
+
     snapshot
+}
+
+fn build_snapshot_event(snapshot: &RecordingSnapshot) -> Option<Event> {
+    let payload = serde_json::json!({
+        "event": "storage_snapshot",
+        "timestamp": Utc::now().to_rfc3339(),
+        "snapshot": snapshot,
+    });
+
+    match Event::default().json_data(&payload) {
+        Ok(event) => Some(event),
+        Err(err) => {
+            eprintln!("❌ Error serializando payload SSE de almacenamiento: {}", err);
+            None
+        }
+    }
 }
 
 // Estructura para la respuesta estándar de la API
@@ -289,6 +528,72 @@ pub async fn get_storage_info(
                 .into_response()
         }
     }
+}
+
+pub async fn storage_stream_sse(
+    RequireAuth: RequireAuth,
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let mut rx = state.notifications.subscribe();
+
+    // Calcular KeepAlive dinámico basado en el número de clientes
+    let client_count = state.notifications.client_count();
+    let keep_alive_interval = if client_count > 10 {
+        30 // Más clientes = menos pings frecuentes
+    } else if client_count > 5 {
+        20
+    } else {
+        15 // Pocos clientes = pings más frecuentes
+    };
+
+    println!("📡 SSE: Recordings stream started ({} clients, keep-alive: {}s)", client_count, keep_alive_interval);
+
+    let stream = async_stream::stream! {
+        // Enviar estado inicial
+        let initial_snapshot = state.recording_snapshot.lock().await.clone();
+        if let Some(event) = build_snapshot_event(&initial_snapshot) {
+            yield Ok::<Event, Infallible>(event);
+        }
+
+        loop {
+            match rx.recv().await {
+                Ok(recordings_event) => {
+                    // Crear evento SSE basado en RecordingsEvent
+                    let payload = serde_json::json!({
+                        "event": "storage_snapshot",
+                        "timestamp": recordings_event.timestamp.to_rfc3339(),
+                        "total_files": recordings_event.total_files,
+                        "total_size_bytes": recordings_event.total_size_bytes,
+                        "days_count": recordings_event.days_count,
+                    });
+
+                    match Event::default().json_data(&payload) {
+                        Ok(event) => yield Ok::<Event, Infallible>(event),
+                        Err(err) => {
+                            eprintln!("❌ Error serializando payload SSE de evento: {}", err);
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    eprintln!("⚠️ SSE channel closed - terminating connection");
+                    break;
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    eprintln!("⚠️ SSE lagged behind, resending current state");
+                    let current_snapshot = state.recording_snapshot.lock().await.clone();
+                    if let Some(event) = build_snapshot_event(&current_snapshot) {
+                        yield Ok::<Event, Infallible>(event);
+                    }
+                }
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(keep_alive_interval))
+            .text("keep-alive"),
+    )
 }
 
 // Función auxiliar para obtener la duración de un archivo MP4 usando ffprobe
@@ -411,10 +716,25 @@ pub async fn delete_recording(
     if full_path.exists() && full_path.is_file() {
         match fs::remove_file(&full_path) {
             Ok(_) => {
-                let state_clone = state.clone();
-                tokio::spawn(async move {
-                    let _ = refresh_recording_snapshot(&state_clone).await;
-                });
+                // Update DB directly instead of full rescan
+                if let Some(day_name) = file_path.split('/').next() {
+                    let conn = state.db_conn.lock().unwrap();
+                    if let Err(e) = update_day_after_delete(&conn, day_name, &file_path) {
+                        eprintln!("Error updating DB after delete: {}", e);
+                    }
+                }
+                
+                // Also update the in-memory snapshot
+                {
+                    let mut snapshot = state.recording_snapshot.lock().await;
+                    snapshot.total_count = snapshot.total_count.saturating_sub(1);
+                    // TODO: Update total_size_bytes when deleting files
+                    // Note: Not updating latest_recording here for simplicity, will be fixed on next scan
+                }
+                
+                // Notify SSE clients
+                let _ = state.notifications.send_snapshot(state.recording_snapshot.lock().await.clone());
+                
                 (
                     StatusCode::OK,
                     Json(ApiResponse {
@@ -742,21 +1062,37 @@ pub async fn recordings_summary_ws(
 async fn handle_recordings_summary_ws(mut socket: WebSocket, state: Arc<AppState>) {
     println!("🎯 WebSocket: Recordings summary stream started");
 
-    // Enviar resumen inicial
-    if let Err(e) = send_recordings_summary(&mut socket, &state).await {
+    let mut rx = state.notifications.subscribe();
+
+    // Enviar snapshot inicial
+    let initial_snapshot = state.recording_snapshot.lock().await.clone();
+    if let Err(e) = send_recordings_summary(&mut socket, &initial_snapshot).await {
         println!("Error sending initial summary: {}", e);
+        state.notifications.unsubscribe();
         return;
     }
 
-    // Mantener conexión abierta y enviar actualizaciones periódicas
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-
     loop {
         tokio::select! {
-            _ = interval.tick() => {
-                if let Err(e) = send_recordings_summary(&mut socket, &state).await {
-                    println!("Error sending summary update: {}", e);
-                    break;
+            event = rx.recv() => {
+                match event {
+                    Ok(_recordings_event) => {
+                        // Crear un snapshot actualizado basado en el evento
+                        let current_snapshot = state.recording_snapshot.lock().await.clone();
+                        if let Err(e) = send_recordings_summary(&mut socket, &current_snapshot).await {
+                            println!("Error sending summary update: {}", e);
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        println!("⚠️ WebSocket recordings channel closed - terminating connection");
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        println!("⚠️ WebSocket lagged behind, resending current state");
+                        let current_snapshot = state.recording_snapshot.lock().await.clone();
+                        let _ = send_recordings_summary(&mut socket, &current_snapshot).await;
+                    }
                 }
             }
             msg = socket.recv() => {
@@ -775,19 +1111,18 @@ async fn handle_recordings_summary_ws(mut socket: WebSocket, state: Arc<AppState
         }
     }
 
+    state.notifications.unsubscribe();
     println!("🎯 WebSocket: Recordings summary stream ended");
 }
 
 async fn send_recordings_summary(
     socket: &mut WebSocket,
-    state: &Arc<AppState>,
+    snapshot: &RecordingSnapshot,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let snapshot = { state.recording_snapshot.lock().await.clone() };
-
     let summary_data = serde_json::json!({
         "type": "summary",
         "data": snapshot.day_summaries,
-    "timestamp": Utc::now().to_rfc3339(),
+        "timestamp": Utc::now().to_rfc3339(),
         "last_scan": snapshot.last_scan.map(|ts| ts.to_rfc3339()),
         "total": snapshot.total_count,
     });

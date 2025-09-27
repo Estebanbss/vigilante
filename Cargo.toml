@@ -32,6 +32,13 @@ log = "0.4"
 simplelog = "0.12"
 console-subscriber = { version = "0.2", optional = true }
 
+# Prometheus metrics
+prometheus = "0.13"
+lazy_static = "1.4"
+
+# SQLite for persistent metadata cache
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 # GStreamer dependencies unified to version 0.22
 gstreamer = "0.22"
 gstreamer-app = "0.22"

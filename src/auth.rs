@@ -162,8 +162,6 @@ where
 
         // Igual que el middleware: aceptar token en query para rutas de stream si está habilitado
         let is_stream_route = path.starts_with("/api/live/")
-            || path.starts_with("/hls")
-            || path.starts_with("/webrtc/")
             || path.starts_with("/api/storage/")
             || path.starts_with("/api/recordings/")
             || path.starts_with("/api/status/")

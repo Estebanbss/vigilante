@@ -1,102 +1,16 @@
 use crate::{auth::RequireAuth, AppState};
 use axum::{
-    extract::{Path, Query, State},
+    body::Body,
+    extract::{Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::Response,
 };
-// use axum::response::sse::{Sse, Event};
-// use axum::response::Html;
-use axum::body::Body;
 use bytes::Bytes;
-// use futures::Stream;
-// use futures::StreamExt;
-// use gstreamer as gst;
-// use gstreamer::prelude::*;
-// use std::pin::Pin;
-use std::sync::Arc;
-// use std::path::PathBuf;
-// use std::fs;
 use serde::Deserialize;
-use std::time::{Duration, Instant};
-use tokio::fs::File;
-use tokio_util::io::ReaderStream;
-
-// Autenticación: por header Authorization global y opcionalmente por query `?token=` en rutas de streaming si STREAM_TOKEN_IN_QUERY=true
-
-pub async fn stream_hls_handler(
-    RequireAuth: RequireAuth,
-    State(state): State<Arc<AppState>>,
-    Path(path): Path<String>,
-) -> impl IntoResponse {
-    // Sirve archivos HLS desde STORAGE_PATH/hls
-    let mut rel = path.trim_start_matches('/').to_string();
-    if rel.is_empty() {
-        rel = "stream.m3u8".to_string();
-    }
-    let hls_root = state.storage_path.join("hls");
-    let candidate = hls_root.join(&rel);
-    let Ok(full_path) = candidate.canonicalize() else {
-        return (StatusCode::NOT_FOUND, "").into_response();
-    };
-    let Ok(root) = hls_root.canonicalize() else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "").into_response();
-    };
-    if !full_path.starts_with(&root) {
-        return (StatusCode::FORBIDDEN, "").into_response();
-    }
-
-    let file = match File::open(&full_path).await {
-        Ok(f) => f,
-        Err(_) => return (StatusCode::NOT_FOUND, "").into_response(),
-    };
-    let stream = ReaderStream::new(file);
-    let mut resp = Response::new(Body::from_stream(stream));
-    let headers = resp.headers_mut();
-    let ctype = if rel.ends_with(".m3u8") {
-        "application/vnd.apple.mpegurl"
-    } else if rel.ends_with(".ts") {
-        "video/mp2t"
-    } else {
-        "application/octet-stream"
-    };
-    headers.insert(axum::http::header::CONTENT_TYPE, ctype.parse().unwrap());
-    // CORS headers for streaming
-    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    headers.insert(
-        "Access-Control-Allow-Methods",
-        "GET, POST, OPTIONS".parse().unwrap(),
-    );
-    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
-    resp
-}
-
-// Alias para /hls sin path, devuelve stream.m3u8
-pub async fn stream_hls_index(
-    RequireAuth: RequireAuth,
-    State(state): State<Arc<AppState>>,
-) -> Response {
-    // Reutiliza la misma lógica, sirviendo el playlist por defecto
-    let path = Path("".to_string());
-    let res = stream_hls_handler(RequireAuth, State(state), path).await;
-    axum::response::IntoResponse::into_response(res)
-}
-
-pub async fn stream_webrtc_handler(
-    RequireAuth: RequireAuth,
-    State(_state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    // Placeholder para la lógica de GStreamer
-    let mut resp = (StatusCode::OK, "WebRTC stream handler is working!").into_response();
-    let headers = resp.headers_mut();
-    // CORS headers for streaming
-    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    headers.insert(
-        "Access-Control-Allow-Methods",
-        "GET, POST, OPTIONS".parse().unwrap(),
-    );
-    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
-    resp
-}
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 // Simple MJPEG live endpoint (separado de la grabación)
 // GET /api/live/mjpeg
@@ -187,7 +101,7 @@ pub async fn stream_audio_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, StatusCode> {
     // Verificar si el audio está disponible
-    if !*state.audio_available.lock().await {
+    if !*state.audio_available.lock().unwrap() {
         eprintln!("❌ Audio no disponible en el stream RTSP");
         return Err(StatusCode::NOT_FOUND);
     }

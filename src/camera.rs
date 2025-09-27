@@ -6,6 +6,7 @@ use gstreamer_app as gst_app;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
+use tokio::time::{timeout, Duration};
 
 fn log_to_file(writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>, emoji: &str, msg: String) {
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -35,11 +36,99 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Ejecuta un comando ffmpeg con timeout y reintentos
+async fn ejecutar_ffmpeg_con_timeout(
+    args: &[&str],
+    descripcion: &str,
+    timeout_secs: u64,
+    max_reintentos: u32,
+) -> Result<(), String> {
+    let mut ultimo_error = String::new();
+
+    for intento in 1..=max_reintentos {
+        println!("🎬 Ejecutando ffmpeg (intento {}/{}): {}", intento, max_reintentos, descripcion);
+
+        let inicio = std::time::Instant::now();
+
+        let resultado_timeout = timeout(
+            Duration::from_secs(timeout_secs),
+            tokio::process::Command::new("ffmpeg")
+                .args(args)
+                .status()
+        ).await;
+
+        let duracion = inicio.elapsed();
+
+        match resultado_timeout {
+            Ok(resultado_status) => {
+                match resultado_status {
+                    Ok(status) => {
+                        if status.success() {
+                            println!("✅ ffmpeg completado exitosamente en {:.2?}: {}", duracion, descripcion);
+
+                            // Log estructurado para métricas
+                            log::info!(
+                                target: "metrics",
+                                "ffmpeg_ejecutado_exitosamente comando=\"{}\" duracion_segundos={:.2} intentos={}",
+                                descripcion, duracion.as_secs_f64(), intento
+                            );
+
+                            return Ok(());
+                        } else {
+                            ultimo_error = format!("ffmpeg falló con código de salida: {:?} (intento {}/{})",
+                                         status.code(), intento, max_reintentos);
+                            eprintln!("❌ {}", ultimo_error);
+                        }
+                    }
+                    Err(e) => {
+                        ultimo_error = format!("Error ejecutando ffmpeg: {} (intento {}/{})",
+                                     e, intento, max_reintentos);
+                        eprintln!("❌ {}", ultimo_error);
+                    }
+                }
+            }
+            Err(_) => {
+                ultimo_error = format!("⏰ Timeout de {}s alcanzado ejecutando ffmpeg (intento {}/{}): {}",
+                             timeout_secs, intento, max_reintentos, descripcion);
+                eprintln!("❌ {}", ultimo_error);
+
+                // Record timeout metric
+                crate::metrics::FFMPEG_TIMEOUT.inc();
+
+                // Log estructurado para métricas de timeout
+                log::warn!(
+                    target: "metrics",
+                    "ffmpeg_timeout comando=\"{}\" duracion_timeout={:.0} intentos={}",
+                    descripcion, timeout_secs as f64, intento
+                );
+            }
+        }
+
+        // Si no es el último intento, esperar antes del siguiente
+        if intento < max_reintentos {
+            crate::metrics::FFMPEG_REINTENTO.inc();
+            let espera = Duration::from_secs(2u64.pow(intento - 1)); // Backoff exponencial: 1s, 2s, 4s...
+            println!("⏳ Esperando {:.1?} antes del siguiente intento...", espera);
+            tokio::time::sleep(espera).await;
+        }
+    }
+
+    // Log estructurado para fallo final
+    log::error!(
+        target: "metrics",
+        "ffmpeg_fallo_final comando=\"{}\" intentos_maximos={}",
+        descripcion, max_reintentos
+    );
+
+    Err(format!("ffmpeg falló después de {} intentos: {}", max_reintentos, ultimo_error))
+}
+
 async fn concat_day_recordings(day_dir: &Path, date_str: &str) -> Result<(), String> {
     if !day_dir.exists() {
         return Ok(());
     }
 
+    let started = std::time::Instant::now();
     let mut segments: Vec<PathBuf> = Vec::new();
     let mut existing_full: Option<PathBuf> = None;
 
@@ -122,10 +211,26 @@ async fn concat_day_recordings(day_dir: &Path, date_str: &str) -> Result<(), Str
             }
         }
 
+        let elapsed = started.elapsed();
+        let elapsed_secs = elapsed.as_secs_f64();
+
+        // Record metrics for simple consolidation
+        crate::metrics::DURACION_CONCAT_FFMPEG.observe(elapsed_secs);
+        crate::metrics::CONCAT_FFMPEG_EXITOSO.inc();
+
         println!(
-            "✅ Archivo diario consolidado listo: {}",
-            final_path.display()
+            "✅ Archivo diario consolidado listo: {} (tardó {:.2?})",
+            final_path.display(),
+            elapsed
         );
+
+        // Structured logging for metrics
+        log::info!(
+            target: "metrics",
+            "concat_ffmpeg_completado operacion=consolidacion_simple duracion_segundos={} archivo=\"{}\"",
+            elapsed_secs, final_path.display()
+        );
+
         return Ok(());
     }
 
@@ -162,32 +267,52 @@ async fn concat_day_recordings(day_dir: &Path, date_str: &str) -> Result<(), Str
         );
     }
 
-    let status = tokio::process::Command::new("ffmpeg")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-f")
-        .arg("concat")
-        .arg("-safe")
-        .arg("0")
-        .arg("-y")
-        .arg("-i")
-        .arg(&list_path)
-        .arg("-c")
-        .arg("copy")
-        .arg(&final_path)
-        .status()
-        .await
-        .map_err(|e| format!("No se pudo ejecutar ffmpeg: {}", e))?;
+    // Ejecutar ffmpeg con timeout y reintentos
+    let descripcion = format!("concatenación de {} segmentos en {}", segments.len(), final_path.display());
+    let list_path_str = list_path.to_string_lossy().to_string();
+    let final_path_str = final_path.to_string_lossy().to_string();
+    let args = vec![
+        "-hide_banner",
+        "-loglevel", "error",
+        "-f", "concat",
+        "-safe", "0",
+        "-y",
+        "-i", &list_path_str,
+        "-c", "copy",
+        &final_path_str,
+    ];
 
-    let _ = std::fs::remove_file(&list_path);
-
-    if !status.success() {
-        if let Some(temp) = previous_full_temp {
+    // Usar la función helper con timeout de 5 minutos y máximo 3 reintentos
+    if let Err(err) = ejecutar_ffmpeg_con_timeout(&args, &descripcion, 300, 3).await {
+        // Cleanup on failure
+        if let Some(temp) = previous_full_temp.as_ref() {
             let _ = std::fs::rename(temp, final_path.clone());
         }
-        return Err(format!("ffmpeg finalizó con estado: {}", status));
+
+        let elapsed = started.elapsed();
+        let elapsed_secs = elapsed.as_secs_f64();
+
+        // Record metrics for failure (aunque ya se registraron en la función helper)
+        crate::metrics::DURACION_CONCAT_FFMPEG.observe(elapsed_secs);
+        crate::metrics::CONCAT_FFMPEG_FALLIDO.inc();
+
+        eprintln!(
+            "❌ Falló la concatenación ffmpeg: {} (duración total: {:.2?})",
+            err,
+            elapsed
+        );
+
+        // Structured logging for metrics
+        log::error!(
+            target: "metrics",
+            "concat_ffmpeg_fallido duracion_segundos={} archivo=\"{}\" error=\"{}\"",
+            elapsed_secs, final_path.display(), err
+        );
+
+        return Err(err);
     }
+
+    let _ = std::fs::remove_file(&list_path);
 
     if let Some(temp) = previous_full_temp {
         if let Err(err) = std::fs::remove_file(&temp) {
@@ -220,16 +345,37 @@ async fn concat_day_recordings(day_dir: &Path, date_str: &str) -> Result<(), Str
         }
     }
 
+    let elapsed = started.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+
+    // Record metrics for successful ffmpeg concatenation
+    crate::metrics::DURACION_CONCAT_FFMPEG.observe(elapsed_secs);
+    crate::metrics::CONCAT_FFMPEG_EXITOSO.inc();
+
     println!(
-        "✅ Archivo diario concatenado listo: {}",
-        final_path.display()
+        "✅ Archivo diario concatenado listo: {} (tardó {:.2?})",
+        final_path.display(),
+        elapsed
     );
+
+    // Structured logging for metrics
+    log::info!(
+        target: "metrics",
+        "concat_ffmpeg_completado operacion=concatenacion_completa duracion_segundos={} archivo=\"{}\"",
+        elapsed_secs, final_path.display()
+    );
+
     Ok(())
 }
 
 pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
     let state = Arc::clone(&state); // Clonamos para que tenga lifetime 'static
     loop {
+        let cycle_started = std::time::Instant::now();
+        
+        // Reset audio availability at the start of each cycle
+        *state.audio_available.lock().unwrap() = false;
+        
         let now = chrono::Local::now();
 
         // Crear carpeta por día: DD-MM-YY
@@ -251,6 +397,10 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                     e
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                println!(
+                    "⏱️ Ciclo de pipeline abortado en {:.2?} (falló preparación de carpeta)",
+                    cycle_started.elapsed()
+                );
                 continue;
             }
         }
@@ -477,6 +627,10 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 eprintln!("❌ Error al crear el pipeline: {}", err);
                 eprintln!("⏳ Reintentando en 10 segundos...");
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                println!(
+                    "⏱️ Ciclo de pipeline abortado en {:.2?} (falló creación)",
+                    cycle_started.elapsed()
+                );
                 continue;
             }
         };
@@ -566,6 +720,10 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             Err(e) => {
                 eprintln!("❌ Error al iniciar pipeline: {}", e);
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                println!(
+                    "⏱️ Ciclo de pipeline abortado en {:.2?} (falló arranque)",
+                    cycle_started.elapsed()
+                );
                 continue;
             }
         }
@@ -573,6 +731,49 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         // Guardar pipeline para otros handlers
         *state.pipeline.lock().await = Some(pipeline.clone());
         println!("🎬 Grabación activa - esperando datos...");
+
+        // Iniciar tarea de verificación de audio disponible
+        let audio_check_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                
+                let last_audio = *audio_check_state.last_audio_timestamp.lock().unwrap();
+                let audio_available = *audio_check_state.audio_available.lock().unwrap();
+                
+                match last_audio {
+                    Some(timestamp) => {
+                        let elapsed = timestamp.elapsed();
+                        // Si han pasado más de 10 segundos sin audio, marcar como no disponible
+                        if elapsed > std::time::Duration::from_secs(10) && audio_available {
+                            *audio_check_state.audio_available.lock().unwrap() = false;
+                            println!("🔇 Audio no disponible - no se reciben datos desde hace {:.1?}", elapsed);
+                            
+                            // Log estructurado para métricas
+                            log::warn!(
+                                target: "metrics",
+                                "audio_caido tiempo_sin_datos={:.1}",
+                                elapsed.as_secs_f64()
+                            );
+                        }
+                    }
+                    None => {
+                        // Si nunca hemos recibido audio y han pasado más de 30 segundos desde el inicio del ciclo
+                        if cycle_started.elapsed() > std::time::Duration::from_secs(30) && audio_available {
+                            *audio_check_state.audio_available.lock().unwrap() = false;
+                            println!("🔇 Audio no disponible - nunca se recibió audio en los primeros 30 segundos");
+                            
+                            // Log estructurado para métricas
+                            log::warn!(
+                                target: "metrics",
+                                "audio_nunca_recibido tiempo_espera=30.0"
+                            );
+                        }
+                    }
+                }
+            }
+        });
 
         // Verificar que la salida esté creciendo de forma periódica (soporta segmentación)
         let log_writer_spawn = log_writer.clone();
@@ -734,13 +935,6 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                         );
                         eprintln!("❌ Error del pipeline: {}", error_msg);
 
-                        // Actualizar estado del sistema con el error
-                        {
-                            let mut system_status = state.system_status.lock().await;
-                            system_status.pipeline_status.error_count += 1;
-                            system_status.pipeline_status.last_error = Some(error_msg);
-                        }
-
                         should_restart = true;
                         break;
                     }
@@ -780,6 +974,11 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             }
             println!("🕛 Nuevo día - creando nuevo archivo...");
         }
+
+        println!(
+            "⏱️ Ciclo completo de pipeline y housekeeping en {:.2?}",
+            cycle_started.elapsed()
+        );
     }
 }
 
@@ -1135,19 +1334,32 @@ async fn setup_audio_mp3_sink(
         }
     };
 
-    // Marcar que el audio está disponible y actualizar estado del sistema
-    *state.audio_available.lock().await = true;
-    let mut status = state.system_status.lock().await;
-    status.audio_status.available = true;
-    status.audio_status.last_activity = Some(chrono::Utc::now());
-    status.last_updated = chrono::Utc::now();
+    // Marcar que el audio está disponible
+    *state.audio_available.lock().unwrap() = true;
     println!("🎵 Audio MP3 streaming configurado correctamente");
 
     let tx_audio = state.audio_mp3_tx.clone();
-    let state_clone = Arc::clone(state);
+    let last_audio_ts = state.last_audio_timestamp.clone();
+    let audio_available_flag = state.audio_available.clone();
     audio_sink_app.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             .new_sample(move |s| {
+                // Actualizar timestamp del último audio recibido
+                let now = std::time::Instant::now();
+                *last_audio_ts.lock().unwrap() = Some(now);
+                
+                // Si el audio no estaba disponible, marcarlo como disponible ahora
+                let was_available = *audio_available_flag.lock().unwrap();
+                if !was_available {
+                    *audio_available_flag.lock().unwrap() = true;
+                    println!("🎵 Audio recuperado - datos llegando nuevamente");
+                    
+                    // Log estructurado para métricas
+                    log::info!(
+                        target: "metrics",
+                        "audio_recuperado tiempo_sin_datos=0.0"
+                    );
+                }
                 let sample = match s.pull_sample() {
                     Ok(samp) => samp,
                     Err(e) => {
@@ -1179,15 +1391,6 @@ async fn setup_audio_mp3_sink(
                                     count
                                 );
                             }
-
-                            let bytes_len = bytes.len();
-                            // Actualizar estadísticas de audio
-                            state_clone
-                                .audio_bytes_sent
-                                .fetch_add(bytes_len as u64, Ordering::Relaxed);
-                            state_clone
-                                .audio_packets_sent
-                                .fetch_add(1, Ordering::Relaxed);
 
                             bytes
                         }

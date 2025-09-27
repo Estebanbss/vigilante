@@ -1,14 +1,13 @@
 use axum::body::Body;
 use axum::{
-    http::{header, HeaderValue, Method, Request},
+    http::{header, HeaderValue, Method, Request, StatusCode},
     middleware::{from_fn, from_fn_with_state, Next},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
 use bytes::Bytes;
 use dotenvy::dotenv;
-use std::sync::atomic::AtomicU64;
 use std::{
     env, fs,
     net::SocketAddr,
@@ -19,23 +18,17 @@ use std::{
 use tokio::sync::{broadcast, watch, Mutex};
 use tower_http::cors::CorsLayer;
 
-use vigilante::{
-    auth, camera, logs, ptz, storage, stream, AppState, AudioStatus, PipelineStatus,
-    RecordingSnapshot, StorageStatus, SystemStatus,
-};
+use vigilante::{auth, camera, logs, metrics, ptz, storage, stream, AppState, RecordingSnapshot, NotificationManager};
 
 use auth::flexible_auth_middleware;
 use camera::start_camera_pipeline;
 use logs::stream_journal_logs;
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
-    get_recordings_by_date, get_storage_info, recordings_summary_ws, refresh_recording_snapshot,
-    stream_recording,
+    get_recordings_by_date, recordings_summary_ws, refresh_recording_snapshot,
+    storage_stream_sse, stream_recording,
 };
-use stream::{
-    stream_audio_handler, stream_hls_handler, stream_hls_index, stream_mjpeg_handler,
-    stream_webrtc_handler,
-};
+use stream::{stream_audio_handler, stream_mjpeg_handler};
 use vigilante::status::get_system_status;
 
 // Dependencias de GStreamer
@@ -86,6 +79,24 @@ async fn log_requests(req: Request<Body>, next: Next) -> Response {
     response
 }
 
+async fn metrics_handler() -> impl IntoResponse {
+    match metrics::gather_metrics() {
+        Ok(metrics) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+            metrics,
+        ),
+        Err(err) => {
+            eprintln!("❌ Error gathering metrics: {}", err);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain")],
+                "Error gathering metrics".to_string(),
+            )
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
@@ -114,9 +125,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let storage_path =
         env::var("STORAGE_PATH").expect("STORAGE_PATH environment variable must be set");
-    let enable_hls = env::var("ENABLE_HLS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
     // Detección manual de movimiento (activada por defecto)
     let enable_manual_motion_detection = env::var("ENABLE_MANUAL_MOTION_DETECTION")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -172,34 +180,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Initialize SQLite database for persistent metadata cache
+    let db_path = storage_root.join("recordings.db");
+    let db_conn = match storage::init_recordings_db(&db_path) {
+        Ok(conn) => Arc::new(StdMutex::new(conn)),
+        Err(e) => {
+            warn!("Failed to initialize recordings database: {}", e);
+            // Fallback to in-memory only, but we can continue
+            Arc::new(StdMutex::new(rusqlite::Connection::open_in_memory().unwrap()))
+        }
+    };
+
     let (mjpeg_tx, _mjpeg_rx) = broadcast::channel::<Bytes>(32);
     let (mjpeg_low_tx, _mjpeg_low_rx) = broadcast::channel::<Bytes>(32);
     let (audio_mp3_tx, _audio_rx) = watch::channel::<Bytes>(Bytes::new());
-
-    // Inicializar estado del sistema
-    let initial_status = SystemStatus {
-        pipeline_status: PipelineStatus {
-            is_running: false,
-            start_time: None,
-            error_count: 0,
-            last_error: None,
-        },
-        audio_status: AudioStatus {
-            available: false,
-            bytes_sent: 0,
-            packets_sent: 0,
-            last_activity: None,
-        },
-        storage_status: StorageStatus {
-            total_space_bytes: 0,
-            used_space_bytes: 0,
-            free_space_bytes: 0,
-            recording_count: 0,
-            last_recording: None,
-        },
-        uptime_seconds: 0,
-        last_updated: chrono::Utc::now(),
-    };
+    let notifications = Arc::new(NotificationManager::new());
 
     let state = Arc::new(AppState {
         camera_rtsp_url: camera_rtsp_url.clone(),
@@ -211,11 +206,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mjpeg_tx,
         mjpeg_low_tx,
         audio_mp3_tx,
-        audio_available: Arc::new(Mutex::new(false)),
-        system_status: Arc::new(Mutex::new(initial_status)),
-        audio_bytes_sent: AtomicU64::new(0),
-        audio_packets_sent: AtomicU64::new(0),
-        enable_hls,
+        audio_available: Arc::new(StdMutex::new(false)),
+        last_audio_timestamp: Arc::new(StdMutex::new(None)),
         enable_manual_motion_detection,
         allow_query_token_streams,
         log_writer: Arc::new(StdMutex::new(None)),
@@ -223,6 +215,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bypass_domain_secret: env::var("BYPASS_DOMAIN_SECRET").ok(),
         start_time: std::time::SystemTime::now(),
         recording_snapshot: Arc::new(Mutex::new(RecordingSnapshot::default())),
+        notifications,
+        db_conn,
     });
 
     // Construir snapshot inicial antes de atender solicitudes
@@ -240,54 +234,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Iniciar tarea de monitoreo de salud del backend
-    {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            loop {
-                interval.tick().await;
-                info!("Backend health check: alive at {}", chrono::Utc::now());
-            }
-        });
-    }
-
-    info!("Backend health monitoring started");
-
     // Iniciar el pipeline de la cámara para la grabación 24/7 y detección de eventos
     tokio::spawn(start_camera_pipeline(camera_rtsp_url, state.clone()));
 
     info!("Camera pipeline started");
 
-    // HLS ahora se genera dentro del pipeline principal en camera.rs mediante un branch del tee
-
-    // Router PÚBLICO sin autenticación
-    let public_routes = Router::new()
-        .route(
-            "/test",
-            get(|| async { "OK - Vigilante API funcionando sin auth" }),
-        )
-        .route(
-            "/api/health",
-            get(|| async {
-                info!("Health check received at {}", chrono::Utc::now());
-                "OK"
-            }),
-        )
-        .layer(from_fn(log_requests))
-        .layer(cors.clone())
-        .with_state(state.clone());
-
     // Router PROTEGIDO con autenticación flexible (header o query token)
     let app = Router::new()
-        .route("/hls", get(stream_hls_index))
-        .route("/hls/*path", get(stream_hls_handler))
-        .route("/webrtc/*path", get(stream_webrtc_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/api/live/mjpeg", get(stream_mjpeg_handler))
         .route("/api/live/audio", get(stream_audio_handler))
         .route("/api/logs/stream", get(stream_journal_logs))
-        // .route("/api/storage/stream", get(storage_stream_sse)) // Función eliminada en actualización
-        .route("/api/recordings/summary", get(recordings_summary_ws))
-        .route("/api/storage", get(get_storage_info))
+    .route("/api/recordings/summary", get(recordings_summary_ws))
+    .route("/api/storage/stream", get(storage_stream_sse))
         .route("/api/recordings/by-date/:date", get(get_recordings_by_date))
         .route("/api/recordings/stream/*path", get(stream_recording))
         // Rutas para el control PTZ
@@ -307,9 +266,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Middleware flexible: valida token por header O por query
         .layer(from_fn_with_state(state.clone(), flexible_auth_middleware))
         .with_state(state);
-
-    // Combinar routers: público + protegido
-    let app = public_routes.merge(app);
 
     let addr: SocketAddr = listen_addr.parse()?;
     info!("🚀 API y Streamer escuchando en http://{}", addr);
