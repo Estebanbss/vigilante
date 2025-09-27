@@ -3,7 +3,7 @@ use axum::{
     http::{header, HeaderValue, Method, Request, StatusCode},
     middleware::{from_fn, from_fn_with_state, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use bytes::Bytes;
@@ -25,7 +25,7 @@ use camera::start_camera_pipeline;
 use logs::stream_journal_logs;
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
-    get_recordings_by_date, recordings_summary_ws, refresh_recording_snapshot,
+    delete_recording, get_recordings_by_date, recordings_summary_ws, refresh_recording_snapshot,
     storage_stream_sse, stream_recording,
 };
 use stream::{stream_audio_handler, stream_mjpeg_handler};
@@ -152,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cors = CorsLayer::new()
         .allow_origin(allowed_origins)
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
@@ -249,6 +249,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .route("/api/storage/stream", get(storage_stream_sse))
         .route("/api/recordings/by-date/:date", get(get_recordings_by_date))
         .route("/api/recordings/stream/*path", get(stream_recording))
+        .route("/api/recordings/delete/*path", delete(delete_recording))
         // Rutas para el control PTZ
         .route("/api/ptz/pan/left", post(pan_left))
         .route("/api/ptz/pan/right", post(pan_right))

@@ -464,17 +464,48 @@ pub async fn refresh_recording_snapshot(state: &Arc<AppState>) -> RecordingSnaps
     snapshot
 }
 
-fn build_snapshot_event(snapshot: &RecordingSnapshot) -> Option<Event> {
-    let payload = serde_json::json!({
+
+async fn get_storage_info_async(state: &Arc<AppState>) -> Option<serde_json::Value> {
+    match fs2::statvfs(&state.storage_root) {
+        Ok(stats) => {
+            let total_space_bytes = stats.total_space();
+            let free_space_bytes = stats.available_space();
+            let used_space_bytes = total_space_bytes.saturating_sub(free_space_bytes);
+
+            Some(serde_json::json!({
+                "total_space_bytes": total_space_bytes,
+                "used_space_bytes": used_space_bytes,
+                "free_space_bytes": free_space_bytes,
+                "storage_path": state.storage_root.to_string_lossy(),
+                "storage_name": "main_storage"
+            }))
+        }
+        Err(e) => {
+            log::warn!("Failed to get storage info: {}", e);
+            None
+        }
+    }
+}
+
+async fn build_enhanced_snapshot_event(snapshot: &RecordingSnapshot, state: &Arc<AppState>) -> Option<Event> {
+    let storage_info = get_storage_info_async(state).await;
+
+    let mut payload = serde_json::json!({
         "event": "storage_snapshot",
         "timestamp": Utc::now().to_rfc3339(),
         "snapshot": snapshot,
     });
 
+    if let Some(storage) = storage_info {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("storage_info".to_string(), storage);
+        }
+    }
+
     match Event::default().json_data(&payload) {
         Ok(event) => Some(event),
         Err(err) => {
-            eprintln!("❌ Error serializando payload SSE de almacenamiento: {}", err);
+            eprintln!("❌ Error serializando payload SSE mejorado: {}", err);
             None
         }
     }
@@ -551,7 +582,7 @@ pub async fn storage_stream_sse(
     let stream = async_stream::stream! {
         // Enviar estado inicial
         let initial_snapshot = state.recording_snapshot.lock().await.clone();
-        if let Some(event) = build_snapshot_event(&initial_snapshot) {
+        if let Some(event) = build_enhanced_snapshot_event(&initial_snapshot, &state).await {
             yield Ok::<Event, Infallible>(event);
         }
 
@@ -581,7 +612,7 @@ pub async fn storage_stream_sse(
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     eprintln!("⚠️ SSE lagged behind, resending current state");
                     let current_snapshot = state.recording_snapshot.lock().await.clone();
-                    if let Some(event) = build_snapshot_event(&current_snapshot) {
+                    if let Some(event) = build_enhanced_snapshot_event(&current_snapshot, &state).await {
                         yield Ok::<Event, Infallible>(event);
                     }
                 }
