@@ -317,6 +317,9 @@ pub fn init_recordings_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         [],
     )?;
     
+    // Add the column if it doesn't exist (for existing DBs)
+    let _ = conn.execute("ALTER TABLE day_meta ADD COLUMN total_size_bytes INTEGER NOT NULL DEFAULT 0", []);
+    
     Ok(conn)
 }
 
