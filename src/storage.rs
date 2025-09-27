@@ -121,11 +121,13 @@ fn list_recent_day_directories(storage_path: &FsPath) -> Vec<(String, PathBuf)> 
 
 struct DayScanResult {
     count: usize,
+    total_size_bytes: u64,
     latest: Option<(chrono::DateTime<chrono::Utc>, String)>,
 }
 
 fn summarize_day_with_ls(day_path: &FsPath) -> DayScanResult {
     let mut count = 0usize;
+    let mut total_size_bytes = 0u64;
     let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
 
     if let Ok(entries) = fs::read_dir(day_path) {
@@ -148,6 +150,7 @@ fn summarize_day_with_ls(day_path: &FsPath) -> DayScanResult {
             count += 1;
 
             if let Ok(meta) = entry.metadata() {
+                total_size_bytes += meta.len();
                 if let Ok(modified) = meta.modified() {
                     match latest {
                         Some((current, _)) if modified <= current => {}
@@ -164,7 +167,7 @@ fn summarize_day_with_ls(day_path: &FsPath) -> DayScanResult {
             path.to_string_lossy().to_string(),
         )
     });
-    DayScanResult { count, latest }
+    DayScanResult { count, total_size_bytes, latest }
 }
 
 fn scan_recordings(storage_path: PathBuf, previous: Option<RecordingSnapshot>, db_conn: Arc<Mutex<Connection>>) -> RecordingSnapshot {
@@ -214,6 +217,7 @@ fn scan_recordings(storage_path: PathBuf, previous: Option<RecordingSnapshot>, d
 
             DayMeta {
                 recording_count: day_result.count,
+                total_size_bytes: day_result.total_size_bytes,
                 latest_timestamp,
                 latest_path,
                 last_scanned_mtime: dir_mtime,
@@ -237,9 +241,11 @@ fn scan_recordings(storage_path: PathBuf, previous: Option<RecordingSnapshot>, d
     let mut latest_recording_path: Option<String> = None;
     let mut latest_timestamp: Option<chrono::DateTime<chrono::Utc>> = None;
 
+    let mut total_size_bytes: u64 = 0;
     for (day_name, _) in &day_dirs {
         if let Some(meta) = meta_map.get(day_name) {
             total_count += meta.recording_count;
+            total_size_bytes += meta.total_size_bytes;
             summaries.push(DaySummary {
                 day: day_name.clone(),
                 recording_count: meta.recording_count,
@@ -259,7 +265,7 @@ fn scan_recordings(storage_path: PathBuf, previous: Option<RecordingSnapshot>, d
     }
 
     snapshot.total_count = total_count;
-    snapshot.total_size_bytes = 0; // TODO: Calculate total size from DB metadata
+    snapshot.total_size_bytes = total_size_bytes;
     snapshot.last_recording = latest_recording_path;
     snapshot.latest_timestamp = latest_timestamp;
     snapshot.day_summaries = summaries;
@@ -303,6 +309,7 @@ pub fn init_recordings_db(db_path: &std::path::Path) -> SqlResult<Connection> {
         "CREATE TABLE IF NOT EXISTS day_meta (
             day_name TEXT PRIMARY KEY,
             recording_count INTEGER NOT NULL,
+            total_size_bytes INTEGER NOT NULL DEFAULT 0,
             latest_timestamp TEXT,
             latest_path TEXT,
             last_scanned_mtime INTEGER
@@ -314,16 +321,17 @@ pub fn init_recordings_db(db_path: &std::path::Path) -> SqlResult<Connection> {
 }
 
 fn load_snapshot_from_db(conn: &Connection) -> SqlResult<HashMap<String, DayMeta>> {
-    let mut stmt = conn.prepare("SELECT day_name, recording_count, latest_timestamp, latest_path, last_scanned_mtime FROM day_meta")?;
+    let mut stmt = conn.prepare("SELECT day_name, recording_count, total_size_bytes, latest_timestamp, latest_path, last_scanned_mtime FROM day_meta")?;
     let mut rows = stmt.query([])?;
     
     let mut meta_map = HashMap::new();
     while let Some(row) = rows.next()? {
         let day_name: String = row.get(0)?;
         let recording_count: usize = row.get(1)?;
-        let latest_timestamp: Option<String> = row.get(2)?;
-        let latest_path: Option<String> = row.get(3)?;
-        let last_scanned_mtime: Option<i64> = row.get(4)?;
+        let total_size_bytes: u64 = row.get(2)?;
+        let latest_timestamp: Option<String> = row.get(3)?;
+        let latest_path: Option<String> = row.get(4)?;
+        let last_scanned_mtime: Option<i64> = row.get(5)?;
         
         let latest_timestamp_parsed = latest_timestamp
             .and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok())
@@ -331,6 +339,7 @@ fn load_snapshot_from_db(conn: &Connection) -> SqlResult<HashMap<String, DayMeta
         
         let meta = DayMeta {
             recording_count,
+            total_size_bytes,
             latest_timestamp: latest_timestamp_parsed,
             latest_path,
             last_scanned_mtime: last_scanned_mtime.map(|t| std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(t as u64)),
@@ -350,9 +359,9 @@ fn save_day_meta_to_db(conn: &Connection, day_name: &str, meta: &DayMeta) -> Sql
         .map(|d| d.as_secs() as i64);
     
     conn.execute(
-        "INSERT OR REPLACE INTO day_meta (day_name, recording_count, latest_timestamp, latest_path, last_scanned_mtime)
-         VALUES (?, ?, ?, ?, ?)",
-        rusqlite::params![day_name, meta.recording_count, latest_timestamp_str, meta.latest_path, mtime_secs],
+        "INSERT OR REPLACE INTO day_meta (day_name, recording_count, total_size_bytes, latest_timestamp, latest_path, last_scanned_mtime)
+         VALUES (?, ?, ?, ?, ?, ?)",
+        rusqlite::params![day_name, meta.recording_count, meta.total_size_bytes, latest_timestamp_str, meta.latest_path, mtime_secs],
     )?;
     
     Ok(())
@@ -406,7 +415,7 @@ pub async fn rebuild_recording_snapshot(
         // Recalculate totals from meta
         for (_day, meta) in &snapshot.day_meta {
             snapshot.total_count += meta.recording_count;
-            snapshot.total_size_bytes = 0; // TODO: Calculate from DB
+            snapshot.total_size_bytes += meta.total_size_bytes;
             if let Some(ts) = meta.latest_timestamp {
                 if snapshot.latest_timestamp.map(|current| ts > current).unwrap_or(true) {
                     snapshot.latest_timestamp = Some(ts);
@@ -481,8 +490,25 @@ async fn get_storage_info_async(state: &Arc<AppState>) -> Option<serde_json::Val
             }))
         }
         Err(e) => {
-            log::warn!("Failed to get storage info: {}", e);
-            None
+            log::warn!("Failed to get storage info for {}: {}. Using fallback.", state.storage_root.display(), e);
+            // Fallback: try to get basic info from directory metadata
+            match tokio::fs::metadata(&state.storage_root).await {
+                Ok(meta) => {
+                    let size = meta.len();
+                    Some(serde_json::json!({
+                        "total_space_bytes": null,
+                        "used_space_bytes": size,
+                        "free_space_bytes": null,
+                        "storage_path": state.storage_root.to_string_lossy(),
+                        "storage_name": "main_storage_fallback",
+                        "error": format!("statvfs failed: {}", e)
+                    }))
+                }
+                Err(e2) => {
+                    log::error!("Fallback storage info also failed: {}", e2);
+                    None
+                }
+            }
         }
     }
 }

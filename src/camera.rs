@@ -282,8 +282,8 @@ async fn concat_day_recordings(day_dir: &Path, date_str: &str) -> Result<(), Str
         &final_path_str,
     ];
 
-    // Usar la función helper con timeout de 5 minutos y máximo 3 reintentos
-    if let Err(err) = ejecutar_ffmpeg_con_timeout(&args, &descripcion, 300, 3).await {
+    // Usar la función helper con timeout de 1 hora y máximo 3 reintentos
+    if let Err(err) = ejecutar_ffmpeg_con_timeout(&args, &descripcion, 3600, 3).await {
         // Cleanup on failure
         if let Some(temp) = previous_full_temp.as_ref() {
             let _ = std::fs::rename(temp, final_path.clone());
@@ -759,15 +759,15 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                         }
                     }
                     None => {
-                        // Si nunca hemos recibido audio y han pasado más de 30 segundos desde el inicio del ciclo
-                        if cycle_started.elapsed() > std::time::Duration::from_secs(30) && audio_available {
+                        // Si nunca hemos recibido audio y han pasado más de 60 segundos desde el inicio del ciclo
+                        if cycle_started.elapsed() > std::time::Duration::from_secs(60) && audio_available {
                             *audio_check_state.audio_available.lock().unwrap() = false;
                             println!("🔇 Audio no disponible - nunca se recibió audio en los primeros 30 segundos");
                             
                             // Log estructurado para métricas
                             log::warn!(
                                 target: "metrics",
-                                "audio_nunca_recibido tiempo_espera=30.0"
+                                "audio_nunca_recibido tiempo_espera=60.0"
                             );
                         }
                     }

@@ -118,6 +118,7 @@ pub struct RecordingSnapshot {
 #[derive(Clone, Debug, Default)]
 pub struct DayMeta {
     pub recording_count: usize,
+    pub total_size_bytes: u64,
     pub latest_timestamp: Option<chrono::DateTime<chrono::Utc>>,
     pub latest_path: Option<String>,
     pub last_scanned_mtime: Option<std::time::SystemTime>,
