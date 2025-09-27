@@ -195,15 +195,7 @@ fn scan_recordings(storage_path: PathBuf, previous: Option<RecordingSnapshot>, d
             .as_ref()
             .and_then(|meta| meta.modified().ok());
 
-        let needs_refresh = match meta_map.get(day_name) {
-            Some(existing) => match (existing.last_scanned_mtime, dir_mtime) {
-                (Some(prev_mtime), Some(current_mtime)) => current_mtime > prev_mtime,
-                (None, Some(_)) => true,
-                (Some(_), None) => true,
-                (None, None) => true,
-            },
-            None => true,
-        };
+        let needs_refresh = true; // Force refresh to recalculate sizes
 
         let updated_meta = if needs_refresh {
             let day_result = summarize_day_with_ls(day_path.as_path());
