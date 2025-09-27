@@ -3,6 +3,10 @@ name = "vigilante"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+tokio-console = ["console-subscriber"]
+
 [dependencies]
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
@@ -26,6 +30,7 @@ quick-xml = "0.31"
 url = "2"
 log = "0.4"
 simplelog = "0.12"
+console-subscriber = { version = "0.2", optional = true }
 
 # GStreamer dependencies unified to version 0.22
 gstreamer = "0.22"

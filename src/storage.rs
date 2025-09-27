@@ -1,19 +1,245 @@
-use crate::{auth::RequireAuth, AppState};
-use axum::http::header;
+use crate::{auth::RequireAuth, AppState, DaySummary, RecordingSnapshot};
 use axum::{
     body::Body,
-    extract::{Path, Query, State, ws::{WebSocket, WebSocketUpgrade}},
+    extract::{
+        ws::{WebSocket, WebSocketUpgrade},
+        Path, State,
+    },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use chrono::{NaiveDate, Utc};
 use fs2;
-use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, sync::Arc, time::Duration};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
+use log::info;
+use serde::Serialize;
+use std::{
+    fs,
+    path::{Path as FsPath, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+const MAX_SUMMARY_DAYS: usize = 120;
+
+fn canonicalize_within_root(
+    state: &Arc<AppState>,
+    candidate: PathBuf,
+) -> Result<PathBuf, StatusCode> {
+    let root = &state.storage_root;
+    let full = candidate
+        .canonicalize()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if !full.starts_with(root) {
+        Err(StatusCode::FORBIDDEN)
+    } else {
+        Ok(full)
+    }
+}
+
+fn resolve_storage_path(
+    state: &Arc<AppState>,
+    relative: impl AsRef<FsPath>,
+) -> Result<PathBuf, StatusCode> {
+    let rel_path = relative.as_ref();
+    if rel_path.is_absolute() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let candidate = state.storage_root.join(rel_path);
+    canonicalize_within_root(state, candidate)
+}
+
+fn iso_to_day_folder(date: &str) -> Option<String> {
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .ok()
+        .map(|d| d.format("%d-%m-%y").to_string())
+}
+
+fn resolve_log_file_path(state: &Arc<AppState>, date: &str) -> Result<PathBuf, StatusCode> {
+    let file_name = format!("{}-log.txt", date);
+
+    if let Some(day_folder) = iso_to_day_folder(date) {
+        let candidate = state.storage_root.join(&day_folder).join(&file_name);
+        if candidate.exists() {
+            return canonicalize_within_root(state, candidate);
+        }
+    }
+
+    let fallback = state.storage_root.join(&file_name);
+    if fallback.exists() {
+        return canonicalize_within_root(state, fallback);
+    }
+
+    Err(StatusCode::NOT_FOUND)
+}
+
+async fn open_recording_file(
+    state: &Arc<AppState>,
+    relative: &str,
+) -> Result<(PathBuf, File), StatusCode> {
+    let full_path = resolve_storage_path(state, FsPath::new(relative))?;
+    let file = File::open(&full_path)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((full_path, file))
+}
+
+fn compare_day_labels_desc(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse = |s: &str| NaiveDate::parse_from_str(s, "%d-%m-%y").ok();
+    match (parse(a), parse(b)) {
+        (Some(da), Some(db)) => db.cmp(&da),
+        _ => b.cmp(a),
+    }
+}
+
+fn list_recent_day_directories(storage_path: &FsPath) -> Vec<(String, PathBuf)> {
+    let mut days: Vec<(String, PathBuf)> = Vec::new();
+    if let Ok(entries) = fs::read_dir(storage_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            days.push((name, path));
+        }
+    }
+
+    days.sort_by(|(a, _), (b, _)| compare_day_labels_desc(a, b));
+    if days.len() > MAX_SUMMARY_DAYS {
+        days.truncate(MAX_SUMMARY_DAYS);
+    }
+    days
+}
+
+struct DayScanResult {
+    count: usize,
+    latest: Option<(chrono::DateTime<chrono::Utc>, String)>,
+}
+
+fn summarize_day_with_ls(day_path: &FsPath) -> DayScanResult {
+    let mut count = 0usize;
+    let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+
+    if let Ok(entries) = fs::read_dir(day_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if !path.is_file() {
+                continue;
+            }
+
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.ends_with("-log.txt"))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            count += 1;
+
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    match latest {
+                        Some((current, _)) if modified <= current => {}
+                        _ => latest = Some((modified, path.clone())),
+                    }
+                }
+            }
+        }
+    }
+
+    let latest = latest.map(|(ts, path)| {
+        (
+            chrono::DateTime::<chrono::Utc>::from(ts),
+            path.to_string_lossy().to_string(),
+        )
+    });
+
+    DayScanResult { count, latest }
+}
+
+fn scan_recordings_sync(storage_path: &FsPath) -> RecordingSnapshot {
+    let mut snapshot = RecordingSnapshot::default();
+    let mut summaries: Vec<DaySummary> = Vec::new();
+    let mut total_count: usize = 0;
+    let mut latest_recording: Option<(chrono::DateTime<chrono::Utc>, String)> = None;
+    let started = std::time::Instant::now();
+
+    let day_dirs = list_recent_day_directories(storage_path);
+    let scanned_days = day_dirs.len();
+
+    for (day_name, day_path) in day_dirs {
+        let day_result = summarize_day_with_ls(&day_path);
+
+        total_count += day_result.count;
+
+        if let Some((ts, path)) = day_result.latest.as_ref() {
+            if latest_recording
+                .as_ref()
+                .map(|(current_ts, _)| ts > current_ts)
+                .unwrap_or(true)
+            {
+                latest_recording = Some((ts.clone(), path.clone()));
+            }
+        }
+
+        summaries.push(DaySummary {
+            day: day_name,
+            recording_count: day_result.count,
+        });
+    }
+
+    snapshot.total_count = total_count;
+    snapshot.last_recording = latest_recording.as_ref().map(|(_, path)| path.clone());
+    snapshot.latest_timestamp = latest_recording.map(|(ts, _)| ts);
+    snapshot.day_summaries = summaries;
+    snapshot.last_scan = Some(Utc::now());
+
+    log::debug!(
+        "scan_recordings_sync: {} files across {} recent days in {:.2?}",
+        snapshot.total_count,
+        scanned_days,
+        started.elapsed()
+    );
+
+    snapshot
+}
+
+pub async fn rebuild_recording_snapshot(storage_path: PathBuf) -> RecordingSnapshot {
+    tokio::task::spawn_blocking(move || scan_recordings_sync(&storage_path))
+        .await
+        .unwrap_or_default()
+}
+
+pub async fn refresh_recording_snapshot(state: &Arc<AppState>) -> RecordingSnapshot {
+    let start = std::time::Instant::now();
+    let snapshot = rebuild_recording_snapshot(state.storage_root.clone()).await;
+    let elapsed = start.elapsed();
+
+    {
+        let mut cache = state.recording_snapshot.lock().await;
+        *cache = snapshot.clone();
+    }
+
+    {
+        let mut system = state.system_status.lock().await;
+        system.storage_status.recording_count = snapshot.total_count;
+        system.storage_status.last_recording = snapshot.last_recording.clone();
+    }
+
+    info!(
+        "📊 Snapshot de grabaciones actualizado en {:.2?} ({} archivos)",
+        elapsed, snapshot.total_count
+    );
+
+    snapshot
+}
 
 // Estructura para la respuesta estándar de la API
 #[derive(Serialize)]
@@ -36,7 +262,7 @@ pub async fn get_storage_info(
 ) -> impl IntoResponse {
     println!("🎯 Handler: .00i0n0fo");
 
-    match fs2::statvfs(&state.storage_path) {
+    match fs2::statvfs(&state.storage_root) {
         Ok(stats) => {
             let total_space = stats.total_space();
             let free_space = stats.free_space();
@@ -63,23 +289,6 @@ pub async fn get_storage_info(
                 .into_response()
         }
     }
-}
-
-#[derive(Serialize)]
-pub struct Recording {
-    pub name: String,
-    pub path: String,
-    pub size: u64,
-    pub last_modified: DateTime<Utc>,
-    pub duration: Option<f64>,
-}
-
-// Estructura para los parámetros de la consulta de paginación y filtrado
-#[derive(Deserialize)]
-pub struct ListRecordingsParams {
-    pub page: Option<u64>,
-    pub limit: Option<u64>,
-    pub date: Option<String>,
 }
 
 // Función auxiliar para obtener la duración de un archivo MP4 usando ffprobe
@@ -122,76 +331,6 @@ pub struct ListRecordingsParams {
 //     None
 // }
 
-// Función auxiliar recursiva para obtener grabaciones de todos los subdirectorios
-pub async fn get_recordings_recursively(path: &PathBuf) -> Vec<Recording> {
-    use tokio::process::Command;
-
-    let mut recordings = Vec::new();
-
-    // Usar find para obtener archivos de forma eficiente
-    let find_cmd = format!("find '{}' -type f ! -name '*-log.txt' -printf '%P\\t%s\\t%T@\\n'", path.display());
-    if let Ok(output) = Command::new("sh")
-        .arg("-c")
-        .arg(&find_cmd)
-        .output()
-        .await
-    {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() == 3 {
-                    let relative_path = parts[0];
-                    let size: u64 = parts[1].parse().unwrap_or(0);
-                    let mtime_seconds: f64 = parts[2].parse().unwrap_or(0.0);
-                    let mtime = chrono::DateTime::from_timestamp(mtime_seconds as i64, 0).unwrap_or_else(|| chrono::Utc::now());
-
-                    // Calcular duración solo para archivos MP4 (deshabilitado por rendimiento)
-                    let duration = None; // if relative_path.ends_with(".mp4") { get_mp4_duration(&path.join(relative_path)) } else { None };
-
-                    let recording = Recording {
-                        name: std::path::Path::new(relative_path).file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string(),
-                        path: path.join(relative_path).to_string_lossy().to_string(),
-                        size,
-                        last_modified: mtime,
-                        duration,
-                    };
-                    recordings.push(recording);
-                }
-            }
-        }
-    }
-
-    recordings
-}
-
-pub async fn list_recordings(
-    RequireAuth: RequireAuth,
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<ListRecordingsParams>,
-) -> impl IntoResponse {
-    // Obtenemos todas las grabaciones de forma recursiva
-    let mut all_recordings = get_recordings_recursively(&state.storage_path).await;
-
-    // Filtramos por fecha si se provee el parámetro
-    if let Some(filter_date) = &params.date {
-        all_recordings.retain(|rec| rec.name.starts_with(filter_date));
-    }
-
-    // Lógica de paginación
-    let page = params.page.unwrap_or(1) as usize;
-    let limit = params.limit.unwrap_or(20) as usize;
-    let start = (page - 1) * limit;
-
-    let paginated_recordings: Vec<Recording> =
-        all_recordings.into_iter().skip(start).take(limit).collect();
-
-    (StatusCode::OK, Json(paginated_recordings)).into_response()
-}
-
 pub async fn get_recordings_by_date(
     RequireAuth: RequireAuth,
     State(state): State<Arc<AppState>>,
@@ -199,22 +338,35 @@ pub async fn get_recordings_by_date(
 ) -> impl IntoResponse {
     // Validar formato de fecha (YYYY-MM-DD)
     if date.len() != 10 || !date.chars().all(|c| c.is_numeric() || c == '-') {
-        return (StatusCode::BAD_REQUEST, Json(ApiResponse {
-            status: "error".to_string(),
-            message: "Formato de fecha inválido. Use YYYY-MM-DD".to_string(),
-        })).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                status: "error".to_string(),
+                message: "Formato de fecha inválido. Use YYYY-MM-DD".to_string(),
+            }),
+        )
+            .into_response();
     }
 
-    // Obtenemos todas las grabaciones de forma recursiva
-    let all_recordings = get_recordings_recursively(&state.storage_path).await;
+    let snapshot = { state.recording_snapshot.lock().await.clone() };
+    let friendly_day = iso_to_day_folder(&date).unwrap_or_else(|| date.clone());
 
-    // Filtramos por fecha (los nombres empiezan con YYYY-MM-DD)
-    let filtered_recordings: Vec<Recording> = all_recordings
-        .into_iter()
-        .filter(|rec| rec.name.starts_with(&format!("{}-", date)))
-        .collect();
+    let count = snapshot
+        .day_summaries
+        .iter()
+        .find(|summary| summary.day == friendly_day)
+        .map(|summary| summary.recording_count)
+        .unwrap_or(0);
 
-    (StatusCode::OK, Json(filtered_recordings)).into_response()
+    let response = serde_json::json!({
+        "date": date,
+        "day": friendly_day,
+        "length": count,
+        "total": snapshot.total_count,
+        "last_scan": snapshot.last_scan.map(|ts| ts.to_rfc3339()),
+    });
+
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 pub async fn delete_recording(
@@ -222,49 +374,56 @@ pub async fn delete_recording(
     State(state): State<Arc<AppState>>,
     Path(file_path): Path<String>,
 ) -> impl IntoResponse {
-    let candidate = PathBuf::from(&state.storage_path).join(&file_path);
-    // Canonicalize to avoid .. traversal and ensure it's within storage root
-    let Ok(full_path) = candidate.canonicalize() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                status: "error".into(),
-                message: "Invalid path".into(),
-            }),
-        )
-            .into_response();
+    let full_path = match resolve_storage_path(&state, FsPath::new(&file_path)) {
+        Ok(path) => path,
+        Err(StatusCode::BAD_REQUEST) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse {
+                    status: "error".into(),
+                    message: "Invalid path".into(),
+                }),
+            )
+                .into_response()
+        }
+        Err(StatusCode::FORBIDDEN) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ApiResponse {
+                    status: "error".into(),
+                    message: "Path not allowed".into(),
+                }),
+            )
+                .into_response()
+        }
+        Err(status) => {
+            return (
+                status,
+                Json(ApiResponse {
+                    status: "error".into(),
+                    message: "Storage misconfigured".into(),
+                }),
+            )
+                .into_response()
+        }
     };
-    let Ok(root) = state.storage_path.canonicalize() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse {
-                status: "error".into(),
-                message: "Storage misconfigured".into(),
-            }),
-        )
-            .into_response();
-    };
-    if !full_path.starts_with(&root) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(ApiResponse {
-                status: "error".into(),
-                message: "Path not allowed".into(),
-            }),
-        )
-            .into_response();
-    }
 
     if full_path.exists() && full_path.is_file() {
         match fs::remove_file(&full_path) {
-            Ok(_) => (
-                StatusCode::OK,
-                Json(ApiResponse {
-                    status: "success".to_string(),
-                    message: "File deleted successfully".to_string(),
-                }),
-            )
-                .into_response(),
+            Ok(_) => {
+                let state_clone = state.clone();
+                tokio::spawn(async move {
+                    let _ = refresh_recording_snapshot(&state_clone).await;
+                });
+                (
+                    StatusCode::OK,
+                    Json(ApiResponse {
+                        status: "success".to_string(),
+                        message: "File deleted successfully".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
             Err(e) => {
                 eprintln!("❌ Error al eliminar el archivo: {}", e);
                 (
@@ -297,25 +456,14 @@ pub async fn stream_recording(
 ) -> Result<Response, StatusCode> {
     // Autenticación ya validada por middleware global
 
-    let candidate = PathBuf::from(&state.storage_path).join(&file_path);
-    // Canonicalize to avoid .. traversal and ensure it's within storage root
-    let full_path = candidate
-        .canonicalize()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let root = state
-        .storage_path
-        .canonicalize()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if !full_path.starts_with(&root) {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    let (_full_path, file) = open_recording_file(&state, &file_path).await?;
 
     // Tamaño del archivo para rangos
-    let meta = match tokio::fs::metadata(&full_path).await {
-        Ok(m) => m,
-        Err(_) => return Err(StatusCode::NOT_FOUND),
-    };
-    let file_size = meta.len();
+    let file_size = file
+        .metadata()
+        .await
+        .map(|meta| meta.len())
+        .map_err(|_| StatusCode::NOT_FOUND)?;
 
     // Soporte para Range: bytes=START-END
     let range_hdr = headers
@@ -357,10 +505,7 @@ pub async fn stream_recording(
     };
 
     // Abrir y posicionar
-    let mut file = match File::open(&full_path).await {
-        Ok(f) => f,
-        Err(_) => return Err(StatusCode::NOT_FOUND),
-    };
+    let mut file = file;
     if start > 0 {
         if let Err(_) = file.seek(std::io::SeekFrom::Start(start)).await {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -412,10 +557,16 @@ pub async fn stream_recording(
     h.insert(axum::http::header::EXPIRES, "0".parse().unwrap());
     // Evitar buffering por proxies/reverse proxies, y permitir envío inmediato
     h.insert("X-Accel-Buffering", "no".parse().unwrap());
-    h.insert(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate".parse().unwrap());
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        "no-cache, no-store, must-revalidate".parse().unwrap(),
+    );
     // CORS headers for streaming
     h.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    h.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    h.insert(
+        "Access-Control-Allow-Methods",
+        "GET, POST, OPTIONS".parse().unwrap(),
+    );
     h.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
     if status == StatusCode::PARTIAL_CONTENT {
         let cr = format!("bytes {}-{}/{}", start, end, file_size);
@@ -430,19 +581,18 @@ pub async fn get_log_file(
     State(state): State<Arc<AppState>>,
     Path(date): Path<String>,
 ) -> impl IntoResponse {
-    // Nuevo esquema: logs dentro de carpeta del día DD-MM-YY
-    let file_name = format!("{}-log.txt", date);
-    // Convertir YYYY-MM-DD -> DD-MM-YY
-    let day_dir = match chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") {
-        Ok(d) => state.storage_path.join(d.format("%d-%m-%y").to_string()),
-        Err(_) => state.storage_path.clone(),
-    };
-    let full_path_new = day_dir.join(&file_name);
-    // Compat: fallback a raíz si no existe
-    let full_path = if full_path_new.exists() {
-        full_path_new
-    } else {
-        state.storage_path.join(&file_name)
+    let full_path = match resolve_log_file_path(&state, &date) {
+        Ok(path) => path,
+        Err(StatusCode::NOT_FOUND) => {
+            return (StatusCode::NOT_FOUND, "".to_string()).into_response()
+        }
+        Err(status) => {
+            eprintln!(
+                "❌ Error al resolver ruta de log ({}): status {:?}",
+                date, status
+            );
+            return (status, "Error interno del servidor".to_string()).into_response();
+        }
     };
 
     match tokio::fs::read_to_string(&full_path).await {
@@ -469,22 +619,7 @@ pub async fn stream_recording_tail(
 ) -> Result<Response, StatusCode> {
     // Autenticación ya validada por middleware flexible
 
-    let candidate = PathBuf::from(&state.storage_path).join(&file_path);
-    let full_path = candidate
-        .canonicalize()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let root = state
-        .storage_path
-        .canonicalize()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if !full_path.starts_with(&root) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    // Abrir archivo y crear stream que sigue leyendo mientras crece
-    let mut file = File::open(&full_path)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
+    let (full_path, mut file) = open_recording_file(&state, &file_path).await?;
 
     // Posición inicial: desde el principio (para incluir ftyp+moov) y que el reproductor pueda decodificar
     let mut pos: u64 = 0;
@@ -595,104 +730,6 @@ pub async fn stream_recording_tail(
     Ok(resp)
 }
 
-// Endpoint para lista completa de grabaciones con metadatos
-pub async fn recordings_list(
-    RequireAuth: RequireAuth,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    // Obtener todas las grabaciones sin paginación
-    let recordings = get_recordings_recursively(&state.storage_path).await;
-    (StatusCode::OK, Json(recordings))
-}
-
-// Nueva función SSE para streaming de logs de grabaciones en tiempo real
-pub async fn stream_recording_logs_sse(
-    RequireAuth: RequireAuth,
-    State(state): State<Arc<AppState>>,
-    Path(date): Path<String>,
-) -> Result<Response, StatusCode> {
-    // Construir la ruta del archivo de log
-    let file_name = format!("{}-log.txt", date);
-    let day_dir = match chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") {
-        Ok(d) => state.storage_path.join(d.format("%d-%m-%y").to_string()),
-        Err(_) => state.storage_path.clone(),
-    };
-    let full_path_new = day_dir.join(&file_name);
-    let log_path = if full_path_new.exists() {
-        full_path_new
-    } else {
-        state.storage_path.join(&file_name)
-    };
-
-    // Verificar que el archivo existe
-    if !log_path.exists() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-
-    // Abrir el archivo para lectura
-    let file = File::open(&log_path)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut reader = BufReader::new(file);
-
-    // Crear stream SSE
-    let stream = async_stream::stream! {
-        let mut buf = String::new();
-        let mut last_pos: u64 = 0;
-
-        // Enviar evento de conexión
-        yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b":connected\n\n"));
-
-        loop {
-            // Verificar si el archivo ha crecido
-            let metadata = match tokio::fs::metadata(&log_path).await {
-                Ok(m) => m,
-                Err(_) => break, // Archivo eliminado
-            };
-
-            let current_size = metadata.len();
-
-            // Si el archivo ha crecido, leer las nuevas líneas
-            if current_size > last_pos {
-                // Mover el cursor a la última posición leída
-                if let Ok(_) = reader.seek(std::io::SeekFrom::Start(last_pos)).await {
-                    buf.clear();
-                    while let Ok(read) = reader.read_line(&mut buf).await {
-                        if read == 0 {
-                            break; // EOF
-                        }
-
-                        // Enviar línea como evento SSE
-                        let line = format!("data: {}\n\n", buf.trim_end_matches(['\n', '\r']));
-                        yield Ok(axum::body::Bytes::from(line));
-
-                        buf.clear();
-                    }
-                }
-
-                last_pos = current_size;
-            }
-
-            // Esperar un poco antes de verificar nuevamente
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        }
-    };
-
-    // Crear respuesta SSE
-    let mut resp = Response::new(Body::from_stream(stream));
-    let headers = resp.headers_mut();
-    headers.insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
-    headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
-    headers.insert(header::CONNECTION, "keep-alive".parse().unwrap());
-    headers.insert("X-Accel-Buffering", "no".parse().unwrap());
-    // CORS headers for streaming
-    headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
-    headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
-
-    Ok(resp)
-}
-
 // Nueva función WebSocket para streaming de resumen de grabaciones por fechas
 pub async fn recordings_summary_ws(
     ws: WebSocketUpgrade,
@@ -745,98 +782,18 @@ async fn send_recordings_summary(
     socket: &mut WebSocket,
     state: &Arc<AppState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let recordings = get_recordings_recursively(&state.storage_path).await;
-
-    // Crear mapa de fechas con conteo
-    use std::collections::HashMap;
-    let mut date_counts: HashMap<String, usize> = HashMap::new();
-
-    for recording in &recordings {
-        let date_str = recording.last_modified.to_rfc3339().split('T').next().unwrap_or("").to_string();
-        *date_counts.entry(date_str).or_insert(0) += 1;
-    }
-
-    // Convertir a vector ordenado por fecha descendente
-    let mut summary: Vec<(String, usize)> = date_counts.into_iter().collect();
-    summary.sort_by(|a, b| b.0.cmp(&a.0));
+    let snapshot = { state.recording_snapshot.lock().await.clone() };
 
     let summary_data = serde_json::json!({
         "type": "summary",
-        "data": summary,
-        "timestamp": chrono::Utc::now().to_rfc3339()
+        "data": snapshot.day_summaries,
+    "timestamp": Utc::now().to_rfc3339(),
+        "last_scan": snapshot.last_scan.map(|ts| ts.to_rfc3339()),
+        "total": snapshot.total_count,
     });
 
-    socket.send(axum::extract::ws::Message::Text(summary_data.to_string())).await?;
-    Ok(())
-}
-
-// Nueva función WebSocket para streaming de lista completa de grabaciones
-pub async fn recordings_list_ws(
-    ws: WebSocketUpgrade,
-    RequireAuth: RequireAuth,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_recordings_list_ws(socket, state))
-}
-
-async fn handle_recordings_list_ws(mut socket: WebSocket, state: Arc<AppState>) {
-    println!("🎯 WebSocket: Recordings list stream started");
-
-    // Enviar lista inicial
-    if let Err(e) = send_recordings_list(&mut socket, &state).await {
-        println!("Error sending initial list: {}", e);
-        return;
-    }
-
-    // Mantener conexión abierta y enviar actualizaciones periódicas
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                if let Err(e) = send_recordings_list(&mut socket, &state).await {
-                    println!("Error sending list update: {}", e);
-                    break;
-                }
-            }
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(axum::extract::ws::Message::Close(_))) => {
-                        println!("WebSocket closed by client");
-                        break;
-                    }
-                    Some(Err(e)) => {
-                        println!("WebSocket error: {}", e);
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    println!("🎯 WebSocket: Recordings list stream ended");
-}
-
-async fn send_recordings_list(
-    socket: &mut WebSocket,
-    state: &Arc<AppState>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut recordings = get_recordings_recursively(&state.storage_path).await;
-
-    // Ordenar por fecha modificada descendente
-    recordings.sort_by(|a, b| {
-        let a_date = a.last_modified;
-        let b_date = b.last_modified;
-        b_date.cmp(&a_date)
-    });
-
-    let list_data = serde_json::json!({
-        "type": "list",
-        "data": recordings,
-        "timestamp": chrono::Utc::now().to_rfc3339()
-    });
-
-    socket.send(axum::extract::ws::Message::Text(list_data.to_string())).await?;
+    socket
+        .send(axum::extract::ws::Message::Text(summary_data.to_string()))
+        .await?;
     Ok(())
 }

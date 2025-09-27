@@ -1,44 +1,46 @@
+use axum::body::Body;
 use axum::{
-    http::{HeaderValue, Method, header},
+    http::{header, HeaderValue, Method, Request},
+    middleware::{from_fn, from_fn_with_state, Next},
+    response::Response,
     routing::{get, post},
     Router,
 };
 use bytes::Bytes;
 use dotenvy::dotenv;
-use std::{env, net::SocketAddr, path::PathBuf, sync::{Arc, Mutex as StdMutex}};
 use std::sync::atomic::AtomicU64;
+use std::{
+    env, fs,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, Mutex as StdMutex},
+    time::{Duration, Instant},
+};
 use tokio::sync::{broadcast, watch, Mutex};
 use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
 
-use vigilante::{auth, camera, logs, ptz, storage, stream, AppState, SystemStatus, PipelineStatus, AudioStatus, StorageStatus};
+use vigilante::{
+    auth, camera, logs, ptz, storage, stream, AppState, AudioStatus, PipelineStatus,
+    RecordingSnapshot, StorageStatus, SystemStatus,
+};
 
 use auth::flexible_auth_middleware;
-use axum::middleware::from_fn_with_state;
 use camera::start_camera_pipeline;
 use logs::stream_journal_logs;
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
-    delete_recording, get_log_file, get_storage_info, list_recordings,
-    recordings_list_ws, recordings_summary_ws, stream_recording,
-    stream_recording_logs_sse, stream_recording_tail, get_recordings_by_date,
+    get_recordings_by_date, get_storage_info, recordings_summary_ws, refresh_recording_snapshot,
+    stream_recording,
 };
 use stream::{
     stream_audio_handler, stream_hls_handler, stream_hls_index, stream_mjpeg_handler,
     stream_webrtc_handler,
 };
-use vigilante::status::{
-    get_system_status,
-    get_pipeline_status,
-    get_audio_status,
-    get_storage_status,
-    generate_realtime_status,
-    status_websocket,
-};
+use vigilante::status::get_system_status;
 
 // Dependencias de GStreamer
 use gstreamer as gst;
-use log::info;
+use log::{info, warn};
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -64,28 +66,54 @@ async fn shutdown_signal() {
     }
 }
 
+async fn log_requests(req: Request<Body>, next: Next) -> Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let started = Instant::now();
+    info!("→ {} {}", method, uri);
+
+    let response = next.run(req).await;
+    let status = response.status();
+    let elapsed = started.elapsed();
+    info!(
+        "← {} {} {} ({} ms)",
+        method,
+        uri,
+        status.as_u16(),
+        elapsed.as_millis()
+    );
+
+    response
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
 
     simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default()).unwrap();
 
+    #[cfg(feature = "tokio-console")]
+    {
+        console_subscriber::init();
+        info!("tokio-console instrumentation enabled");
+    }
+
     gst::init()?;
 
     info!("GStreamer initialized successfully");
 
-    let camera_rtsp_url = env::var("CAMERA_RTSP_URL")
-        .expect("CAMERA_RTSP_URL environment variable must be set");
-    let camera_onvif_url = env::var("CAMERA_ONVIF_URL")
-        .expect("CAMERA_ONVIF_URL environment variable must be set");
-    let proxy_token = env::var("PROXY_TOKEN")
-        .expect("PROXY_TOKEN environment variable must be set");
+    let camera_rtsp_url =
+        env::var("CAMERA_RTSP_URL").expect("CAMERA_RTSP_URL environment variable must be set");
+    let camera_onvif_url =
+        env::var("CAMERA_ONVIF_URL").expect("CAMERA_ONVIF_URL environment variable must be set");
+    let proxy_token =
+        env::var("PROXY_TOKEN").expect("PROXY_TOKEN environment variable must be set");
     if proxy_token.is_empty() {
         panic!("PROXY_TOKEN cannot be empty");
     }
     let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let storage_path = env::var("STORAGE_PATH")
-        .expect("STORAGE_PATH environment variable must be set");
+    let storage_path =
+        env::var("STORAGE_PATH").expect("STORAGE_PATH environment variable must be set");
     let enable_hls = env::var("ENABLE_HLS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
@@ -102,7 +130,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(false);
 
     // Configuración de CORS: orígenes permitidos desde variable de entorno
-    let allowed_origins_str = env::var("ALLOWED_ORIGINS").unwrap_or_else(|_| "http://localhost:3000,http://localhost:8080".to_string());
+    let allowed_origins_str = env::var("ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| "http://localhost:3000,http://localhost:8080".to_string());
     let mut allowed_origins: Vec<HeaderValue> = allowed_origins_str
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
@@ -116,14 +145,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cors = CorsLayer::new()
         .allow_origin(allowed_origins)
         .allow_methods([Method::GET, Method::POST])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT, header::USER_AGENT]);
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            header::USER_AGENT,
+        ]);
 
     let storage_path_buf = PathBuf::from(&storage_path);
+    if let Err(err) = fs::create_dir_all(&storage_path_buf) {
+        warn!(
+            "No se pudo asegurar la creación del directorio de almacenamiento {}: {}",
+            storage_path_buf.display(),
+            err
+        );
+    }
+    let storage_root = match storage_path_buf.canonicalize() {
+        Ok(path) => path,
+        Err(err) => {
+            warn!(
+                "No se pudo canonicalizar STORAGE_PATH ({}), usando ruta original: {}",
+                storage_path_buf.display(),
+                err
+            );
+            storage_path_buf.clone()
+        }
+    };
 
     let (mjpeg_tx, _mjpeg_rx) = broadcast::channel::<Bytes>(32);
     let (mjpeg_low_tx, _mjpeg_low_rx) = broadcast::channel::<Bytes>(32);
     let (audio_mp3_tx, _audio_rx) = watch::channel::<Bytes>(Bytes::new());
-    let (status_tx, _status_rx) = broadcast::channel::<serde_json::Value>(16);
 
     // Inicializar estado del sistema
     let initial_status = SystemStatus {
@@ -155,6 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         camera_onvif_url: camera_onvif_url.clone(),
         proxy_token: proxy_token.clone(),
         storage_path: storage_path_buf.clone(),
+        storage_root: storage_root.clone(),
         pipeline: Arc::new(Mutex::new(None)),
         mjpeg_tx,
         mjpeg_low_tx,
@@ -170,24 +222,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bypass_base_domain: env::var("BYPASS_DOMAIN").ok().map(|d| d.to_lowercase()),
         bypass_domain_secret: env::var("BYPASS_DOMAIN_SECRET").ok(),
         start_time: std::time::SystemTime::now(),
-        status_tx,
+        recording_snapshot: Arc::new(Mutex::new(RecordingSnapshot::default())),
     });
 
-    // Iniciar background task para status en tiempo real
+    // Construir snapshot inicial antes de atender solicitudes
+    refresh_recording_snapshot(&state).await;
+
+    // Refrescar caché de grabaciones de forma periódica
     {
         let state_clone = state.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                info!("Background status task running at {}", chrono::Utc::now());
-                let status_update = generate_realtime_status(&state_clone).await;
-                let _ = state_clone.status_tx.send(status_update);
+                let _ = refresh_recording_snapshot(&state_clone).await;
             }
         });
     }
-
-    info!("Real-time status background task started");
 
     // Iniciar tarea de monitoreo de salud del backend
     {
@@ -211,12 +262,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Router PÚBLICO sin autenticación
     let public_routes = Router::new()
-        .route("/test", get(|| async { "OK - Vigilante API funcionando sin auth" }))
-        .route("/api/health", get(|| async {
-            info!("Health check received at {}", chrono::Utc::now());
-            "OK"
-        }))
-        .layer(TraceLayer::new_for_http())
+        .route(
+            "/test",
+            get(|| async { "OK - Vigilante API funcionando sin auth" }),
+        )
+        .route(
+            "/api/health",
+            get(|| async {
+                info!("Health check received at {}", chrono::Utc::now());
+                "OK"
+            }),
+        )
+        .layer(from_fn(log_requests))
         .layer(cors.clone())
         .with_state(state.clone());
 
@@ -230,21 +287,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/logs/stream", get(stream_journal_logs))
         // .route("/api/storage/stream", get(storage_stream_sse)) // Función eliminada en actualización
         .route("/api/recordings/summary", get(recordings_summary_ws))
-        .route("/api/recordings/list", get(recordings_list_ws))
-        .route(
-            "/api/recordings/stream/tail/*path",
-            get(stream_recording_tail),
-        )
         .route("/api/storage", get(get_storage_info))
-        .route("/api/storage/list", get(list_recordings))
         .route("/api/recordings/by-date/:date", get(get_recordings_by_date))
-        .route("/api/storage/delete/*path", get(delete_recording))
         .route("/api/recordings/stream/*path", get(stream_recording))
-        .route("/api/recordings/log/:date", get(get_log_file))
-        .route(
-            "/api/recordings/log/:date/stream",
-            get(stream_recording_logs_sse),
-        )
         // Rutas para el control PTZ
         .route("/api/ptz/pan/left", post(pan_left))
         .route("/api/ptz/pan/right", post(pan_right))
@@ -253,14 +298,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/ptz/zoom/in", post(zoom_in))
         .route("/api/ptz/zoom/out", post(zoom_out))
         .route("/api/ptz/stop", post(ptz_stop))
-        // Nuevas rutas para el estado del sistema
+        // Ruta de estado simple
         .route("/api/status", get(get_system_status))
-        .route("/api/status/pipeline", get(get_pipeline_status))
-        .route("/api/status/audio", get(get_audio_status))
-        .route("/api/status/storage", get(get_storage_status))
-        .route("/api/status/ws", get(status_websocket))
         // Logging de requests
-        .layer(TraceLayer::new_for_http())
+        .layer(from_fn(log_requests))
         // CORS middleware debe ir ANTES de autenticación para manejar preflight OPTIONS
         .layer(cors)
         // Middleware flexible: valida token por header O por query

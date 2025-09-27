@@ -74,7 +74,10 @@ pub async fn stream_journal_logs(
     headers.insert("X-Accel-Buffering", "no".parse().unwrap());
     // CORS headers for streaming
     headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert(
+        "Access-Control-Allow-Methods",
+        "GET, POST, OPTIONS".parse().unwrap(),
+    );
     headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
     Ok(resp)
 }

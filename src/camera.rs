@@ -4,8 +4,8 @@ use chrono::Local;
 use gstreamer::{self as gst, prelude::*, MessageView, Pipeline};
 use gstreamer_app as gst_app;
 use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::process::Command;
 
 fn log_to_file(writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>, emoji: &str, msg: String) {
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -33,6 +33,198 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.2} {}", size, UNITS[idx])
     }
+}
+
+async fn concat_day_recordings(day_dir: &Path, date_str: &str) -> Result<(), String> {
+    if !day_dir.exists() {
+        return Ok(());
+    }
+
+    let mut segments: Vec<PathBuf> = Vec::new();
+    let mut existing_full: Option<PathBuf> = None;
+
+    let entries = std::fs::read_dir(day_dir)
+        .map_err(|e| format!("No se pudo leer {}: {}", day_dir.display(), e))?;
+
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| format!("Error leyendo archivos en {}: {}", day_dir.display(), e))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+
+        if !name.starts_with(&format!("{}-", date_str)) || !name.ends_with(".mp4") {
+            continue;
+        }
+
+        if name.contains("-full") {
+            existing_full = Some(path.clone());
+            continue;
+        }
+
+        segments.push(path);
+    }
+
+    segments.sort();
+
+    if segments.is_empty() {
+        return Ok(());
+    }
+
+    let mut sources: Vec<PathBuf> = Vec::new();
+    let mut previous_full_temp: Option<PathBuf> = None;
+
+    if let Some(full_path) = existing_full {
+        let temp_full = day_dir.join(format!("{}-full-prev.mp4", date_str));
+        if let Err(err) = std::fs::rename(&full_path, &temp_full) {
+            eprintln!(
+                "⚠️ No se pudo preparar archivo final previo {}: {}",
+                full_path.display(),
+                err
+            );
+        } else {
+            sources.push(temp_full.clone());
+            previous_full_temp = Some(temp_full);
+        }
+    }
+
+    sources.extend(segments.iter().cloned());
+
+    let final_path = day_dir.join(format!("{}-full.mp4", date_str));
+
+    if sources.len() <= 1 {
+        if let Some(temp) = previous_full_temp {
+            let _ = std::fs::remove_file(&final_path);
+            if let Err(err) = std::fs::rename(&temp, &final_path) {
+                return Err(format!(
+                    "No se pudo consolidar archivo diario {} desde {}: {}",
+                    final_path.display(),
+                    temp.display(),
+                    err
+                ));
+            }
+        } else if let Some(source) = sources.first() {
+            if source != &final_path {
+                if let Err(err) = std::fs::rename(source, &final_path) {
+                    return Err(format!(
+                        "No se pudo renombrar segmento {} a {}: {}",
+                        source.display(),
+                        final_path.display(),
+                        err
+                    ));
+                }
+            }
+        }
+
+        println!(
+            "✅ Archivo diario consolidado listo: {}",
+            final_path.display()
+        );
+        return Ok(());
+    }
+
+    let list_path = day_dir.join(format!("{}-concat.txt", date_str));
+    {
+        let mut list_file = std::fs::File::create(&list_path).map_err(|e| {
+            format!(
+                "No se pudo crear lista de concatenación {}: {}",
+                list_path.display(),
+                e
+            )
+        })?;
+        for source in &sources {
+            let source_str = source
+                .to_str()
+                .ok_or_else(|| format!("Ruta inválida para concat: {}", source.display()))?;
+            let escaped = source_str.replace('\'', "\\'");
+            writeln!(list_file, "file '{}'", escaped)
+                .map_err(|e| format!("No se pudo escribir en {}: {}", list_path.display(), e))?;
+        }
+    }
+
+    if previous_full_temp.is_some() {
+        let _ = std::fs::remove_file(&final_path);
+        println!(
+            "🔁 Actualizando archivo concatenado diario {} con nuevos segmentos",
+            final_path.display()
+        );
+    } else {
+        println!(
+            "🪄 Preparando concatenación de {} segmentos en {}",
+            segments.len(),
+            final_path.display()
+        );
+    }
+
+    let status = tokio::process::Command::new("ffmpeg")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-f")
+        .arg("concat")
+        .arg("-safe")
+        .arg("0")
+        .arg("-y")
+        .arg("-i")
+        .arg(&list_path)
+        .arg("-c")
+        .arg("copy")
+        .arg(&final_path)
+        .status()
+        .await
+        .map_err(|e| format!("No se pudo ejecutar ffmpeg: {}", e))?;
+
+    let _ = std::fs::remove_file(&list_path);
+
+    if !status.success() {
+        if let Some(temp) = previous_full_temp {
+            let _ = std::fs::rename(temp, final_path.clone());
+        }
+        return Err(format!("ffmpeg finalizó con estado: {}", status));
+    }
+
+    if let Some(temp) = previous_full_temp {
+        if let Err(err) = std::fs::remove_file(&temp) {
+            eprintln!(
+                "⚠️ No se pudo eliminar archivo previo {}: {}",
+                temp.display(),
+                err
+            );
+        }
+    }
+
+    for segment in segments {
+        if segment == final_path {
+            continue;
+        }
+        match std::fs::remove_file(&segment) {
+            Ok(_) => {
+                println!(
+                    "🧹 Segmento eliminado tras concatenación: {}",
+                    segment.display()
+                );
+            }
+            Err(err) => {
+                eprintln!(
+                    "⚠️ No se pudo eliminar segmento {}: {}",
+                    segment.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    println!(
+        "✅ Archivo diario concatenado listo: {}",
+        final_path.display()
+    );
+    Ok(())
 }
 
 pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
@@ -65,8 +257,17 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
         // Siguiente número incremental del día
         let date_str = now.format("%Y-%m-%d").to_string();
+
+        if let Err(err) = concat_day_recordings(&day_dir, &date_str).await {
+            eprintln!(
+                "⚠️ Falló concatenación previa en {}: {}",
+                day_dir.display(),
+                err
+            );
+        }
+
         let mut next_num = 1;
-        
+
         // Usar find para obtener el número más alto de forma eficiente
         let find_cmd = format!(
             "find '{}' -maxdepth 1 -name '{}-*.mp4' -printf '%P\\n' | awk -F'-' '{{print $(NF)}}' | sed 's/\\.mp4$//' | sort -n | tail -1",
@@ -99,24 +300,34 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
 
         // Configurar logging a archivo del día
         let log_file_path = day_dir.join(format!("{}-log.txt", date_str));
-        let log_file_result = std::fs::OpenOptions::new().create(true).append(true).open(&log_file_path);
+        let log_file_result = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file_path);
         let log_writer: Arc<StdMutex<Option<BufWriter<std::fs::File>>>> = match log_file_result {
             Ok(file) => {
                 println!("📝 Logging habilitado en: {}", log_file_path.display());
                 Arc::new(StdMutex::new(Some(BufWriter::new(file))))
-            },
+            }
             Err(e) => {
-                eprintln!("⚠️ No se pudo crear archivo de log {}: {}. Logging solo a consola", log_file_path.display(), e);
+                eprintln!(
+                    "⚠️ No se pudo crear archivo de log {}: {}. Logging solo a consola",
+                    log_file_path.display(),
+                    e
+                );
                 Arc::new(StdMutex::new(None))
             }
         };
 
         // Inicializar log_writer en el estado global para que lo usen los eventos ONVIF
-        let log_file_result2 = std::fs::OpenOptions::new().create(true).append(true).open(&log_file_path);
+        let log_file_result2 = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file_path);
         match log_file_result2 {
             Ok(file) => {
                 *state.log_writer.lock().unwrap() = Some(BufWriter::new(file));
-            },
+            }
             Err(e) => {
                 eprintln!("⚠️ No se pudo inicializar log_writer global: {}", e);
                 *state.log_writer.lock().unwrap() = None;
@@ -226,7 +437,10 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         ), camera_url, max_size_time_ns, segments_location_s);
 
         let default_pipeline = if record_segment_seconds > 0 {
-            println!("🧩 Segmentación activada: {} s por archivo", record_segment_seconds);
+            println!(
+                "🧩 Segmentación activada: {} s por archivo",
+                record_segment_seconds
+            );
             pipeline_str_segmented
         } else {
             pipeline_str_default
@@ -272,9 +486,12 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             println!("🎯 Activando detección manual de movimiento");
             setup_motion_detection(&pipeline, &state, &log_writer);
         } else if pipeline.by_name("detector").is_some() {
-            println!("📡 Usando solo detección nativa de cámara ONVIF (detección manual desactivada)");
+            println!(
+                "📡 Usando solo detección nativa de cámara ONVIF (detección manual desactivada)"
+            );
         }
-        if pipeline.by_name("mjpeg_sink").is_some() || pipeline.by_name("mjpeg_low_sink").is_some() {
+        if pipeline.by_name("mjpeg_sink").is_some() || pipeline.by_name("mjpeg_low_sink").is_some()
+        {
             setup_mjpeg_sinks(&pipeline, &state, &log_writer);
         }
         if pipeline.by_name("audio_mp3_sink").is_some() {
@@ -284,8 +501,11 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         // Añadir sondas (probes) a la rama de grabación para diagnosticar CAPS/BUFFERS
         if let Some(recq) = pipeline.by_name("recq") {
             if let Some(srcpad) = recq.static_pad("src") {
-                use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
-                use gst::{PadProbeType, PadProbeReturn, EventView, PadProbeData};
+                use gst::{EventView, PadProbeData, PadProbeReturn, PadProbeType};
+                use std::sync::{
+                    atomic::{AtomicU64, Ordering},
+                    Arc,
+                };
                 let buf_count = Arc::new(AtomicU64::new(0));
                 let caps_seen = Arc::new(AtomicU64::new(0));
                 let buf_count_cl = buf_count.clone();
@@ -305,7 +525,9 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 let _log_writer_cl2 = log_writer.clone();
                 srcpad.add_probe(PadProbeType::BUFFER, move |_pad, _info| {
                     let n = buf_count_cl.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n == 1 { println!("🎥 Buffers hacia mp4mux: {}", n); }
+                    if n == 1 {
+                        println!("🎥 Buffers hacia mp4mux: {}", n);
+                    }
                     PadProbeReturn::Ok
                 });
             } else {
@@ -318,14 +540,19 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
         // Probe en la salida del mp4mux para verificar salida hacia filesink
         if let Some(mux) = pipeline.by_name("mux") {
             if let Some(srcpad) = mux.static_pad("src") {
-                use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
-                use gst::{PadProbeType, PadProbeReturn};
+                use gst::{PadProbeReturn, PadProbeType};
+                use std::sync::{
+                    atomic::{AtomicU64, Ordering},
+                    Arc,
+                };
                 let out_count = Arc::new(AtomicU64::new(0));
                 let out_count_cl = out_count.clone();
                 let _log_writer_cl = log_writer.clone();
                 srcpad.add_probe(PadProbeType::BUFFER, move |_pad, _info| {
                     let n = out_count_cl.fetch_add(1, Ordering::Relaxed) + 1;
-                    if n == 1 { println!("💽 Buffers después de mp4mux hacia filesink: {}", n); }
+                    if n == 1 {
+                        println!("💽 Buffers después de mp4mux hacia filesink: {}", n);
+                    }
                     PadProbeReturn::Ok
                 });
             }
@@ -358,8 +585,8 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             let daily_filename = daily_filename.clone();
             let segmented = record_segment_seconds > 0;
             async move {
-                use tokio::time::{sleep, Duration, Instant};
                 use std::fs;
+                use tokio::time::{sleep, Duration, Instant};
                 let start = Instant::now();
                 let mut last_size = 0u64;
                 let mut last_file: Option<String> = None;
@@ -368,34 +595,37 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                 sleep(Duration::from_secs(15)).await;
                 while start.elapsed() < duration {
                     let (current_file, cur_size, file_exists) = if segmented {
-                        // Usar find para obtener el archivo más reciente (timestamp, size, nombre)
-                        let find_cmd = format!(
-                            "find '{}' -maxdepth 1 -name '{}-*.mp4' -type f -printf '%T@ %s %P\\n' | sort -n | tail -1",
-                            day_dir.display(), date_str
-                        );
-                        if let Ok(output) = Command::new("sh")
-                            .arg("-c")
-                            .arg(&find_cmd)
-                            .output()
-                            .await
-                        {
-                            if output.status.success() {
-                                let stdout = String::from_utf8_lossy(&output.stdout);
-                                if let Some(line) = stdout.lines().last() {
-                                    let mut parts = line.split_whitespace();
-                                    let _timestamp = parts.next();
-                                    if let (Some(size_str), Some(name)) = (parts.next(), parts.next()) {
-                                        let size = size_str.parse::<u64>().unwrap_or(0);
-                                        (name.to_string(), size, true)
-                                    } else {
-                                        (daily_filename.clone(), 0, false)
-                                    }
-                                } else {
-                                    (daily_filename.clone(), 0, false)
+                        let mut latest: Option<(String, std::time::SystemTime, u64)> = None;
+
+                        if let Ok(entries) = fs::read_dir(&day_dir) {
+                            for entry_res in entries {
+                                let Ok(entry) = entry_res else {
+                                    continue;
+                                };
+                                let file_name = entry.file_name().to_string_lossy().to_string();
+                                if !file_name.starts_with(&format!("{}-", date_str))
+                                    || !file_name.ends_with(".mp4")
+                                {
+                                    continue;
                                 }
-                            } else {
-                                (daily_filename.clone(), 0, false)
+
+                                let Ok(metadata) = entry.metadata() else {
+                                    continue;
+                                };
+                                let mtime = metadata
+                                    .modified()
+                                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                                let size = metadata.len();
+
+                                match &latest {
+                                    Some((_, best_time, _)) if mtime <= *best_time => {}
+                                    _ => latest = Some((file_name, mtime, size)),
+                                }
                             }
+                        }
+
+                        if let Some((name, _ts, size)) = latest {
+                            (name, size, true)
                         } else {
                             (daily_filename.clone(), 0, false)
                         }
@@ -425,7 +655,11 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                             log_to_file(
                                 &log_writer_spawn,
                                 "🎞️",
-                                format!("Primer {} de grabación detectado: {}", label, current_path.display()),
+                                format!(
+                                    "Primer {} de grabación detectado: {}",
+                                    label,
+                                    current_path.display()
+                                ),
                             );
                         } else if file_changed {
                             log_to_file(
@@ -475,7 +709,7 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                         }
                     }
 
-                    sleep(Duration::from_secs(30)).await;
+                    sleep(Duration::from_secs(60)).await;
                 }
             }
         });
@@ -493,7 +727,11 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
                         break;
                     }
                     MessageView::Error(err) => {
-                        let error_msg = format!("{}: {}", err.error(), err.debug().unwrap_or_else(|| "".into()));
+                        let error_msg = format!(
+                            "{}: {}",
+                            err.error(),
+                            err.debug().unwrap_or_else(|| "".into())
+                        );
                         eprintln!("❌ Error del pipeline: {}", error_msg);
 
                         // Actualizar estado del sistema con el error
@@ -534,13 +772,27 @@ pub async fn start_camera_pipeline(camera_url: String, state: Arc<AppState>) {
             println!("⏳ Reiniciando por error en 5 segundos...");
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         } else {
+            if let Err(err) = concat_day_recordings(&day_dir, &date_str).await {
+                eprintln!(
+                    "⚠️ Error al concatenar grabaciones del día {}: {}",
+                    date_str, err
+                );
+            }
             println!("🕛 Nuevo día - creando nuevo archivo...");
         }
     }
 }
 
-fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>, writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>) {
-    use std::{env, sync::{Arc, Mutex}, time::{Duration, Instant}};
+fn setup_motion_detection(
+    pipeline: &Pipeline,
+    _state: &Arc<AppState>,
+    writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>,
+) {
+    use std::{
+        env,
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
 
     let detector_sink = pipeline
         .by_name("detector")
@@ -549,22 +801,34 @@ fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>, writer: &
         .unwrap();
 
     // Config desde ENV
-    let diff_min: u8 = env::var("MOTION_PIXEL_DIFF_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
-    let percent_threshold: f32 = env::var("MOTION_PIXEL_PERCENT").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
-    let debounce_ms: u64 = env::var("MOTION_DEBOUNCE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
-    let block_size: usize = env::var("MOTION_BLOCK_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+    let diff_min: u8 = env::var("MOTION_PIXEL_DIFF_MIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    let percent_threshold: f32 = env::var("MOTION_PIXEL_PERCENT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5.0);
+    let debounce_ms: u64 = env::var("MOTION_DEBOUNCE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1500);
+    let block_size: usize = env::var("MOTION_BLOCK_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
     let ignore_rect_env = env::var("MOTION_IGNORE_RECT").ok(); // "x,y,w,h" en coords del frame 320x180
     let ignore_rects_env = env::var("MOTION_IGNORE_RECTS").ok(); // múltiples: "x1,y1,w1,h1;x2,y2,w2,h2"
 
     #[derive(Default)]
     struct BgModel {
-        bg: Vec<f32>, // fondo como float para EMA
+        bg: Vec<f32>,       // fondo como float para EMA
         variance: Vec<f32>, // varianza por píxel para adaptación dinámica
         last_emit: Option<Instant>,
         ignore_rects: Vec<(usize, usize, usize, usize)>, // múltiples zonas ignoradas
         motion_history: Vec<(f32, f32)>, // historial de movimiento (dx, dy) para dirección
-        frame_count: u64, // contador de frames procesados
-        last_frame_brightness: f32, // brillo promedio del frame anterior
+        frame_count: u64,                // contador de frames procesados
+        last_frame_brightness: f32,      // brillo promedio del frame anterior
     }
     let model = Arc::new(Mutex::new(BgModel::default()));
 
@@ -807,7 +1071,11 @@ fn setup_motion_detection(pipeline: &Pipeline, _state: &Arc<AppState>, writer: &
     );
 }
 
-fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>) {
+fn setup_mjpeg_sinks(
+    pipeline: &Pipeline,
+    state: &Arc<AppState>,
+    _writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>,
+) {
     // MJPEG high quality
     let mjpeg_sink = pipeline
         .by_name("mjpeg_sink")
@@ -848,9 +1116,12 @@ fn setup_mjpeg_sinks(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<S
             .build(),
     );
 }
-async fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>) {
-    let audio_sink_app = match pipeline
-        .by_name("audio_mp3_sink") {
+async fn setup_audio_mp3_sink(
+    pipeline: &Pipeline,
+    state: &Arc<AppState>,
+    _writer: &Arc<StdMutex<Option<BufWriter<std::fs::File>>>>,
+) {
+    let audio_sink_app = match pipeline.by_name("audio_mp3_sink") {
         Some(sink) => match sink.downcast::<gst_app::AppSink>() {
             Ok(s) => s,
             Err(_) => {
@@ -902,13 +1173,21 @@ async fn setup_audio_mp3_sink(pipeline: &Pipeline, state: &Arc<AppState>, _write
                             static COUNTER: AtomicU64 = AtomicU64::new(0);
                             let count = COUNTER.fetch_add(1, Ordering::Relaxed);
                             if count % 1000 == 0 {
-                                println!("🎵 Audio MP3: {} bytes enviados (paquete #{})", bytes.len(), count);
+                                println!(
+                                    "🎵 Audio MP3: {} bytes enviados (paquete #{})",
+                                    bytes.len(),
+                                    count
+                                );
                             }
 
                             let bytes_len = bytes.len();
                             // Actualizar estadísticas de audio
-                            state_clone.audio_bytes_sent.fetch_add(bytes_len as u64, Ordering::Relaxed);
-                            state_clone.audio_packets_sent.fetch_add(1, Ordering::Relaxed);
+                            state_clone
+                                .audio_bytes_sent
+                                .fetch_add(bytes_len as u64, Ordering::Relaxed);
+                            state_clone
+                                .audio_packets_sent
+                                .fetch_add(1, Ordering::Relaxed);
 
                             bytes
                         }

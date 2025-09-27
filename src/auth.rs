@@ -12,12 +12,16 @@ use url;
 /// Determina si aplica bypass de autenticación según dominio y secreto.
 fn is_bypass_auth(headers: &HeaderMap, state: &AppState) -> bool {
     // Si no hay dominio configurado, no hay bypass
-    let Some(base) = &state.bypass_base_domain else { return false; };
+    let Some(base) = &state.bypass_base_domain else {
+        return false;
+    };
     let base_str = base.as_str();
 
     // Helper para extraer host de Origin / Referer
     fn extract_host(value: Option<&str>) -> Option<String> {
-        value.and_then(|v| url::Url::parse(v).ok()).and_then(|u| u.host_str().map(|s| s.to_lowercase()))
+        value
+            .and_then(|v| url::Url::parse(v).ok())
+            .and_then(|u| u.host_str().map(|s| s.to_lowercase()))
     }
 
     let host_header = headers
@@ -31,11 +35,18 @@ fn is_bypass_auth(headers: &HeaderMap, state: &AppState) -> bool {
     let origin_host = extract_host(headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()));
     let referer_host = extract_host(headers.get(header::REFERER).and_then(|v| v.to_str().ok()));
 
-    let domain_ok = [host_header.as_ref(), xfh_header.as_ref(), origin_host.as_ref(), referer_host.as_ref()]
-        .iter()
-        .filter_map(|o| o.as_ref())
-        .any(|h| h == &base_str || h.ends_with(&format!(".{base_str}")));
-    if !domain_ok { return false; }
+    let domain_ok = [
+        host_header.as_ref(),
+        xfh_header.as_ref(),
+        origin_host.as_ref(),
+        referer_host.as_ref(),
+    ]
+    .iter()
+    .filter_map(|o| o.as_ref())
+    .any(|h| h == &base_str || h.ends_with(&format!(".{base_str}")));
+    if !domain_ok {
+        return false;
+    }
 
     // Si hay secreto, exigirlo
     if let Some(secret) = &state.bypass_domain_secret {
@@ -232,7 +243,10 @@ where
                         // Auth OK - no log para reducir ruido
                         return Ok(RequireAuth);
                     } else {
-                        eprintln!("🚫 Query token inválido (extractor): {} {} | token_proporcionado='{}'", method, path, tok);
+                        eprintln!(
+                            "🚫 Query token inválido (extractor): {} {} | token_proporcionado='{}'",
+                            method, path, tok
+                        );
                     }
                 } else {
                     eprintln!("🚫 No hay token en query (extractor): {} {}", method, path);
@@ -288,7 +302,14 @@ pub async fn flexible_auth_middleware(
             // Auth OK - no log para reducir ruido
             return next.run(request).await;
         } else {
-            eprintln!("🚫 Header Authorization inválido: {} | header_proporcionado='{}'", uri.path(), headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).unwrap_or(""));
+            eprintln!(
+                "🚫 Header Authorization inválido: {} | header_proporcionado='{}'",
+                uri.path(),
+                headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+            );
         }
     } else {
         // Si NO hay header, verificar token en query
@@ -301,7 +322,11 @@ pub async fn flexible_auth_middleware(
                     // Auth OK - no log para reducir ruido
                     return next.run(request).await;
                 } else {
-                    eprintln!("🚫 Query token inválido: {} | token_proporcionado='{}'", uri.path(), tok);
+                    eprintln!(
+                        "🚫 Query token inválido: {} | token_proporcionado='{}'",
+                        uri.path(),
+                        tok
+                    );
                 }
             } else {
                 eprintln!("🚫 No hay token en query: {}", uri.path());

@@ -7,9 +7,12 @@ pub mod storage;
 pub mod stream;
 
 use bytes::Bytes;
-use std::{path::PathBuf, sync::{Arc, Mutex as StdMutex}};
-use tokio::sync::{broadcast, watch, Mutex};
 use std::sync::atomic::AtomicU64;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex as StdMutex},
+};
+use tokio::sync::{broadcast, watch, Mutex};
 
 // Dependencias de GStreamer
 use gstreamer as gst;
@@ -48,12 +51,42 @@ pub struct StorageStatus {
     pub last_recording: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct DaySummary {
+    pub day: String,
+    #[serde(rename = "length")]
+    pub recording_count: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RecordingEntry {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub last_modified: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
+    #[serde(skip_serializing)]
+    pub day: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct RecordingSnapshot {
+    pub last_scan: Option<chrono::DateTime<chrono::Utc>>,
+    pub total_count: usize,
+    pub last_recording: Option<String>,
+    pub day_summaries: Vec<DaySummary>,
+    #[serde(skip_serializing)]
+    pub latest_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub camera_rtsp_url: String,
     pub camera_onvif_url: String,
     pub proxy_token: String,
     pub storage_path: PathBuf,
+    pub storage_root: PathBuf,
     pub pipeline: Arc<Mutex<Option<gst::Pipeline>>>,
     pub mjpeg_tx: broadcast::Sender<Bytes>,
     pub mjpeg_low_tx: broadcast::Sender<Bytes>,
@@ -75,6 +108,6 @@ pub struct AppState {
     pub bypass_domain_secret: Option<String>,
     // Timestamp de inicio de la aplicación para calcular uptime real
     pub start_time: std::time::SystemTime,
-    // Canal para broadcast de status en tiempo real via WebSocket
-    pub status_tx: broadcast::Sender<serde_json::Value>,
+    // Caché de grabaciones y resúmenes para evitar escaneos costosos en cada request
+    pub recording_snapshot: Arc<Mutex<RecordingSnapshot>>,
 }

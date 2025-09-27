@@ -62,7 +62,10 @@ pub async fn stream_hls_handler(
     headers.insert(axum::http::header::CONTENT_TYPE, ctype.parse().unwrap());
     // CORS headers for streaming
     headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert(
+        "Access-Control-Allow-Methods",
+        "GET, POST, OPTIONS".parse().unwrap(),
+    );
     headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
     resp
 }
@@ -87,7 +90,10 @@ pub async fn stream_webrtc_handler(
     let headers = resp.headers_mut();
     // CORS headers for streaming
     headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert(
+        "Access-Control-Allow-Methods",
+        "GET, POST, OPTIONS".parse().unwrap(),
+    );
     headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
     resp
 }
@@ -156,7 +162,10 @@ pub async fn stream_mjpeg_handler(
     );
     // CORS headers for streaming
     headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert(
+        "Access-Control-Allow-Methods",
+        "GET, POST, OPTIONS".parse().unwrap(),
+    );
     headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
     Ok(resp)
 }
@@ -235,7 +244,10 @@ pub async fn stream_audio_handler(
     headers.insert(axum::http::header::EXPIRES, "0".parse().unwrap());
     // CORS headers for streaming
     headers.insert("Access-Control-Allow-Origin", "*".parse().unwrap());
-    headers.insert("Access-Control-Allow-Methods", "GET, POST, OPTIONS".parse().unwrap());
+    headers.insert(
+        "Access-Control-Allow-Methods",
+        "GET, POST, OPTIONS".parse().unwrap(),
+    );
     headers.insert("Access-Control-Allow-Headers", "*".parse().unwrap());
     headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
     headers.insert("Transfer-Encoding", "chunked".parse().unwrap());
