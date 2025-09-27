@@ -567,8 +567,8 @@ pub async fn get_storage_info(
     match fs2::statvfs(&state.storage_root) {
         Ok(stats) => {
             let total_space = stats.total_space();
-            let free_space = stats.free_space();
-            let used_space = total_space - free_space;
+            let available_space = stats.available_space();
+            let used_space = total_space - available_space;
 
             let info = StorageInfo {
                 total_space_bytes: total_space,
