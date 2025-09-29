@@ -395,8 +395,10 @@ impl CameraPipeline {
         tee_src_pad_live.link(&queue_live_sink_pad).unwrap();
         log::info!("🔧 Linked tee to live queue");
 
-        queue_live.link(&mp4mux).unwrap();
-        log::info!("🔧 Linked live queue to mp4mux");
+        let queue_live_src_pad = queue_live.static_pad("src").unwrap();
+        let mp4mux_video_pad = mp4mux.request_pad_simple("sink_%u").unwrap();
+        queue_live_src_pad.link(&mp4mux_video_pad).unwrap();
+        log::info!("🔧 Linked live queue to mp4mux video pad");
 
         let mp4mux_src_pad = mp4mux.static_pad("src").unwrap();
         let appsink_live_sink_pad = appsink_live.static_pad("sink").unwrap();
