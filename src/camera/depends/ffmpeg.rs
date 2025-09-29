@@ -87,18 +87,27 @@ impl CameraPipeline {
             .map_err(|_| {
                 VigilanteError::GStreamer("Failed to create videorate_mjpeg".to_string())
             })?;
-        let capsfilter_mjpeg = gst::ElementFactory::make("capsfilter")
-            .build()
-            .map_err(|_| {
-                VigilanteError::GStreamer("Failed to create capsfilter_mjpeg".to_string())
-            })?;
-        let mjpeg_caps = gst::Caps::builder("video/x-raw")
+        let capsfilter_mjpeg_size =
+            gst::ElementFactory::make("capsfilter")
+                .build()
+                .map_err(|_| {
+                    VigilanteError::GStreamer("Failed to create capsfilter_mjpeg_size".to_string())
+                })?;
+        let capsfilter_mjpeg_rate =
+            gst::ElementFactory::make("capsfilter")
+                .build()
+                .map_err(|_| {
+                    VigilanteError::GStreamer("Failed to create capsfilter_mjpeg_rate".to_string())
+                })?;
+        let mjpeg_size_caps = gst::Caps::builder("video/x-raw")
             .field("width", 1280i32)
             .field("height", 720i32)
-            .field("framerate", Fraction::new(15, 1))
-            .field("format", "I420")
             .build();
-        capsfilter_mjpeg.set_property("caps", &mjpeg_caps);
+        capsfilter_mjpeg_size.set_property("caps", &mjpeg_size_caps);
+        let mjpeg_rate_caps = gst::Caps::builder("video/x-raw")
+            .field("framerate", Fraction::new(15, 1))
+            .build();
+        capsfilter_mjpeg_rate.set_property("caps", &mjpeg_rate_caps);
 
         let jpegenc = gst::ElementFactory::make("jpegenc")
             .build()
@@ -110,8 +119,6 @@ impl CameraPipeline {
         appsink_mjpeg.set_property("sync", &false);
         appsink_mjpeg.set_max_buffers(1);
         appsink_mjpeg.set_drop(true);
-        let jpeg_caps = gst::Caps::builder("image/jpeg").build();
-        appsink_mjpeg.set_caps(Some(&jpeg_caps));
 
         // Recording branch
         let queue_rec = gst::ElementFactory::make("queue")
@@ -191,7 +198,8 @@ impl CameraPipeline {
                 &videoconvert_mjpeg,
                 &videoscale_mjpeg,
                 &videorate_mjpeg,
-                &capsfilter_mjpeg,
+                &capsfilter_mjpeg_size,
+                &capsfilter_mjpeg_rate,
                 &jpegenc,
                 appsink_mjpeg.upcast_ref(),
                 &queue_rec,
@@ -241,50 +249,54 @@ impl CameraPipeline {
         ])
         .map_err(|_| VigilanteError::GStreamer("Failed to link motion".to_string()))?;
         // Connect motion signal
-        let detector_clone = Arc::clone(&self.motion_detector);
-        let appsink_motion_signal = appsink_motion.clone();
-        appsink_motion.connect("new-sample", false, move |_| {
-            let detector = Arc::clone(&detector_clone);
+        let detector_for_motion = Arc::clone(&self.motion_detector);
+        let motion_callbacks = gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = match sink.pull_sample() {
+                    Ok(sample) => sample,
+                    Err(err) => {
+                        log::warn!("⚠️ Failed to pull motion sample: {:?}", err);
+                        return Err(gst::FlowError::Error);
+                    }
+                };
 
-            let sample = match appsink_motion_signal.pull_sample() {
-                Ok(sample) => sample,
-                Err(err) => {
-                    log::warn!("⚠️ Failed to pull motion sample: {:?}", err);
-                    return Some(gst::FlowReturn::Error.to_value());
-                }
-            };
+                let buffer = match sample.buffer() {
+                    Some(buffer) => buffer,
+                    None => {
+                        log::warn!("⚠️ Motion sample missing buffer");
+                        return Ok(gst::FlowSuccess::Ok);
+                    }
+                };
 
-            let buffer = match sample.buffer() {
-                Some(buffer) => buffer,
-                None => {
-                    log::warn!("⚠️ Motion sample missing buffer");
-                    return Some(gst::FlowReturn::Ok.to_value());
-                }
-            };
+                let map = match buffer.map_readable() {
+                    Ok(map) => map,
+                    Err(err) => {
+                        log::warn!("⚠️ Failed to map motion buffer: {:?}", err);
+                        return Err(gst::FlowError::Error);
+                    }
+                };
 
-            let map = match buffer.map_readable() {
-                Ok(map) => map,
-                Err(err) => {
-                    log::warn!("⚠️ Failed to map motion buffer: {:?}", err);
-                    return Some(gst::FlowReturn::Error.to_value());
-                }
-            };
+                let frame = map.as_slice().to_vec();
+                log::debug!("🚶 Motion frame received, size: {} bytes", frame.len());
+                let detector = Arc::clone(&detector_for_motion);
+                tokio::spawn(async move {
+                    let _ = detector.detect_motion(&frame).await;
+                });
 
-            let frame = map.as_slice().to_vec();
-            tokio::spawn(async move {
-                let _ = detector.detect_motion(&frame).await;
-            });
-
-            Some(gst::FlowReturn::Ok.to_value())
-        });
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build();
+        appsink_motion.set_callbacks(motion_callbacks);
+        log::info!("🚶 Motion appsink callbacks configured");
 
         // Link static parts
         gst::Element::link_many([
             &queue_mjpeg,
             &videoconvert_mjpeg,
             &videoscale_mjpeg,
+            &capsfilter_mjpeg_size,
             &videorate_mjpeg,
-            &capsfilter_mjpeg,
+            &capsfilter_mjpeg_rate,
             &jpegenc,
             appsink_mjpeg.upcast_ref(),
         ])
@@ -294,58 +306,57 @@ impl CameraPipeline {
 
         // Connect MJPEG signal
         let context_weak = Arc::downgrade(&self.context);
-        let appsink_mjpeg_signal = appsink_mjpeg.clone();
-        appsink_mjpeg.connect("new-sample", false, move |_| {
-            let context = match context_weak.upgrade() {
-                Some(c) => c,
-                None => {
-                    log::warn!("📹 MJPEG context dropped, stopping callback");
-                    return Some(gst::FlowReturn::Flushing.to_value());
+        let mjpeg_callbacks = gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let context = match context_weak.upgrade() {
+                    Some(c) => c,
+                    None => {
+                        log::warn!("📹 MJPEG context dropped, stopping callback");
+                        return Err(gst::FlowError::Flushing);
+                    }
+                };
+
+                let sample = match sink.pull_sample() {
+                    Ok(sample) => sample,
+                    Err(err) => {
+                        log::warn!("📹 Failed to pull MJPEG sample: {:?}", err);
+                        return Err(gst::FlowError::Error);
+                    }
+                };
+
+                let buffer = match sample.buffer() {
+                    Some(buffer) => buffer,
+                    None => {
+                        log::warn!("📹 MJPEG sample missing buffer");
+                        return Ok(gst::FlowSuccess::Ok);
+                    }
+                };
+
+                let map = match buffer.map_readable() {
+                    Ok(map) => map,
+                    Err(err) => {
+                        log::warn!("📹 Failed to map MJPEG buffer: {:?}", err);
+                        return Err(gst::FlowError::Error);
+                    }
+                };
+
+                let data = Bytes::copy_from_slice(map.as_slice());
+
+                log::info!("📹 MJPEG frame received, size: {} bytes", data.len());
+
+                match context.streaming.mjpeg_tx.send(data) {
+                    Ok(_) => log::info!("📹 MJPEG frame sent to broadcast channel"),
+                    Err(e) => log::warn!(
+                        "📹 Failed to send MJPEG frame to broadcast channel: {:?}",
+                        e
+                    ),
                 }
-            };
 
-            let sample = match appsink_mjpeg_signal.pull_sample() {
-                Ok(sample) => sample,
-                Err(err) => {
-                    log::warn!("📹 Failed to pull MJPEG sample: {:?}", err);
-                    return Some(gst::FlowReturn::Error.to_value());
-                }
-            };
-
-            let buffer = match sample.buffer() {
-                Some(buffer) => buffer,
-                None => {
-                    log::warn!("📹 MJPEG sample missing buffer");
-                    return Some(gst::FlowReturn::Ok.to_value());
-                }
-            };
-
-            let map = match buffer.map_readable() {
-                Ok(map) => map,
-                Err(err) => {
-                    log::warn!("📹 Failed to map MJPEG buffer: {:?}", err);
-                    return Some(gst::FlowReturn::Error.to_value());
-                }
-            };
-
-            let data = map.as_slice();
-
-            log::info!("📹 MJPEG frame received, size: {} bytes", data.len());
-
-            let result = context
-                .streaming
-                .mjpeg_tx
-                .send(Bytes::copy_from_slice(data));
-            match result {
-                Ok(_) => log::info!("📹 MJPEG frame sent to broadcast channel"),
-                Err(e) => log::warn!(
-                    "📹 Failed to send MJPEG frame to broadcast channel: {:?}",
-                    e
-                ),
-            }
-
-            Some(gst::FlowReturn::Ok.to_value())
-        });
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build();
+        appsink_mjpeg.set_callbacks(mjpeg_callbacks);
+        log::info!("📺 MJPEG appsink callbacks configured");
 
         // Link tee to branches (request source pads from tee)
         let tee_src_pad_mjpeg = tee.request_pad_simple("src_%u").unwrap();
