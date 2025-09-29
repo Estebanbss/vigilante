@@ -132,6 +132,7 @@ impl CameraPipeline {
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create mp4mux".to_string()))?;
         mp4mux.set_property("fragmented", &true);
+        mp4mux.set_property("streamable", &true);
         let appsink_live = gst_app::AppSink::builder().build();
         appsink_live.set_property("emit-signals", &true);
         appsink_live.set_property("sync", &false);
@@ -151,10 +152,10 @@ impl CameraPipeline {
         let audioresample = gst::ElementFactory::make("audioresample")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create audioresample".to_string()))?;
-        let lamemp3enc = gst::ElementFactory::make("lamemp3enc")
+        let voaacenc = gst::ElementFactory::make("voaacenc")
             .build()
-            .map_err(|_| VigilanteError::GStreamer("Failed to create lamemp3enc".to_string()))?;
-        lamemp3enc.set_property("bitrate", 32i32); // Lower bitrate for stability
+            .map_err(|_| VigilanteError::GStreamer("Failed to create voaacenc".to_string()))?;
+        voaacenc.set_property("bitrate", 128000i32); // 128 kbps AAC
         let appsink_audio = gst_app::AppSink::builder().build();
         appsink_audio.set_property("emit-signals", &true);
         appsink_audio.set_property("sync", &false);
@@ -184,7 +185,7 @@ impl CameraPipeline {
                 &alawdec,
                 &audioconvert,
                 &audioresample,
-                &lamemp3enc,
+                &voaacenc,
             ])
             .map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
@@ -193,7 +194,7 @@ impl CameraPipeline {
         let alawdec_clone = alawdec.clone();
         let audioconvert_clone = audioconvert.clone();
         let audioresample_clone = audioresample.clone();
-        let lamemp3enc_clone = lamemp3enc.clone();
+        let voaacenc_clone = voaacenc.clone();
         let mp4mux_clone = mp4mux.clone();
         source.connect_pad_added(move |_, src_pad| {
             log::info!("🔧 RTSP source created new pad: {:?}", src_pad.name());
@@ -228,15 +229,15 @@ impl CameraPipeline {
                                             &alawdec_clone,
                                             &audioconvert_clone,
                                             &audioresample_clone,
-                                            &lamemp3enc_clone,
+                                            &voaacenc_clone,
                                         ]) {
                                             log::error!("🔊 Failed to link audio branch: {:?}", e);
                                         } else {
                                             log::info!("🔊 Successfully linked audio branch");
-                                            // Link lamemp3enc to mp4mux audio pad
+                                            // Link voaacenc to mp4mux audio pad
                                             let mp4mux_audio_pad = mp4mux_clone.request_pad_simple("sink_%u").unwrap();
-                                            let lamemp3enc_src_pad = lamemp3enc_clone.static_pad("src").unwrap();
-                                            if let Err(e) = lamemp3enc_src_pad.link(&mp4mux_audio_pad) {
+                                            let voaacenc_src_pad = voaacenc_clone.static_pad("src").unwrap();
+                                            if let Err(e) = voaacenc_src_pad.link(&mp4mux_audio_pad) {
                                                 log::error!("🔊 Failed to link lamemp3enc to mp4mux: {:?}", e);
                                             } else {
                                                 log::info!("🔊 Successfully linked audio to mp4mux");
@@ -360,7 +361,7 @@ impl CameraPipeline {
 
                 let data = Bytes::copy_from_slice(map.as_slice());
 
-                log::debug!("📹 Live frame received, size: {} bytes", data.len());
+                log::info!("📹 Live MP4 fragment received, size: {} bytes", data.len());
 
                 match context.streaming.mjpeg_tx.send(data) {
                     Ok(_) => log::debug!("📹 Live frame sent to broadcast channel"),
