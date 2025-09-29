@@ -36,8 +36,8 @@ pub struct CameraPipeline {
             .build()
             .map_err(|e| VigilanteError::GStreamer(format!("Failed to create rtspsrc: {}", e)))?;
         source.set_property("location", self.context.camera_rtsp_url());
-        source.set_property("latency", 0i32); // Minimum latency for real-time streaming
-        source.set_property("protocols", 4i32); // GST_RTSP_LOWER_TRANS_TCP = 4
+        source.set_property("latency", 0u32); // Minimum latency for real-time streaming
+        source.set_property("protocols", 4u32); // GST_RTSP_LOWER_TRANS_TCP = 4
         source.set_property("do-rtcp", true);
 
         // Decode - use specific elements instead of decodebin for better control
