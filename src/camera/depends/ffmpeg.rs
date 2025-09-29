@@ -37,13 +37,34 @@ pub struct CameraPipeline {
             .map_err(|e| VigilanteError::GStreamer(format!("Failed to create rtspsrc: {}", e)))?;
         source.set_property("location", self.context.camera_rtsp_url());
 
-        // Decode
-        let decode = gst::ElementFactory::make("decodebin")
+        // Decode - use specific elements instead of decodebin for better control
+        let rtph264depay = gst::ElementFactory::make("rtph264depay")
             .build()
-            .map_err(|e| VigilanteError::GStreamer(format!("Failed to create decodebin: {}", e)))?;
+            .map_err(|e| VigilanteError::GStreamer(format!("Failed to create rtph264depay: {}", e)))?;
+
+        let h264parse = gst::ElementFactory::make("h264parse")
+            .build()
+            .map_err(|e| VigilanteError::GStreamer(format!("Failed to create h264parse: {}", e)))?;
+        h264parse.set_property("config-interval", -1i32);
+
+        let avdec_h264 = gst::ElementFactory::make("avdec_h264")
+            .build()
+            .map_err(|e| VigilanteError::GStreamer(format!("Failed to create avdec_h264: {}", e)))?;
 
         // Tee for branching
         let tee = gst::ElementFactory::make("tee").build().map_err(|_| VigilanteError::GStreamer("Failed to create tee".to_string()))?;
+        pipeline.add_many([&rtph264depay, &h264parse, &avdec_h264]).map_err(|_| VigilanteError::GStreamer("Failed to add decode elements".to_string()))?;
+        gst::Element::link_many([&rtph264depay, &h264parse, &avdec_h264]).map_err(|_| VigilanteError::GStreamer("Failed to link decode chain".to_string()))?;
+
+        // Link source to rtph264depay with caps filter for H264
+        let caps = gst::Caps::builder("application/x-rtp")
+            .field("media", "video")
+            .field("encoding-name", "H264")
+            .build();
+        source.link_filtered(&rtph264depay, &caps).map_err(|_| VigilanteError::GStreamer("Failed to link source to rtph264depay".to_string()))?;
+
+        // Link avdec_h264 directly to tee
+        avdec_h264.link(&tee).map_err(|_| VigilanteError::GStreamer("Failed to link avdec_h264 to tee".to_string()))?;
 
         // MJPEG branch
         let queue_mjpeg = gst::ElementFactory::make("queue").build().map_err(|_| VigilanteError::GStreamer("Failed to create queue_mjpeg".to_string()))?;
@@ -70,8 +91,8 @@ pub struct CameraPipeline {
         // Log recording start
         log::info!("📹 Grabación iniciada: {}", path.display());
 
-        // Add elements
-        pipeline.add_many([&source, &decode, &tee, &queue_mjpeg, &videoconvert_mjpeg, &jpegenc, &appsink_mjpeg, &queue_rec, &videoconvert_rec, &x264enc, &mp4mux, &filesink]).map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
+        // Add elements (update to include new decode elements)
+        pipeline.add_many([&source, &rtph264depay, &h264parse, &avdec_h264, &tee, &queue_mjpeg, &videoconvert_mjpeg, &jpegenc, &appsink_mjpeg, &queue_rec, &videoconvert_rec, &x264enc, &mp4mux, &filesink]).map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
         // Motion branch
         let queue_motion = gst::ElementFactory::make("queue").build().map_err(|_| VigilanteError::GStreamer("Failed to create queue_motion".to_string()))?;
@@ -142,36 +163,7 @@ pub struct CameraPipeline {
         tee_src_pad_motion.link(&queue_motion_sink_pad).unwrap();
         log::info!("🔧 Linked tee to motion queue");
 
-        // Link source to decode
-        source.link(&decode).map_err(|_| "Failed to link source to decode")?;
-        log::info!("🔧 Linked source to decode");
-
-        // Set up async pad linking for decode -> tee
-        let tee_clone = tee.clone();
-        let tee_weak = Arc::downgrade(&Arc::new(tee_clone));
-        decode.connect_pad_added(move |_, src_pad| {
-            let tee_weak = tee_weak.clone();
-            if let Some(tee) = tee_weak.upgrade() {
-                log::info!("🔧 Decode created new source pad, linking to tee");
-                let tee_sink = tee.request_pad_simple("sink_%u").unwrap();
-                if let Err(e) = src_pad.link(&tee_sink) {
-                    log::error!("🔧 Failed to link decode src to tee sink: {:?}", e);
-                } else {
-                    log::info!("🔧 Successfully linked decode src to tee sink");
-                }
-            }
-        });
-
-        // Also try to link any existing pads immediately
-        for pad in decode.src_pads() {
-            log::info!("🔧 Found existing decode source pad, linking to tee");
-            let tee_sink = tee.request_pad_simple("sink_%u").unwrap();
-            if let Err(e) = pad.link(&tee_sink) {
-                log::error!("🔧 Failed to link existing decode src to tee sink: {:?}", e);
-            } else {
-                log::info!("🔧 Successfully linked existing decode src to tee sink");
-            }
-        }
+        // Link is now done directly: avdec_h264 -> tee
 
         // Store pipeline locally and set running flag
         log::info!("🔧 About to set pipeline running flag");
@@ -179,6 +171,7 @@ pub struct CameraPipeline {
         log::info!("🔧 Pipeline stored locally, about to set flag");
         *self.context.gstreamer.pipeline_running.lock().unwrap() = true;
         log::info!("🔧 Pipeline running flag set to true successfully");
+        log::info!("🔧 warm_up function completed successfully");
         Ok(())
     }
 
