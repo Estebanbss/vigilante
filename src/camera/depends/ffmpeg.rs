@@ -189,6 +189,10 @@ impl CameraPipeline {
             ])
             .map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
+        pipeline.set_state(gst::State::Ready).map_err(|_| {
+            VigilanteError::GStreamer("Failed to set pipeline to Ready".to_string())
+        })?;
+
         let rtph264depay_clone = rtph264depay.clone();
         let rtppcmadepay_clone = rtppcmadepay.clone();
         let alawdec_clone = alawdec.clone();
