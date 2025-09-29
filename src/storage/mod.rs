@@ -13,15 +13,23 @@ pub use depends::snapshot::SnapshotManager;
 use crate::error::VigilanteError;
 use crate::AppState;
 use crate::RecordingEntry;
+use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
+use axum::Json;
 use chrono;
+use log::warn;
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
+
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 
 #[derive(Serialize)]
 pub struct DayRecordings {
@@ -62,6 +70,165 @@ impl Default for RecordingState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct StorageInfoInner {
+    pub storage_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_space_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_space_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub free_space_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_space_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct RecordingSnapshotInfo {
+    pub total_files: usize,
+    pub total_size_bytes: u64,
+    pub days_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_scan_utc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_recording: Option<String>,
+    pub day_summaries: Vec<crate::DaySummary>,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct StorageInfoResponse {
+    pub storage_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_space_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_space_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub free_space_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_space_bytes: Option<u64>,
+    pub total_files: usize,
+    pub days_count: usize,
+    pub total_recorded_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_scan_utc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_recording: Option<String>,
+    pub storage_info: StorageInfoInner,
+    pub recording_snapshot: RecordingSnapshotInfo,
+}
+
+fn gather_disk_usage(storage_path: &std::path::Path) -> StorageInfoInner {
+    let path_string = storage_path.display().to_string();
+
+    #[cfg(unix)]
+    {
+        let c_path = match CString::new(storage_path.as_os_str().as_bytes()) {
+            Ok(cstr) => cstr,
+            Err(err) => {
+                warn!(
+                    "storage::gather_disk_usage: failed to convert path {} to CString: {}",
+                    path_string, err
+                );
+                return StorageInfoInner {
+                    storage_path: path_string,
+                    ..Default::default()
+                };
+            }
+        };
+
+        unsafe {
+            let mut stat: libc::statvfs = std::mem::zeroed();
+            if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
+                let block_size = stat.f_frsize as u64;
+                let total = stat.f_blocks as u64 * block_size;
+                let free = stat.f_bfree as u64 * block_size;
+                let available = stat.f_bavail as u64 * block_size;
+                let used = total.saturating_sub(free);
+
+                return StorageInfoInner {
+                    storage_path: path_string,
+                    total_space_bytes: Some(total),
+                    used_space_bytes: Some(used),
+                    free_space_bytes: Some(free),
+                    available_space_bytes: Some(available),
+                };
+            } else {
+                let err = std::io::Error::last_os_error();
+                warn!(
+                    "storage::gather_disk_usage: statvfs failed for {}: {}",
+                    path_string, err
+                );
+            }
+        }
+    }
+
+    StorageInfoInner {
+        storage_path: path_string,
+        ..Default::default()
+    }
+}
+
+fn gather_recording_snapshot(snapshot: &crate::RecordingSnapshot) -> RecordingSnapshotInfo {
+    let last_scan = snapshot.last_scan.map(|dt| dt.to_rfc3339());
+    let last_recording = snapshot.last_recording.clone();
+
+    RecordingSnapshotInfo {
+        total_files: snapshot.total_count,
+        total_size_bytes: snapshot.total_size_bytes,
+        days_count: snapshot.day_summaries.len(),
+        last_scan_utc: last_scan,
+        last_recording,
+        day_summaries: snapshot.day_summaries.clone(),
+    }
+}
+
+fn build_storage_response(
+    storage_path: &std::path::Path,
+    snapshot: &crate::RecordingSnapshot,
+) -> StorageInfoResponse {
+    let storage_info = gather_disk_usage(storage_path);
+    let recording_snapshot = gather_recording_snapshot(snapshot);
+
+    StorageInfoResponse {
+        storage_path: storage_info.storage_path.clone(),
+        total_space_bytes: storage_info.total_space_bytes,
+        used_space_bytes: storage_info.used_space_bytes,
+        free_space_bytes: storage_info.free_space_bytes,
+        available_space_bytes: storage_info.available_space_bytes,
+        total_files: recording_snapshot.total_files,
+        days_count: recording_snapshot.days_count,
+        total_recorded_bytes: recording_snapshot.total_size_bytes,
+        last_scan_utc: recording_snapshot.last_scan_utc.clone(),
+        last_recording: recording_snapshot.last_recording.clone(),
+        storage_info,
+        recording_snapshot,
+    }
+}
+
+async fn storage_response_from_state(state: &Arc<AppState>) -> StorageInfoResponse {
+    let storage_path = state.storage_path().clone();
+    let snapshot = state.system.recording_snapshot.lock().await.clone();
+    build_storage_response(&storage_path, &snapshot)
+}
+
+pub async fn storage_overview(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<StorageInfoResponse>, VigilanteError> {
+    Ok(Json(storage_response_from_state(&state).await))
+}
+
+pub async fn storage_info(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<StorageInfoResponse>, VigilanteError> {
+    Ok(Json(storage_response_from_state(&state).await))
+}
+
+pub async fn system_storage_info(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<StorageInfoResponse>, VigilanteError> {
+    Ok(Json(storage_response_from_state(&state).await))
 }
 
 /// Manager principal para almacenamiento.

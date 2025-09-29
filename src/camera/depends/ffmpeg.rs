@@ -14,6 +14,7 @@ use gstreamer_app as gst_app;
 use gstreamer_rtsp::RTSPLowerTrans;
 use std::sync::Arc;
 use tokio;
+use tokio::runtime::Handle;
 
 pub struct CameraPipeline {
     pub pipeline: Option<gst::Pipeline>,
@@ -88,6 +89,8 @@ impl CameraPipeline {
         filesink.set_property("sync", &false);
 
         log::info!("📹 Grabación iniciada: {}", path.display());
+
+        let runtime_handle = Handle::current();
 
         let queue_motion = gst::ElementFactory::make("queue")
             .build()
@@ -270,6 +273,7 @@ impl CameraPipeline {
         .map_err(|_| VigilanteError::GStreamer("Failed to link MJPEG branch".to_string()))?;
 
         let detector_for_motion = Arc::clone(&self.motion_detector);
+        let motion_handle = runtime_handle.clone();
         let motion_callbacks = gst_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
                 let sample = match sink.pull_sample() {
@@ -299,7 +303,7 @@ impl CameraPipeline {
                 let frame = map.as_slice().to_vec();
                 log::debug!("🚶 Motion frame received, size: {} bytes", frame.len());
                 let detector = Arc::clone(&detector_for_motion);
-                tokio::spawn(async move {
+                let _ = motion_handle.spawn(async move {
                     let _ = detector.detect_motion(&frame).await;
                 });
 

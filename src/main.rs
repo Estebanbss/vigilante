@@ -135,7 +135,7 @@ use logs::{get_log_entries_handler, stream_logs_sse};
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
     delete_recording, recordings_by_day, recordings_summary_ws, refresh_recording_snapshot,
-    storage_stream_sse, stream_live_recording,
+    storage_info, storage_overview, storage_stream_sse, stream_live_recording, system_storage_info,
 };
 use stream::{stream_audio_handler, stream_mjpeg_handler};
 use vigilante::status::get_system_status;
@@ -454,6 +454,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/logs/entries/:date", get(get_log_entries_handler))
         .route("/api/recordings/summary", get(recordings_summary_ws))
         .route("/api/recordings/day/:date", get(recordings_by_day))
+        .route("/api/storage", get(storage_overview))
+        .route("/api/storage/info", get(storage_info))
+        .route("/api/system/storage", get(system_storage_info))
         .route("/api/storage/stream", get(storage_stream_sse))
         .route("/api/recordings/stream/*path", get(stream_live_recording))
         .route("/api/recordings/delete/*path", delete(delete_recording))
