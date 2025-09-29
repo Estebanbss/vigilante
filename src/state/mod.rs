@@ -33,7 +33,8 @@ pub struct StreamingState {
     pub audio_mp3_tx: broadcast::Sender<bytes::Bytes>,
     pub audio_available: Arc<StdMutex<bool>>,
     pub last_audio_timestamp: Arc<StdMutex<Option<std::time::Instant>>>,
-    pub mp4_init_segment: Arc<StdMutex<Option<Bytes>>>,
+    pub mp4_init_segments: Arc<StdMutex<Vec<Bytes>>>,
+    pub mp4_init_complete: Arc<StdMutex<bool>>,
 }
 
 /// Estado de logging

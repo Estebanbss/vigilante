@@ -396,7 +396,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio_mp3_tx,
         audio_available: Arc::new(StdMutex::new(false)),
         last_audio_timestamp: Arc::new(StdMutex::new(None)),
-        mp4_init_segment: Arc::new(StdMutex::new(None)),
+        mp4_init_segments: Arc::new(StdMutex::new(Vec::new())),
+        mp4_init_complete: Arc::new(StdMutex::new(false)),
     });
 
     let logging_state = Arc::new(state::LoggingState {

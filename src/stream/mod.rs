@@ -132,23 +132,36 @@ pub async fn stream_mjpeg_handler(
         }
     }
 
-    let init_segment = {
-        let guard = state.streaming.mp4_init_segment.lock().unwrap();
-        guard.clone()
+    let init_segments = {
+        let segments_guard = state.streaming.mp4_init_segments.lock().unwrap();
+        segments_guard.clone()
+    };
+    let init_complete = {
+        let complete_guard = state.streaming.mp4_init_complete.lock().unwrap();
+        *complete_guard
     };
 
     let mut broadcast_stream = BroadcastStream::new(state.streaming.mjpeg_tx.subscribe());
     log::info!("📺 MP4 stream handler: subscribed to broadcast channel");
 
     let stream = async_stream::stream! {
-        if let Some(init) = init_segment {
+        if !init_segments.is_empty() {
             log::debug!(
-                "📺 Sending MP4 init segment to new client ({} bytes)",
-                init.len()
+                "📺 Sending {} cached MP4 init fragments to new client (total {} bytes, complete: {})",
+                init_segments.len(),
+                init_segments.iter().map(|seg| seg.len()).sum::<usize>(),
+                init_complete
             );
-            yield Ok::<_, Infallible>(init);
+            for segment in init_segments {
+                yield Ok::<_, Infallible>(segment);
+            }
+            if !init_complete {
+                log::warn!(
+                    "📺 MP4 init sequence sent but marked incomplete; client may see delayed start"
+                );
+            }
         } else {
-            log::warn!("📺 Client connected before MP4 init segment was available");
+            log::warn!("📺 Client connected before MP4 init fragments were available");
         }
 
         while let Some(result) = broadcast_stream.next().await {

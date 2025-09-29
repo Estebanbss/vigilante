@@ -37,20 +37,28 @@ impl CameraPipeline {
         let pipeline = gst::Pipeline::new();
 
         {
-            let mut init_guard = self
+            let mut segments_guard = self
                 .context
                 .streaming
-                .mp4_init_segment
+                .mp4_init_segments
                 .lock()
                 .unwrap();
-            *init_guard = None;
+            segments_guard.clear();
+
+            let mut complete_guard = self
+                .context
+                .streaming
+                .mp4_init_complete
+                .lock()
+                .unwrap();
+            *complete_guard = false;
         }
 
         let source = gst::ElementFactory::make("rtspsrc")
             .build()
             .map_err(|e| VigilanteError::GStreamer(format!("Failed to create rtspsrc: {}", e)))?;
         source.set_property("location", self.context.camera_rtsp_url());
-    source.set_property("latency", 500u32);
+        source.set_property("latency", 500u32);
         source.set_property("protocols", RTSPLowerTrans::TCP);
         source.set_property("do-rtcp", true);
 
@@ -418,15 +426,35 @@ impl CameraPipeline {
                 let data = Bytes::copy_from_slice(map.as_slice());
 
                 {
-                    let mut init_guard = context.streaming.mp4_init_segment.lock().unwrap();
-                    if init_guard.is_none() {
-                        let slice = data.as_ref();
-                        let has_ftyp = slice.windows(4).any(|w| w == b"ftyp");
-                        let has_moov = slice.windows(4).any(|w| w == b"moov");
-                        if has_ftyp || has_moov {
-                            *init_guard = Some(data.clone());
+                    let slice = data.as_ref();
+                    let has_ftyp = slice.windows(4).any(|w| w == b"ftyp");
+                    let has_moov = slice.windows(4).any(|w| w == b"moov");
+
+                    let mut segments_guard = context
+                        .streaming
+                        .mp4_init_segments
+                        .lock()
+                        .unwrap();
+                    let mut complete_guard = context
+                        .streaming
+                        .mp4_init_complete
+                        .lock()
+                        .unwrap();
+
+                    if !*complete_guard {
+                        segments_guard.push(data.clone());
+
+                        if has_moov {
+                            *complete_guard = true;
+                            let total_size: usize = segments_guard.iter().map(|b| b.len()).sum();
                             log::info!(
-                                "📦 Segmento MP4 inicial cacheado ({} bytes)",
+                                "📦 Segmentos MP4 iniciales cacheados ({} fragmentos, {} bytes)",
+                                segments_guard.len(),
+                                total_size
+                            );
+                        } else if has_ftyp {
+                            log::info!(
+                                "📦 Fragmento ftyp cacheado ({} bytes)",
                                 slice.len()
                             );
                         }
