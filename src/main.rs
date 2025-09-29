@@ -113,7 +113,7 @@ impl BroadcastLogger {
                 if let Some(body_start) = remaining.find("[body:") {
                     if let Some(body_end) = remaining[body_start..].find("]") {
                         let body_str = &remaining[body_start+6..body_start+body_end];
-                        if !body_str.is_empty() {
+                        if !body_str.is_empty() && body_str != "null" {
                             response_body = Some(body_str.to_string());
                         }
                     }
@@ -215,7 +215,7 @@ async fn log_requests(req: Request<Body>, next: Next) -> Response {
         status.as_u16(),
         elapsed.as_millis(),
         response_size,
-        response_body.as_deref().unwrap_or("")
+        response_body.as_deref().unwrap_or("null")
     );
 
     // Incrementar métricas
