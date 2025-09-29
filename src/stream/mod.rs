@@ -82,7 +82,7 @@ pub async fn stream_audio_handler(State(state): State<Arc<crate::AppState>>) -> 
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "audio/wav")
+        .header(header::CONTENT_TYPE, "audio/L16; rate=8000; channels=1")
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::CONNECTION, "close")
         .body(body)
