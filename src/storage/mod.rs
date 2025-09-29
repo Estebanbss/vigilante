@@ -18,6 +18,7 @@ use axum::http::{StatusCode, header};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use std::sync::Mutex;
+use chrono;
 use serde::Serialize;
 use crate::error::VigilanteError;
 
@@ -148,7 +149,88 @@ async fn count_recordings_in_day(day_path: &std::path::Path) -> Result<usize, Vi
     Ok(count)
 }
 
-pub async fn refresh_recording_snapshot(_state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn calculate_directory_size(day_path: &std::path::Path) -> Result<u64, VigilanteError> {
+    let mut entries = tokio::fs::read_dir(day_path)
+        .await
+        .map_err(|e| VigilanteError::Io(e))?;
+
+    let mut total_size = 0u64;
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| VigilanteError::Io(e))? {
+        let path = entry.path();
+
+        // Sumar tamaño de archivos con extensiones de video
+        if path.is_file() {
+            if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
+                match extension {
+                    "mkv" | "mp4" | "avi" | "mov" | "flv" | "wmv" => {
+                        if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                            total_size += metadata.len();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(total_size)
+}
+
+pub async fn refresh_recording_snapshot(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let storage_path = state.storage_path();
+
+    // Leer las carpetas del directorio raíz (cada carpeta es un día)
+    let mut entries = tokio::fs::read_dir(storage_path)
+        .await
+        .map_err(|e| VigilanteError::Io(e))?;
+
+    let mut total_count = 0;
+    let mut total_size_bytes = 0u64;
+    let mut day_summaries = Vec::new();
+    let mut latest_timestamp = None;
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| VigilanteError::Io(e))? {
+        let path = entry.path();
+
+        // Solo procesar directorios (días)
+        if path.is_dir() {
+            if let Some(day_name) = path.file_name().and_then(|n| n.to_str()) {
+                // Contar archivos de grabación en esta carpeta
+                let recording_count = count_recordings_in_day(&path).await?;
+                let day_size = calculate_directory_size(&path).await?;
+
+                total_count += recording_count;
+                total_size_bytes += day_size;
+
+                day_summaries.push(crate::DaySummary {
+                    day: day_name.to_string(),
+                    recording_count,
+                });
+
+                // Actualizar timestamp más reciente si encontramos archivos
+                if recording_count > 0 {
+                    if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                        if let Ok(modified) = metadata.modified() {
+                            let dt = chrono::DateTime::<chrono::Utc>::from(modified);
+                            if latest_timestamp.is_none() || dt > latest_timestamp.unwrap() {
+                                latest_timestamp = Some(dt);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Actualizar el snapshot
+    let mut snapshot = state.system.recording_snapshot.lock().await;
+    snapshot.last_scan = Some(chrono::Utc::now());
+    snapshot.total_count = total_count;
+    snapshot.total_size_bytes = total_size_bytes;
+    snapshot.day_summaries = day_summaries;
+    snapshot.latest_timestamp = latest_timestamp;
+
     Ok(())
 }
 pub async fn storage_stream_sse() -> impl axum::response::IntoResponse { "OK" }

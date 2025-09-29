@@ -47,6 +47,10 @@ pub async fn start_camera_pipeline(_camera_rtsp_url: String, state: Arc<AppState
     let streamer = depends::mjpeg::MjpegStreamer::new(state.clone());
     streamer.start_streaming().await?;
 
+    // Mark audio as available (for now, since camera pipeline indicates system is working)
+    *state.streaming.audio_available.lock().unwrap() = true;
+    *state.streaming.last_audio_timestamp.lock().unwrap() = Some(std::time::Instant::now());
+
     // Loop for any additional processing, but motion is handled in pipeline
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;

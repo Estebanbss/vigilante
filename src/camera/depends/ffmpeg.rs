@@ -127,8 +127,9 @@ pub struct CameraPipeline {
         // Link source to decode
         source.link(&decode).map_err(|_| "Failed to link source to decode")?;
 
-        // Store pipeline
-        self.pipeline = Some(pipeline);
+        // Store pipeline locally and in AppState
+        self.pipeline = Some(pipeline.clone());
+        *self.context.gstreamer.pipeline.lock().await = Some(pipeline);
         Ok(())
     }
 
