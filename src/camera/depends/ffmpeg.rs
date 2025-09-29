@@ -404,10 +404,8 @@ impl CameraPipeline {
         queue_live_src_pad.link(&mp4mux_video_pad).unwrap();
         log::info!("🔧 Linked live queue to mp4mux video pad");
 
-        let mp4mux_src_pad = mp4mux.static_pad("src").unwrap();
-        let appsink_live_sink_pad = appsink_live.static_pad("sink").unwrap();
-        mp4mux_src_pad.link(&appsink_live_sink_pad).unwrap();
-        log::info!("🔧 Linked mp4mux src to live appsink sink");
+        mp4mux.link(&appsink_live).unwrap();
+        log::info!("🔧 Linked mp4mux to live appsink");
 
         log::info!("🔧 About to set pipeline running flag");
         self.pipeline = Some(pipeline.clone());
