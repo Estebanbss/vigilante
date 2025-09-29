@@ -195,11 +195,12 @@ impl CameraPipeline {
         let lamemp3enc = gst::ElementFactory::make("lamemp3enc")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create lamemp3enc".to_string()))?;
+        lamemp3enc.set_property("bitrate", 64000i32); // 64 kbps for better quality
         let appsink_audio = gst_app::AppSink::builder().build();
         appsink_audio.set_property("emit-signals", &true);
         appsink_audio.set_property("sync", &false);
-        appsink_audio.set_max_buffers(1);
-        appsink_audio.set_drop(true);
+        appsink_audio.set_max_buffers(5); // Allow more buffers
+        appsink_audio.set_drop(false); // Don't drop buffers
 
         pipeline
             .add_many([
