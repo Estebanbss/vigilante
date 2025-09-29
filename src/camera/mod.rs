@@ -36,7 +36,10 @@ impl Default for CameraManager {
 }
 
 pub async fn start_camera_pipeline(_camera_rtsp_url: String, state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // gst::init()?; // Already called in main.rs
+    // Set pipeline running flag immediately when task starts
+    log::info!("🔧 Camera pipeline task started, setting pipeline_running=true");
+    *state.gstreamer.pipeline_running.lock().unwrap() = true;
+    log::info!("🔧 Pipeline running flag set at task start");
 
     let detector = Arc::new(depends::motion::MotionDetector::new(state.clone()));
     let mut pipeline = depends::ffmpeg::CameraPipeline::new(state.clone(), Arc::clone(&detector));
