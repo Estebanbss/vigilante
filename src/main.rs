@@ -30,27 +30,22 @@ impl log::Log for BroadcastLogger {
 
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
-            let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            let level = record.level().to_string();
+            let timestamp = chrono::Utc::now().format("%H:%M:%S").to_string();
             let message = record.args().to_string();
 
             // Try to parse as structured log, otherwise use generic format
-            let json_log = if message.starts_with("→ ") || message.starts_with("← ") {
+            let log_line = if message.starts_with("→ ") || message.starts_with("← ") {
                 // Structured request/response log
-                self.parse_request_response_log(&timestamp, &level, &message)
+                self.parse_request_response_log(&timestamp, &message)
             } else {
                 // Generic log
-                serde_json::json!({
-                    "timestamp": timestamp,
-                    "level": level,
-                    "message": message
-                }).to_string()
+                format!("[{}] {}", timestamp, message)
             };
 
             // Print to stdout
-            println!("{}", json_log);
+            println!("{}", log_line);
             // Send to channel
-            let _ = self.tx.send(json_log);
+            let _ = self.tx.send(log_line);
         }
     }
 
@@ -58,7 +53,7 @@ impl log::Log for BroadcastLogger {
 }
 
 impl BroadcastLogger {
-    fn parse_request_response_log(&self, timestamp: &str, level: &str, message: &str) -> String {
+    fn parse_request_response_log(&self, timestamp: &str, message: &str) -> String {
         if let Some(stripped) = message.strip_prefix("→ ") {
             // Request: "→ GET /api/live/mjpeg?token=abc"
             let parts: Vec<&str> = stripped.split_whitespace().collect();
@@ -66,25 +61,10 @@ impl BroadcastLogger {
                 let method = parts[0];
                 let full_uri = parts[1..].join(" ");
                 // Parse URI and query
-                if let Some((path, query)) = full_uri.split_once('?') {
-                    return serde_json::json!({
-                        "timestamp": timestamp,
-                        "level": level,
-                        "request": {
-                            "method": method,
-                            "uri": path,
-                            "query": query
-                        }
-                    }).to_string();
+                if let Some((path, _query)) = full_uri.split_once('?') {
+                    return format!("[{}] → {} {}", timestamp, method, path);
                 } else {
-                    return serde_json::json!({
-                        "timestamp": timestamp,
-                        "level": level,
-                        "request": {
-                            "method": method,
-                            "uri": full_uri
-                        }
-                    }).to_string();
+                    return format!("[{}] → {} {}", timestamp, method, full_uri);
                 }
             }
         } else if let Some(stripped) = message.strip_prefix("← ") {
@@ -99,46 +79,44 @@ impl BroadcastLogger {
                 let duration_ms = duration_str.parse::<u64>().unwrap_or(0);
                 
                 // Parse size and body from the remaining parts
-                let mut response_size = 0u64;
-                let mut response_body = None;
+                let mut response_body = String::new();
                 
                 // Find [size: ...] and [body: ...] in the message
                 let remaining = parts[parts.len()-1..].join(" ");
                 if let Some(size_start) = remaining.find("[size:") {
                     if let Some(size_end) = remaining[size_start..].find("]") {
-                        let size_str = &remaining[size_start+6..size_start+size_end];
-                        response_size = size_str.parse::<u64>().unwrap_or(0);
+                        let _size_str = &remaining[size_start+6..size_start+size_end];
                     }
                 }
                 if let Some(body_start) = remaining.find("[body:") {
                     if let Some(body_end) = remaining[body_start..].find("]") {
                         let body_str = &remaining[body_start+6..body_start+body_end];
                         if !body_str.is_empty() && body_str != "null" {
-                            response_body = Some(body_str.to_string());
+                            response_body = body_str.to_string();
                         }
                     }
                 }
                 
-                return serde_json::json!({
-                    "timestamp": timestamp,
-                    "level": level,
-                    "response": {
-                        "method": method,
-                        "uri": uri,
-                        "status": status,
-                        "duration_ms": duration_ms,
-                        "response_size": response_size,
-                        "response_body": response_body
-                    }
-                }).to_string();
+                let status_text = match status {
+                    200 => "éxito",
+                    404 => "no encontrado",
+                    401 => "no autorizado",
+                    500 => "error interno",
+                    _ => "desconocido"
+                };
+                
+                let body_display = if response_body.is_empty() { 
+                    "".to_string() 
+                } else { 
+                    format!(" body: {}", response_body) 
+                };
+                
+                return format!("[{}] ← {} {} - {} ({}ms){}", 
+                    timestamp, method, uri, status_text, duration_ms, body_display);
             }
         }
         // Fallback
-        serde_json::json!({
-            "timestamp": timestamp,
-            "level": level,
-            "message": message
-        }).to_string()
+        format!("[{}] {}", timestamp, message)
     }
 }
 

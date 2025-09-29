@@ -30,21 +30,49 @@ impl SystemStatus {
             let pipeline_lock = state.gstreamer.pipeline.lock().await;
             pipeline_lock.is_some()
         };
-        pipeline_active
+
+        // Si el pipeline está activo, la cámara funciona
+        if pipeline_active {
+            return true;
+        }
+
+        // Si no hay pipeline activo, verificar si hay grabaciones recientes
+        // Esto indica que la cámara funcionó recientemente
+        let snapshot = state.system.recording_snapshot.lock().await.clone();
+        let now = chrono::Utc::now();
+        let recent_threshold = chrono::Duration::minutes(30); // Últimos 30 minutos
+
+        if let Some(latest_ts) = snapshot.latest_timestamp {
+            let time_diff = now.signed_duration_since(latest_ts);
+            time_diff <= recent_threshold
+        } else {
+            false
+        }
     }
 
     async fn check_audio(&self, state: &Arc<AppState>) -> bool {
-        // Verificar si el audio está disponible y tiene datos recientes
-        let available = *state.streaming.audio_available.lock().unwrap();
-
-        // Verificar si hay datos de audio recientes (últimos 30 segundos)
-        let has_recent_data = if let Some(last_ts) = *state.streaming.last_audio_timestamp.lock().unwrap() {
-            last_ts.elapsed() < std::time::Duration::from_secs(30)
-        } else {
-            false
+        // Verificar si hay datos de audio disponibles actualmente
+        let audio_available = {
+            let audio_lock = state.streaming.audio_available.lock().unwrap();
+            *audio_lock
         };
 
-        available && has_recent_data
+        if audio_available {
+            return true;
+        }
+
+        // Si no hay audio disponible actualmente, verificar si hay grabaciones recientes
+        // Esto indica que el audio funcionó recientemente (ya que las grabaciones incluyen audio)
+        let snapshot = state.system.recording_snapshot.lock().await.clone();
+        let now = chrono::Utc::now();
+        let recent_threshold = chrono::Duration::minutes(30); // Últimos 30 minutos
+
+        if let Some(latest_ts) = snapshot.latest_timestamp {
+            let time_diff = now.signed_duration_since(latest_ts);
+            time_diff <= recent_threshold
+        } else {
+            false
+        }
     }
 
     async fn check_recordings(&self, state: &Arc<AppState>) -> bool {
@@ -52,6 +80,16 @@ impl SystemStatus {
         let snapshot = state.system.recording_snapshot.lock().await.clone();
 
         // Considerar que funciona si hay al menos una grabación
-        snapshot.total_count > 0
+        if snapshot.total_count > 0 {
+            let now = chrono::Utc::now();
+            let recent_threshold = chrono::Duration::hours(24); // Últimas 24 horas
+
+            if let Some(latest_ts) = snapshot.latest_timestamp {
+                let time_diff = now.signed_duration_since(latest_ts);
+                return time_diff <= recent_threshold;
+            }
+        }
+
+        false
     }
 }

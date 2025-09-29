@@ -67,6 +67,9 @@ pub struct CameraPipeline {
         let path = dir.join(&filename);
         filesink.set_property("location", path.to_str().unwrap());
 
+        // Log recording start
+        log::info!("📹 Grabación iniciada: {}", path.display());
+
         // Add elements
         pipeline.add_many([&source, &decode, &tee, &queue_mjpeg, &videoconvert_mjpeg, &jpegenc, &appsink_mjpeg, &queue_rec, &videoconvert_rec, &x264enc, &mp4mux, &filesink]).map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
@@ -136,6 +139,29 @@ pub struct CameraPipeline {
     pub async fn start_recording(&self) -> Result<()> {
         if let Some(ref pipeline) = self.pipeline {
             pipeline.set_state(gst::State::Playing).map_err(|_| VigilanteError::GStreamer("Failed to start pipeline".to_string()))?;
+            
+            // Start periodic recording status logging
+            let context = Arc::clone(&self.context);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // Every 5 minutes
+                loop {
+                    interval.tick().await;
+                    // Check if recording file exists and log its status
+                    let timestamp = crate::camera::depends::utils::CameraUtils::format_timestamp();
+                    let date = timestamp.split('_').next().unwrap();
+                    let dir = context.storage_path().join(date);
+                    let filename = format!("{}.mkv", date);
+                    let path = dir.join(&filename);
+                    
+                    if path.exists() {
+                        if let Ok(metadata) = std::fs::metadata(&path) {
+                            let size_mb = metadata.len() / (1024 * 1024);
+                            log::info!("✅ Archivo creciendo: {} ({} MB) - path: {}", filename, size_mb, path.display());
+                        }
+                    }
+                }
+            });
+            
             Ok(())
         } else {
             Err(VigilanteError::GStreamer("Pipeline not warmed up".to_string()))
