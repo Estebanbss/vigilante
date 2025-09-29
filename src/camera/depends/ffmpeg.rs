@@ -179,10 +179,16 @@ impl CameraPipeline {
         appsink_mjpeg.set_max_buffers(1);
         appsink_mjpeg.set_drop(true);
 
-        // Audio elements
-        let rtpopusdepay = gst::ElementFactory::make("rtpopusdepay")
+        // Audio elements (assuming AAC)
+        let rtpmp4adepay = gst::ElementFactory::make("rtpmp4adepay")
             .build()
-            .map_err(|_| VigilanteError::GStreamer("Failed to create rtpopusdepay".to_string()))?;
+            .map_err(|_| VigilanteError::GStreamer("Failed to create rtpmp4adepay".to_string()))?;
+        let aacparse = gst::ElementFactory::make("aacparse")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create aacparse".to_string()))?;
+        let avdec_aac = gst::ElementFactory::make("avdec_aac")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create avdec_aac".to_string()))?;
         let audioconvert = gst::ElementFactory::make("audioconvert")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create audioconvert".to_string()))?;
@@ -223,7 +229,9 @@ impl CameraPipeline {
                 &capsfilter_mjpeg_rate,
                 &jpegenc,
                 appsink_mjpeg.upcast_ref(),
-                &rtpopusdepay,
+                &rtpmp4adepay,
+                &aacparse,
+                &avdec_aac,
                 &audioconvert,
                 &audioresample,
                 &lamemp3enc,
@@ -232,7 +240,7 @@ impl CameraPipeline {
             .map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
         let rtph264depay_clone = rtph264depay.clone();
-        let rtpopusdepay_clone = rtpopusdepay.clone();
+        let rtpmp4adepay_clone = rtpmp4adepay.clone();
         source.connect_pad_added(move |_, src_pad| {
             log::info!("🔧 RTSP source created new pad: {:?}", src_pad.name());
 
@@ -253,13 +261,13 @@ impl CameraPipeline {
                             }
                             "audio" => {
                                 log::info!("🔊 Found audio pad from RTSP source, caps: {:?}", caps);
-                                log::info!("🔊 Linking to rtpopusdepay");
-                                let sink_pad = rtpopusdepay_clone.static_pad("sink");
+                                log::info!("🔊 Linking to rtpmp4adepay");
+                                let sink_pad = rtpmp4adepay_clone.static_pad("sink");
                                 if let Some(sink_pad) = sink_pad {
                                     if let Err(e) = src_pad.link(&sink_pad) {
-                                        log::error!("🔊 Failed to link RTSP audio pad to rtpopusdepay sink: {:?}", e);
+                                        log::error!("🔊 Failed to link RTSP audio pad to rtpmp4adepay sink: {:?}", e);
                                     } else {
-                                        log::info!("🔊 Successfully linked RTSP audio pad to rtpopusdepay sink");
+                                        log::info!("🔊 Successfully linked RTSP audio pad to rtpmp4adepay sink");
                                     }
                                 }
                             }
@@ -310,7 +318,9 @@ impl CameraPipeline {
         .map_err(|_| VigilanteError::GStreamer("Failed to link MJPEG branch".to_string()))?;
 
         gst::Element::link_many([
-            &rtpopusdepay,
+            &rtpmp4adepay,
+            &aacparse,
+            &avdec_aac,
             &audioconvert,
             &audioresample,
             &lamemp3enc,
