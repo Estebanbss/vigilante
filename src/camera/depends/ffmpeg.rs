@@ -239,12 +239,25 @@ impl CameraPipeline {
                                         } else {
                                             log::info!("🔊 Successfully linked audio branch");
                                             // Link voaacenc to mp4mux audio pad
-                                            let mp4mux_audio_pad = mp4mux_clone.request_pad_simple("sink_%u").unwrap();
-                                            let voaacenc_src_pad = voaacenc_clone.static_pad("src").unwrap();
-                                            if let Err(e) = voaacenc_src_pad.link(&mp4mux_audio_pad) {
-                                                log::error!("🔊 Failed to link lamemp3enc to mp4mux: {:?}", e);
+                                            if let Some(mp4mux_audio_pad) =
+                                                mp4mux_clone.request_pad_simple("audio_%u")
+                                            {
+                                                let voaacenc_src_pad =
+                                                    voaacenc_clone.static_pad("src").unwrap();
+                                                if let Err(e) =
+                                                    voaacenc_src_pad.link(&mp4mux_audio_pad)
+                                                {
+                                                    log::error!(
+                                                        "🔊 Failed to link voaacenc to mp4mux: {:?}",
+                                                        e
+                                                    );
+                                                } else {
+                                                    log::info!("🔊 Successfully linked audio to mp4mux");
+                                                }
                                             } else {
-                                                log::info!("🔊 Successfully linked audio to mp4mux");
+                                                log::error!(
+                                                    "🔊 Failed to request mp4mux audio pad (audio_%u)"
+                                                );
                                             }
                                         }
                                     }
@@ -400,8 +413,20 @@ impl CameraPipeline {
         log::info!("🔧 Linked tee to live queue");
 
         let queue_live_src_pad = queue_live.static_pad("src").unwrap();
-        let mp4mux_video_pad = mp4mux.request_pad_simple("sink_%u").unwrap();
-        queue_live_src_pad.link(&mp4mux_video_pad).unwrap();
+        let mp4mux_video_pad = mp4mux
+            .request_pad_simple("video_%u")
+            .ok_or_else(|| {
+                log::error!("🔧 Failed to request mp4mux video pad (video_%u)");
+                VigilanteError::GStreamer(
+                    "Failed to request mp4mux video pad (video_%u)".to_string(),
+                )
+            })?;
+        queue_live_src_pad
+            .link(&mp4mux_video_pad)
+            .map_err(|err| {
+                log::error!("🔧 Failed to link live queue to mp4mux video pad: {:?}", err);
+                VigilanteError::GStreamer("Failed to link live queue to mp4mux".to_string())
+            })?;
         log::info!("🔧 Linked live queue to mp4mux video pad");
 
         // Set pipeline to Playing to create mp4mux src pad
@@ -410,7 +435,12 @@ impl CameraPipeline {
         })?;
         log::info!("🔧 Pipeline set to Playing for mp4mux linking");
 
-        mp4mux.link(&appsink_live).unwrap();
+        mp4mux
+            .link(&appsink_live)
+            .map_err(|err| {
+                log::error!("🔧 Failed to link mp4mux to live appsink: {:?}", err);
+                VigilanteError::GStreamer("Failed to link mp4mux to appsink".to_string())
+            })?;
         log::info!("🔧 Linked mp4mux to live appsink");
 
         log::info!("🔧 About to set pipeline running flag");
