@@ -8,6 +8,7 @@ use crate::error::{Result, VigilanteError};
 use std::sync::Arc;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer_rtsp::RTSPLowerTrans;
 use bytes::Bytes;
 use crate::camera::depends::motion::MotionDetector;
 use tokio;
@@ -37,7 +38,7 @@ pub struct CameraPipeline {
             .map_err(|e| VigilanteError::GStreamer(format!("Failed to create rtspsrc: {}", e)))?;
         source.set_property("location", self.context.camera_rtsp_url());
         source.set_property("latency", 0u32); // Minimum latency for real-time streaming
-        source.set_property("protocols", "tcp"); // Use TCP protocol for RTSP
+        source.set_property("protocols", RTSPLowerTrans::TCP); // Use TCP protocol for RTSP
         source.set_property("do-rtcp", true);
 
         // Decode - use specific elements instead of decodebin for better control

@@ -918,6 +918,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "gstreamer-rtsp"
+version = "0.22.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36a8546256ef514e50e360488299237fb5c72fc4eba14881b83067acfbdb0839"
+dependencies = [
+ "glib",
+ "gstreamer",
+ "gstreamer-rtsp-sys",
+ "gstreamer-sdp",
+ "libc",
+]
+
+[[package]]
+name = "gstreamer-rtsp-sys"
+version = "0.22.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcb081971bcc14092a3777a91169476d7651960169a3d11e39da3ce1114bbc91"
+dependencies = [
+ "gio-sys",
+ "glib-sys",
+ "gobject-sys",
+ "gstreamer-sdp-sys",
+ "gstreamer-sys",
+ "libc",
+ "system-deps",
+]
+
+[[package]]
 name = "gstreamer-sdp"
 version = "0.22.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3084,6 +3112,7 @@ dependencies = [
  "gstreamer",
  "gstreamer-app",
  "gstreamer-pbutils",
+ "gstreamer-rtsp",
  "gstreamer-sdp",
  "gstreamer-video",
  "gstreamer-webrtc",
