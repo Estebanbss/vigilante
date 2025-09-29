@@ -189,6 +189,16 @@ impl CameraPipeline {
             ])
             .map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
+        log::info!("🔧 mp4mux pad templates:");
+        for template in mp4mux.pad_template_list() {
+            log::info!(
+                "🔧 mp4mux pad template name='{}' direction={:?} presence={:?}",
+                template.name_template(),
+                template.direction(),
+                template.presence()
+            );
+        }
+
         pipeline.set_state(gst::State::Ready).map_err(|_| {
             VigilanteError::GStreamer("Failed to set pipeline to Ready".to_string())
         })?;
@@ -429,19 +439,29 @@ impl CameraPipeline {
             })?;
         log::info!("🔧 Linked live queue to mp4mux video pad");
 
-        // Set pipeline to Playing to create mp4mux src pad
-        pipeline.set_state(gst::State::Playing).map_err(|_| {
-            VigilanteError::GStreamer("Failed to set pipeline to Playing for mp4mux".to_string())
-        })?;
-        log::info!("🔧 Pipeline set to Playing for mp4mux linking");
+        let appsink_live_sink_pad = appsink_live
+            .static_pad("sink")
+            .ok_or_else(|| VigilanteError::GStreamer("Appsink has no sink pad".to_string()))?;
+        let appsink_live_sink_pad = appsink_live_sink_pad.downgrade();
+        mp4mux.connect_pad_added(move |_, pad| {
+            if pad.direction() != gst::PadDirection::Src {
+                return;
+            }
 
-        mp4mux
-            .link(&appsink_live)
-            .map_err(|err| {
-                log::error!("🔧 Failed to link mp4mux to live appsink: {:?}", err);
-                VigilanteError::GStreamer("Failed to link mp4mux to appsink".to_string())
-            })?;
-        log::info!("🔧 Linked mp4mux to live appsink");
+            if let Some(sink_pad) = appsink_live_sink_pad.upgrade() {
+                if sink_pad.is_linked() {
+                    log::debug!("� Appsink sink pad already linked, skipping");
+                    return;
+                }
+
+                match pad.link(&sink_pad) {
+                    Ok(_) => log::info!("� Linked mp4mux src pad to live appsink"),
+                    Err(err) => log::error!("📺 Failed to link mp4mux src pad: {:?}", err),
+                }
+            } else {
+                log::warn!("� Appsink sink pad no longer available for linking");
+            }
+        });
 
         log::info!("🔧 About to set pipeline running flag");
         self.pipeline = Some(pipeline.clone());
