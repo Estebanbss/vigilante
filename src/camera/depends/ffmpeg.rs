@@ -179,6 +179,25 @@ impl CameraPipeline {
         appsink_mjpeg.set_max_buffers(1);
         appsink_mjpeg.set_drop(true);
 
+        // Audio elements
+        let rtpopusdepay = gst::ElementFactory::make("rtpopusdepay")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create rtpopusdepay".to_string()))?;
+        let audioconvert = gst::ElementFactory::make("audioconvert")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create audioconvert".to_string()))?;
+        let audioresample = gst::ElementFactory::make("audioresample")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create audioresample".to_string()))?;
+        let lamemp3enc = gst::ElementFactory::make("lamemp3enc")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create lamemp3enc".to_string()))?;
+        let appsink_audio = gst_app::AppSink::builder().build();
+        appsink_audio.set_property("emit-signals", &true);
+        appsink_audio.set_property("sync", &false);
+        appsink_audio.set_max_buffers(1);
+        appsink_audio.set_drop(true);
+
         pipeline
             .add_many([
                 &source,
@@ -204,10 +223,16 @@ impl CameraPipeline {
                 &capsfilter_mjpeg_rate,
                 &jpegenc,
                 appsink_mjpeg.upcast_ref(),
+                &rtpopusdepay,
+                &audioconvert,
+                &audioresample,
+                &lamemp3enc,
+                appsink_audio.upcast_ref(),
             ])
             .map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
         let rtph264depay_clone = rtph264depay.clone();
+        let rtpopusdepay_clone = rtpopusdepay.clone();
         source.connect_pad_added(move |_, src_pad| {
             log::info!("🔧 RTSP source created new pad: {:?}", src_pad.name());
 
@@ -223,6 +248,18 @@ impl CameraPipeline {
                                         log::error!("🔧 Failed to link RTSP src pad to rtph264depay sink: {:?}", e);
                                     } else {
                                         log::info!("🔧 Successfully linked RTSP src pad to rtph264depay sink");
+                                    }
+                                }
+                            }
+                            "audio" => {
+                                log::info!("🔊 Found audio pad from RTSP source, caps: {:?}", caps);
+                                log::info!("🔊 Linking to rtpopusdepay");
+                                let sink_pad = rtpopusdepay_clone.static_pad("sink");
+                                if let Some(sink_pad) = sink_pad {
+                                    if let Err(e) = src_pad.link(&sink_pad) {
+                                        log::error!("🔊 Failed to link RTSP audio pad to rtpopusdepay sink: {:?}", e);
+                                    } else {
+                                        log::info!("🔊 Successfully linked RTSP audio pad to rtpopusdepay sink");
                                     }
                                 }
                             }
@@ -271,6 +308,15 @@ impl CameraPipeline {
             appsink_mjpeg.upcast_ref(),
         ])
         .map_err(|_| VigilanteError::GStreamer("Failed to link MJPEG branch".to_string()))?;
+
+        gst::Element::link_many([
+            &rtpopusdepay,
+            &audioconvert,
+            &audioresample,
+            &lamemp3enc,
+            appsink_audio.upcast_ref(),
+        ])
+        .map_err(|_| VigilanteError::GStreamer("Failed to link audio branch".to_string()))?;
 
         let detector_for_motion = Arc::clone(&self.motion_detector);
         let motion_handle = runtime_handle.clone();
@@ -365,6 +411,57 @@ impl CameraPipeline {
             .build();
         appsink_mjpeg.set_callbacks(mjpeg_callbacks);
         log::info!("📺 MJPEG appsink callbacks configured");
+
+        let context_weak_audio = Arc::downgrade(&self.context);
+        let audio_callbacks = gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let context = match context_weak_audio.upgrade() {
+                    Some(c) => c,
+                    None => {
+                        log::warn!("🔊 Audio context dropped, stopping callback");
+                        return Err(gst::FlowError::Flushing);
+                    }
+                };
+
+                let sample = match sink.pull_sample() {
+                    Ok(sample) => sample,
+                    Err(err) => {
+                        log::warn!("🔊 Failed to pull audio sample: {:?}", err);
+                        return Err(gst::FlowError::Error);
+                    }
+                };
+
+                let buffer = match sample.buffer() {
+                    Some(buffer) => buffer,
+                    None => {
+                        log::warn!("🔊 Audio sample missing buffer");
+                        return Ok(gst::FlowSuccess::Ok);
+                    }
+                };
+
+                let map = match buffer.map_readable() {
+                    Ok(map) => map,
+                    Err(err) => {
+                        log::warn!("🔊 Failed to map audio buffer: {:?}", err);
+                        return Err(gst::FlowError::Error);
+                    }
+                };
+
+                let data = Bytes::copy_from_slice(map.as_slice());
+
+                log::debug!("🔊 Audio chunk received, size: {} bytes", data.len());
+
+                // Set audio available flag
+                *context.streaming.audio_available.lock().unwrap() = true;
+
+                // Send to watch channel
+                let _ = context.streaming.audio_mp3_tx.send(data);
+
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build();
+        appsink_audio.set_callbacks(audio_callbacks);
+        log::info!("🔊 Audio appsink callbacks configured");
 
         let tee_src_pad_rec = tee.request_pad_simple("src_%u").unwrap();
         let queue_rec_sink_pad = queue_rec.static_pad("sink").unwrap();
