@@ -68,51 +68,49 @@ impl BroadcastLogger {
                 }
             }
         } else if let Some(stripped) = message.strip_prefix("← ") {
-            // Response: "← GET /api/live/mjpeg 200 (45 ms) [size: 1234] [body: {"key": "value"}]"
-            let parts: Vec<&str> = stripped.split_whitespace().collect();
-            if parts.len() >= 4 {
-                let method = parts[0];
-                let uri_parts = &parts[1..parts.len()-3];
-                let uri = uri_parts.join(" ");
-                let status = parts[parts.len()-3].parse::<u16>().unwrap_or(0);
-                let duration_str = parts[parts.len()-2].trim_end_matches(" ms)");
-                let duration_ms = duration_str.parse::<u64>().unwrap_or(0);
+            // Response: "← GET /api/live/mjpeg 200 (0 ms) [size: 1234] [body: null]"
+            // Split by '[' to separate the main part from metadata
+            let bracket_parts: Vec<&str> = stripped.split(" [").collect();
+            if bracket_parts.len() >= 2 {
+                let main_part = bracket_parts[0];
+                let metadata_str = format!("[{}", bracket_parts[1..].join(" ["));
                 
-                // Parse size and body from the remaining parts
-                let mut response_body = String::new();
-                
-                // Find [size: ...] and [body: ...] in the message
-                let remaining = parts[parts.len()-1..].join(" ");
-                if let Some(size_start) = remaining.find("[size:") {
-                    if let Some(size_end) = remaining[size_start..].find("]") {
-                        let _size_str = &remaining[size_start+6..size_start+size_end];
-                    }
-                }
-                if let Some(body_start) = remaining.find("[body:") {
-                    if let Some(body_end) = remaining[body_start..].find("]") {
-                        let body_str = &remaining[body_start+6..body_start+body_end];
-                        if !body_str.is_empty() && body_str != "null" {
-                            response_body = body_str.to_string();
+                let main_parts: Vec<&str> = main_part.split_whitespace().collect();
+                if main_parts.len() >= 4 {
+                    let method = main_parts[0];
+                    let uri = main_parts[1];
+                    let status_code = main_parts[2].parse::<u16>().unwrap_or(0);
+                    let duration_part = main_parts[3];
+                    let duration_ms = duration_part.trim_start_matches('(').trim_end_matches(')').parse::<u64>().unwrap_or(0);
+                    
+                    let status_text = match status_code {
+                        200 => "éxito",
+                        404 => "no encontrado",
+                        401 => "no autorizado",
+                        500 => "error interno",
+                        _ => "desconocido"
+                    };
+                    
+                    // Parse body from metadata
+                    let mut response_body = String::new();
+                    if let Some(body_start) = metadata_str.find("[body: ") {
+                        if let Some(body_end) = metadata_str[body_start..].find("]") {
+                            let body_str = &metadata_str[body_start+7..body_start+body_end];
+                            if !body_str.is_empty() && body_str != "null" {
+                                response_body = body_str.to_string();
+                            }
                         }
                     }
+                    
+                    let body_display = if response_body.is_empty() { 
+                        String::new() 
+                    } else { 
+                        format!(" body: {}", response_body) 
+                    };
+                    
+                    return format!("[{}] ← {} {} - {} ({}ms){}", 
+                        timestamp, method, uri, status_text, duration_ms, body_display);
                 }
-                
-                let status_text = match status {
-                    200 => "éxito",
-                    404 => "no encontrado",
-                    401 => "no autorizado",
-                    500 => "error interno",
-                    _ => "desconocido"
-                };
-                
-                let body_display = if response_body.is_empty() { 
-                    "".to_string() 
-                } else { 
-                    format!(" body: {}", response_body) 
-                };
-                
-                return format!("[{}] ← {} {} - {} ({}ms){}", 
-                    timestamp, method, uri, status_text, duration_ms, body_display);
             }
         }
         // Fallback
