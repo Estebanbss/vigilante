@@ -192,6 +192,9 @@ impl CameraPipeline {
         let audioresample = gst::ElementFactory::make("audioresample")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create audioresample".to_string()))?;
+        let wavenc = gst::ElementFactory::make("wavenc")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create wavenc".to_string()))?;
         let appsink_audio = gst_app::AppSink::builder().build();
         appsink_audio.set_property("emit-signals", &true);
         appsink_audio.set_property("sync", &false);
@@ -227,6 +230,7 @@ impl CameraPipeline {
                 &alawdec,
                 &audioconvert,
                 &audioresample,
+                &wavenc,
                 appsink_audio.upcast_ref(),
             ])
             .map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
@@ -236,6 +240,7 @@ impl CameraPipeline {
         let alawdec_clone = alawdec.clone();
         let audioconvert_clone = audioconvert.clone();
         let audioresample_clone = audioresample.clone();
+        let wavenc_clone = wavenc.clone();
         let appsink_audio_clone = appsink_audio.clone();
         source.connect_pad_added(move |_, src_pad| {
             log::info!("🔧 RTSP source created new pad: {:?}", src_pad.name());
@@ -270,6 +275,7 @@ impl CameraPipeline {
                                             &alawdec_clone,
                                             &audioconvert_clone,
                                             &audioresample_clone,
+                                            &wavenc_clone,
                                             appsink_audio_clone.upcast_ref(),
                                         ]) {
                                             log::error!("🔊 Failed to link audio branch: {:?}", e);
