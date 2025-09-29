@@ -133,7 +133,24 @@ pub struct CameraPipeline {
             };
             let sink_pad = tee.request_pad_simple("sink_%u").unwrap();
             pad.link(&sink_pad).unwrap();
+            log::info!("🔧 Linked decode to tee sink");
         });
+
+        // Link tee to branches (request source pads from tee)
+        let tee_src_pad_mjpeg = tee.request_pad_simple("src_%u").unwrap();
+        let queue_mjpeg_sink_pad = queue_mjpeg.static_pad("sink").unwrap();
+        tee_src_pad_mjpeg.link(&queue_mjpeg_sink_pad).unwrap();
+        log::info!("🔧 Linked tee to MJPEG queue");
+
+        let tee_src_pad_rec = tee.request_pad_simple("src_%u").unwrap();
+        let queue_rec_sink_pad = queue_rec.static_pad("sink").unwrap();
+        tee_src_pad_rec.link(&queue_rec_sink_pad).unwrap();
+        log::info!("🔧 Linked tee to recording queue");
+
+        let tee_src_pad_motion = tee.request_pad_simple("src_%u").unwrap();
+        let queue_motion_sink_pad = queue_motion.static_pad("sink").unwrap();
+        tee_src_pad_motion.link(&queue_motion_sink_pad).unwrap();
+        log::info!("🔧 Linked tee to motion queue");
 
         // Link source to decode
         source.link(&decode).map_err(|_| "Failed to link source to decode")?;
