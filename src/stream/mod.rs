@@ -121,7 +121,15 @@ pub async fn stream_mjpeg_handler(
     let stream = TokioStreamExt::map(BroadcastStream::new(mjpeg_rx), |result| match result {
         Ok(bytes) => {
             log::debug!("📺 MJPEG frame received in stream handler, size: {} bytes", bytes.len());
-            Ok::<_, Infallible>(bytes)
+            // Format as multipart
+            let multipart_frame = format!(
+                "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                bytes.len()
+            );
+            let mut frame_data = multipart_frame.into_bytes();
+            frame_data.extend_from_slice(&bytes);
+            frame_data.extend_from_slice(b"\r\n");
+            Ok::<_, Infallible>(bytes::Bytes::from(frame_data))
         },
         Err(e) => {
             log::warn!("📺 MJPEG broadcast channel error: {:?}", e);
