@@ -8,6 +8,7 @@ use crate::error::{Result, VigilanteError};
 use std::sync::Arc;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer::Fraction;
 use gstreamer_rtsp::RTSPLowerTrans;
 use bytes::Bytes;
 use crate::camera::depends::motion::MotionDetector;
@@ -61,9 +62,25 @@ pub struct CameraPipeline {
         // MJPEG branch
         let queue_mjpeg = gst::ElementFactory::make("queue").build().map_err(|_| VigilanteError::GStreamer("Failed to create queue_mjpeg".to_string()))?;
         let videoconvert_mjpeg = gst::ElementFactory::make("videoconvert").build().map_err(|_| VigilanteError::GStreamer("Failed to create videoconvert_mjpeg".to_string()))?;
-        let jpegenc = gst::ElementFactory::make("avenc_mjpeg").build().map_err(|_| VigilanteError::GStreamer("Failed to create avenc_mjpeg".to_string()))?;
+        let videoscale_mjpeg = gst::ElementFactory::make("videoscale").build().map_err(|_| VigilanteError::GStreamer("Failed to create videoscale_mjpeg".to_string()))?;
+        let videorate_mjpeg = gst::ElementFactory::make("videorate").build().map_err(|_| VigilanteError::GStreamer("Failed to create videorate_mjpeg".to_string()))?;
+        let capsfilter_mjpeg = gst::ElementFactory::make("capsfilter").build().map_err(|_| VigilanteError::GStreamer("Failed to create capsfilter_mjpeg".to_string()))?;
+        let mjpeg_caps = gst::Caps::builder("video/x-raw")
+            .field("width", 1280i32)
+            .field("height", 720i32)
+            .field("framerate", Fraction::new(15, 1))
+            .field("format", "I420")
+            .build();
+        capsfilter_mjpeg.set_property("caps", &mjpeg_caps);
+
+        let jpegenc = gst::ElementFactory::make("jpegenc").build().map_err(|_| VigilanteError::GStreamer("Failed to create jpegenc".to_string()))?;
+        jpegenc.set_property("quality", 85i32);
+
         let appsink_mjpeg = gst::ElementFactory::make("appsink").build().map_err(|_| VigilanteError::GStreamer("Failed to create appsink_mjpeg".to_string()))?;
         appsink_mjpeg.set_property("emit-signals", true);
+        appsink_mjpeg.set_property("sync", false);
+        appsink_mjpeg.set_property("max-buffers", 1u32);
+        appsink_mjpeg.set_property("drop", true);
 
         // Recording branch
         let queue_rec = gst::ElementFactory::make("queue").build().map_err(|_| VigilanteError::GStreamer("Failed to create queue_rec".to_string()))?;
@@ -120,7 +137,25 @@ pub struct CameraPipeline {
         });
 
         // Add elements (include rtph264depay in the add_many call)
-        pipeline.add_many([&source, &rtph264depay, &h264parse, &avdec_h264, &tee, &queue_mjpeg, &videoconvert_mjpeg, &jpegenc, &appsink_mjpeg, &queue_rec, &videoconvert_rec, &x264enc, &mp4mux, &filesink]).map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
+        pipeline.add_many([
+            &source,
+            &rtph264depay,
+            &h264parse,
+            &avdec_h264,
+            &tee,
+            &queue_mjpeg,
+            &videoconvert_mjpeg,
+            &videoscale_mjpeg,
+            &videorate_mjpeg,
+            &capsfilter_mjpeg,
+            &jpegenc,
+            &appsink_mjpeg,
+            &queue_rec,
+            &videoconvert_rec,
+            &x264enc,
+            &mp4mux,
+            &filesink,
+        ]).map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
         // Link the decode chain
         gst::Element::link_many([&rtph264depay, &h264parse, &avdec_h264]).map_err(|_| VigilanteError::GStreamer("Failed to link decode chain".to_string()))?;
@@ -153,7 +188,15 @@ pub struct CameraPipeline {
         });
 
         // Link static parts
-        gst::Element::link_many([&queue_mjpeg, &videoconvert_mjpeg, &jpegenc, &appsink_mjpeg]).map_err(|_| VigilanteError::GStreamer("Failed to link MJPEG".to_string()))?;
+        gst::Element::link_many([
+            &queue_mjpeg,
+            &videoconvert_mjpeg,
+            &videoscale_mjpeg,
+            &videorate_mjpeg,
+            &capsfilter_mjpeg,
+            &jpegenc,
+            &appsink_mjpeg,
+        ]).map_err(|_| VigilanteError::GStreamer("Failed to link MJPEG".to_string()))?;
         gst::Element::link_many([&queue_rec, &videoconvert_rec, &x264enc, &mp4mux, &filesink]).map_err(|_| VigilanteError::GStreamer("Failed to link recording".to_string()))?;
 
         // Connect MJPEG signal
