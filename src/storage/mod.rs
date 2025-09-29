@@ -6,22 +6,22 @@
 pub mod depends;
 
 pub use depends::db::StorageDb;
+pub use depends::filesystem::FileManager;
 pub use depends::paths::PathResolver;
 pub use depends::snapshot::SnapshotManager;
-pub use depends::filesystem::FileManager;
 
-use std::sync::Arc;
+use crate::error::VigilanteError;
 use crate::AppState;
-use tokio::io::AsyncSeekExt;
+use crate::RecordingEntry;
+use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
-use axum::http::{StatusCode, header};
-use tokio::fs::File;
-use tokio::io::AsyncReadExt;
-use std::sync::Mutex;
 use chrono;
 use serde::Serialize;
-use crate::error::VigilanteError;
-use crate::RecordingEntry;
+use std::sync::Arc;
+use std::sync::Mutex;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 
 #[derive(Serialize)]
 pub struct DayRecordings {
@@ -47,7 +47,10 @@ impl RecordingState {
     }
 
     pub fn start_recording(&self, path: &str) {
-        self.active_recordings.lock().unwrap().insert(path.to_string());
+        self.active_recordings
+            .lock()
+            .unwrap()
+            .insert(path.to_string());
     }
 
     pub fn stop_recording(&self, path: &str) {
@@ -90,7 +93,9 @@ impl Default for StorageManager {
     }
 }
 
-pub async fn delete_recording() -> impl axum::response::IntoResponse { "OK" }
+pub async fn delete_recording() -> impl axum::response::IntoResponse {
+    "OK"
+}
 
 #[axum::debug_handler]
 pub async fn recordings_summary_ws(
@@ -105,7 +110,11 @@ pub async fn recordings_summary_ws(
 
     let mut day_summaries = Vec::new();
 
-    while let Some(entry) = entries.next_entry().await.map_err(|e| VigilanteError::Io(e))? {
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| VigilanteError::Io(e))?
+    {
         let path = entry.path();
 
         // Solo procesar directorios (días)
@@ -131,7 +140,11 @@ async fn count_recordings_in_day(day_path: &std::path::Path) -> Result<usize, Vi
 
     let mut count = 0;
 
-    while let Some(entry) = entries.next_entry().await.map_err(|e| VigilanteError::Io(e))? {
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| VigilanteError::Io(e))?
+    {
         let path = entry.path();
 
         // Contar archivos con extensiones de video
@@ -150,14 +163,21 @@ async fn count_recordings_in_day(day_path: &std::path::Path) -> Result<usize, Vi
     Ok(count)
 }
 
-async fn list_recordings_in_day(day_path: &std::path::Path, date: &str) -> Result<Vec<RecordingEntry>, VigilanteError> {
+async fn list_recordings_in_day(
+    day_path: &std::path::Path,
+    date: &str,
+) -> Result<Vec<RecordingEntry>, VigilanteError> {
     let mut entries = tokio::fs::read_dir(day_path)
         .await
         .map_err(|e| VigilanteError::Io(e))?;
 
     let mut recordings = Vec::new();
 
-    while let Some(entry) = entries.next_entry().await.map_err(|e| VigilanteError::Io(e))? {
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| VigilanteError::Io(e))?
+    {
         let path = entry.path();
 
         // Procesar archivos con extensiones de video
@@ -166,13 +186,15 @@ async fn list_recordings_in_day(day_path: &std::path::Path, date: &str) -> Resul
                 match extension {
                     "mkv" | "mp4" | "avi" | "mov" | "flv" | "wmv" => {
                         if let Ok(metadata) = tokio::fs::metadata(&path).await {
-                            let file_name = path.file_name()
+                            let file_name = path
+                                .file_name()
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("unknown")
                                 .to_string();
 
                             let size = metadata.len();
-                            let modified = metadata.modified()
+                            let modified = metadata
+                                .modified()
                                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                             let modified_dt = chrono::DateTime::<chrono::Utc>::from(modified);
 
@@ -181,8 +203,14 @@ async fn list_recordings_in_day(day_path: &std::path::Path, date: &str) -> Resul
 
                             recordings.push(RecordingEntry {
                                 name: file_name.clone(),
-                                path: format!("{}/{}", day_path.file_name()
-                                    .and_then(|n| n.to_str()).unwrap_or("unknown"), file_name),
+                                path: format!(
+                                    "{}/{}",
+                                    day_path
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("unknown"),
+                                    file_name
+                                ),
                                 size,
                                 last_modified: modified_dt,
                                 duration,
@@ -212,7 +240,10 @@ pub async fn recordings_by_day(
 
     // Verificar que el directorio existe
     if !day_path.exists() || !day_path.is_dir() {
-        return Err(VigilanteError::Other(format!("No recordings found for date: {}", date)));
+        return Err(VigilanteError::Other(format!(
+            "No recordings found for date: {}",
+            date
+        )));
     }
 
     // Obtener lista de grabaciones del día
@@ -228,7 +259,11 @@ async fn calculate_directory_size(day_path: &std::path::Path) -> Result<u64, Vig
 
     let mut total_size = 0u64;
 
-    while let Some(entry) = entries.next_entry().await.map_err(|e| VigilanteError::Io(e))? {
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| VigilanteError::Io(e))?
+    {
         let path = entry.path();
 
         // Sumar tamaño de archivos con extensiones de video
@@ -249,7 +284,9 @@ async fn calculate_directory_size(day_path: &std::path::Path) -> Result<u64, Vig
     Ok(total_size)
 }
 
-pub async fn refresh_recording_snapshot(state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn refresh_recording_snapshot(
+    state: &Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let storage_path = state.storage_path();
 
     // Leer las carpetas del directorio raíz (cada carpeta es un día)
@@ -262,7 +299,11 @@ pub async fn refresh_recording_snapshot(state: &Arc<AppState>) -> Result<(), Box
     let mut day_summaries = Vec::new();
     let mut latest_timestamp = None;
 
-    while let Some(entry) = entries.next_entry().await.map_err(|e| VigilanteError::Io(e))? {
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| VigilanteError::Io(e))?
+    {
         let path = entry.path();
 
         // Solo procesar directorios (días)
@@ -305,7 +346,9 @@ pub async fn refresh_recording_snapshot(state: &Arc<AppState>) -> Result<(), Box
 
     Ok(())
 }
-pub async fn storage_stream_sse() -> impl axum::response::IntoResponse { "OK" }
+pub async fn storage_stream_sse() -> impl axum::response::IntoResponse {
+    "OK"
+}
 
 /// Streaming en vivo de grabaciones antiguas con soporte de formato
 pub async fn stream_live_recording(
@@ -360,15 +403,13 @@ async fn stream_continuous_recording(
     } else {
         // Streaming normal para archivos completados
         match tokio::fs::read(&full_path).await {
-            Ok(buffer) => {
-                axum::response::Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, content_type)
-                    .header(header::CACHE_CONTROL, "no-cache")
-                    .header(header::TRANSFER_ENCODING, "chunked")
-                    .body(axum::body::Body::from(buffer))
-                    .unwrap()
-            }
+            Ok(buffer) => axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CACHE_CONTROL, "no-cache")
+                .header(header::TRANSFER_ENCODING, "chunked")
+                .body(axum::body::Body::from(buffer))
+                .unwrap(),
             Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "File read error").into_response(),
         }
     }
@@ -423,8 +464,6 @@ async fn stream_progressive_recording(
     }
 }
 
-
-
 /// Manejar peticiones range para streaming parcial (seek/scrubbing)
 async fn handle_range_request(
     full_path: &std::path::Path,
@@ -442,7 +481,9 @@ async fn handle_range_request(
 
             let mut file = match File::open(full_path).await {
                 Ok(f) => f,
-                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "File open error").into_response(),
+                Err(_) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "File open error").into_response()
+                }
             };
 
             file.seek(std::io::SeekFrom::Start(start)).await.unwrap();
@@ -450,11 +491,25 @@ async fn handle_range_request(
             file.read_exact(&mut buffer).await.unwrap();
 
             let mut response = axum::response::Response::new(axum::body::Body::from(buffer));
-            response.headers_mut().insert(header::CONTENT_TYPE, content_type.parse().unwrap());
-            response.headers_mut().insert(header::CONTENT_LENGTH, content_length.to_string().parse().unwrap());
-            response.headers_mut().insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-            response.headers_mut().insert(header::CONTENT_RANGE, format!("bytes {}-{}/{}", start, end, file_size).parse().unwrap());
-            response.headers_mut().insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+            response
+                .headers_mut()
+                .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            response.headers_mut().insert(
+                header::CONTENT_LENGTH,
+                content_length.to_string().parse().unwrap(),
+            );
+            response
+                .headers_mut()
+                .insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+            response.headers_mut().insert(
+                header::CONTENT_RANGE,
+                format!("bytes {}-{}/{}", start, end, file_size)
+                    .parse()
+                    .unwrap(),
+            );
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
             *response.status_mut() = StatusCode::PARTIAL_CONTENT;
             return response;
         }
@@ -464,6 +519,8 @@ async fn handle_range_request(
     (StatusCode::RANGE_NOT_SATISFIABLE, "Invalid range").into_response()
 }
 
-pub fn init_recordings_db(_db_path: &std::path::PathBuf) -> Result<rusqlite::Connection, Box<dyn std::error::Error + Send + Sync>> {
+pub fn init_recordings_db(
+    _db_path: &std::path::PathBuf,
+) -> Result<rusqlite::Connection, Box<dyn std::error::Error + Send + Sync>> {
     Ok(rusqlite::Connection::open_in_memory()?)
 }

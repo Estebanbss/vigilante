@@ -1,4 +1,4 @@
-use axum::body::{Body, to_bytes, Bytes};
+use axum::body::{to_bytes, Body, Bytes};
 use axum::{
     extract::Request,
     http::{header, HeaderValue, Method, StatusCode},
@@ -74,42 +74,48 @@ impl BroadcastLogger {
             if bracket_parts.len() >= 2 {
                 let main_part = bracket_parts[0];
                 let metadata_str = format!("[{}", bracket_parts[1..].join(" ["));
-                
+
                 let main_parts: Vec<&str> = main_part.split_whitespace().collect();
                 if main_parts.len() >= 4 {
                     let method = main_parts[0];
                     let uri = main_parts[1];
                     let status_code = main_parts[2].parse::<u16>().unwrap_or(0);
                     let duration_part = main_parts[3];
-                    let duration_ms = duration_part.trim_start_matches('(').trim_end_matches(')').parse::<u64>().unwrap_or(0);
-                    
+                    let duration_ms = duration_part
+                        .trim_start_matches('(')
+                        .trim_end_matches(')')
+                        .parse::<u64>()
+                        .unwrap_or(0);
+
                     let status_text = match status_code {
                         200 => "éxito",
                         404 => "no encontrado",
                         401 => "no autorizado",
                         500 => "error interno",
-                        _ => "desconocido"
+                        _ => "desconocido",
                     };
-                    
+
                     // Parse body from metadata
                     let mut response_body = String::new();
                     if let Some(body_start) = metadata_str.find("[body: ") {
                         if let Some(body_end) = metadata_str[body_start..].find("]") {
-                            let body_str = &metadata_str[body_start+7..body_start+body_end];
+                            let body_str = &metadata_str[body_start + 7..body_start + body_end];
                             if !body_str.is_empty() && body_str != "null" {
                                 response_body = body_str.to_string();
                             }
                         }
                     }
-                    
-                    let body_display = if response_body.is_empty() { 
-                        String::new() 
-                    } else { 
-                        format!(" body: {}", response_body) 
+
+                    let body_display = if response_body.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" body: {}", response_body)
                     };
-                    
-                    return format!("[{}] ← {} {} - {} ({}ms){}", 
-                        timestamp, method, uri, status_text, duration_ms, body_display);
+
+                    return format!(
+                        "[{}] ← {} {} - {} ({}ms){}",
+                        timestamp, method, uri, status_text, duration_ms, body_display
+                    );
                 }
             }
         }
@@ -118,14 +124,17 @@ impl BroadcastLogger {
     }
 }
 
-use vigilante::{auth, camera, logs, metrics, ptz, storage, stream, AppState, RecordingSnapshot, NotificationManager, auth::AuthManager, state};
+use vigilante::{
+    auth, auth::AuthManager, camera, logs, metrics, ptz, state, storage, stream, AppState,
+    NotificationManager, RecordingSnapshot,
+};
 
 use auth::flexible_auth_middleware;
 use camera::start_camera_pipeline;
 use logs::{get_log_entries_handler, stream_logs_sse};
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
-    delete_recording, recordings_summary_ws, recordings_by_day, refresh_recording_snapshot,
+    delete_recording, recordings_by_day, recordings_summary_ws, refresh_recording_snapshot,
     storage_stream_sse, stream_live_recording,
 };
 use stream::{stream_audio_handler, stream_mjpeg_handler};
@@ -171,7 +180,7 @@ async fn log_requests(req: Request<Body>, next: Next) -> Response {
 
     // Capturar el body de la respuesta para logging si es pequeño
     let (parts, body) = response.into_parts();
-        let body_bytes = match to_bytes(body, 2048).await {
+    let body_bytes = match to_bytes(body, 2048).await {
         Ok(bytes) => bytes,
         Err(_) => Bytes::new(),
     };
@@ -253,14 +262,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "CAMERA_RTSP_URL environment variable must be set")?;
     let camera_onvif_url = env::var("CAMERA_ONVIF_URL")
         .map_err(|_| "CAMERA_ONVIF_URL environment variable must be set")?;
-    let proxy_token = env::var("PROXY_TOKEN")
-        .map_err(|_| "PROXY_TOKEN environment variable must be set")?;
+    let proxy_token =
+        env::var("PROXY_TOKEN").map_err(|_| "PROXY_TOKEN environment variable must be set")?;
     if proxy_token.is_empty() {
         return Err("PROXY_TOKEN cannot be empty".into());
     }
     let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let storage_path = env::var("STORAGE_PATH")
-        .map_err(|_| "STORAGE_PATH environment variable must be set")?;
+    let storage_path =
+        env::var("STORAGE_PATH").map_err(|_| "STORAGE_PATH environment variable must be set")?;
     // Detección manual de movimiento (activada por defecto)
     let enable_manual_motion_detection = env::var("ENABLE_MANUAL_MOTION_DETECTION")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -323,7 +332,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => {
             warn!("Failed to initialize recordings database: {}", e);
             // Fallback to in-memory only, but we can continue
-            Arc::new(StdMutex::new(rusqlite::Connection::open_in_memory().unwrap()))
+            Arc::new(StdMutex::new(
+                rusqlite::Connection::open_in_memory().unwrap(),
+            ))
         }
     };
 
@@ -421,7 +432,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 interval.tick().await;
                 if let Ok(elapsed) = start_time.elapsed() {
-                    metrics::depends::collectors::MetricsCollector::set_uptime(elapsed.as_secs_f64());
+                    metrics::depends::collectors::MetricsCollector::set_uptime(
+                        elapsed.as_secs_f64(),
+                    );
                 }
             }
         });

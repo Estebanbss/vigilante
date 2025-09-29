@@ -25,7 +25,10 @@ pub async fn continuous_move(
     tilt: f32,
     zoom: Option<f32>,
 ) -> Result<(), VigilanteError> {
-    println!("🎮 PTZ ContinuousMove: pan={}, tilt={}, zoom={:?}", pan, tilt, zoom);
+    println!(
+        "🎮 PTZ ContinuousMove: pan={}, tilt={}, zoom={:?}",
+        pan, tilt, zoom
+    );
 
     let vel_pt = if pan != 0.0 || tilt != 0.0 {
         format!("<PanTilt x=\"{:.3}\" y=\"{:.3}\"/>", pan, tilt)

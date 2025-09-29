@@ -10,10 +10,10 @@ pub use depends::mjpeg::MjpegStreamer;
 pub use depends::motion::MotionDetector;
 pub use depends::utils::CameraUtils;
 
-use std::sync::Arc;
 use crate::AppState;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use std::sync::Arc;
 
 /// Manager principal para la cámara.
 #[derive(Clone)]
@@ -37,7 +37,10 @@ impl Default for CameraManager {
     }
 }
 
-pub async fn start_camera_pipeline(_camera_rtsp_url: String, state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn start_camera_pipeline(
+    _camera_rtsp_url: String,
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Set pipeline running flag immediately when task starts
     log::info!("🔧 Camera pipeline task started, setting pipeline_running=true");
     *state.gstreamer.pipeline_running.lock().unwrap() = true;
@@ -100,7 +103,10 @@ pub async fn start_camera_pipeline(_camera_rtsp_url: String, state: Arc<AppState
                         log::debug!("✅ Pipeline health check: OK (Playing)");
                     }
                     pipeline_state => {
-                        log::warn!("⚠️ Pipeline health check: State is {:?}, expected Playing", pipeline_state);
+                        log::warn!(
+                            "⚠️ Pipeline health check: State is {:?}, expected Playing",
+                            pipeline_state
+                        );
                         // Try to restart pipeline
                         log::info!("🔄 Attempting to restart pipeline...");
                         if let Err(e) = pipeline.set_state(gst::State::Playing) {
@@ -119,9 +125,15 @@ pub async fn start_camera_pipeline(_camera_rtsp_url: String, state: Arc<AppState
             // Check if MJPEG frames are still being received (within last 10 seconds)
             let time_since_last_frame = last_mjpeg_frame.lock().unwrap().elapsed();
             if time_since_last_frame > std::time::Duration::from_secs(10) {
-                log::warn!("⚠️ No MJPEG frames received in {:.1}s - possible stream issue", time_since_last_frame.as_secs_f64());
+                log::warn!(
+                    "⚠️ No MJPEG frames received in {:.1}s - possible stream issue",
+                    time_since_last_frame.as_secs_f64()
+                );
             } else {
-                log::debug!("📹 MJPEG stream active (last frame {:.1}s ago)", time_since_last_frame.as_secs_f64());
+                log::debug!(
+                    "📹 MJPEG stream active (last frame {:.1}s ago)",
+                    time_since_last_frame.as_secs_f64()
+                );
             }
         }
     }

@@ -2,11 +2,11 @@
 //!
 //! Separa las responsabilidades de AppState en structs más pequeños y enfocados.
 
+use crate::{AuthManager, NotificationManager, RecordingSnapshot};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::{broadcast, watch, Mutex as TokioMutex};
-use std::sync::{Mutex as StdMutex};
-use crate::{AuthManager, NotificationManager, RecordingSnapshot};
 
 /// Configuración de cámara
 #[derive(Clone, Debug)]

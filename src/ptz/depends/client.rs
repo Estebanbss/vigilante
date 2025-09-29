@@ -3,11 +3,11 @@
 //! Maneja las comunicaciones SOAP con cámaras ONVIF.
 
 use super::soap::build_soap_envelope;
+use crate::error::VigilanteError;
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use reqwest;
 use url::Url;
-use crate::error::VigilanteError;
 
 const NS_MEDIA: &str = "http://www.onvif.org/ver10/media/wsdl";
 
@@ -29,12 +29,15 @@ impl OnvifClient {
 
     /// Crea un cliente desde una URL ONVIF completa
     pub fn from_url(onvif_url: &str) -> Result<Self, VigilanteError> {
-        let url = Url::parse(onvif_url).map_err(|e| VigilanteError::Ptz(format!("Error parseando URL ONVIF: {}", e)))?;
+        let url = Url::parse(onvif_url)
+            .map_err(|e| VigilanteError::Ptz(format!("Error parseando URL ONVIF: {}", e)))?;
         let username = url.username().to_string();
         let password = url.password().unwrap_or("").to_string();
 
         if username.is_empty() {
-            return Err(VigilanteError::Ptz("El URL ONVIF debe incluir usuario: http://user:pass@host/...".to_string()));
+            return Err(VigilanteError::Ptz(
+                "El URL ONVIF debe incluir usuario: http://user:pass@host/...".to_string(),
+            ));
         }
 
         let mut endpoint_url = url.clone();
@@ -75,7 +78,10 @@ impl OnvifClient {
 
         let status = resp.status();
         let headers = resp.headers().clone();
-        let text = resp.text().await.map_err(|e| VigilanteError::Ptz(format!("Error leyendo respuesta: {}", e)))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| VigilanteError::Ptz(format!("Error leyendo respuesta: {}", e)))?;
 
         println!("📡 PTZ ONVIF Response:");
         println!("   Status: {}", status);
@@ -112,7 +118,10 @@ impl OnvifClient {
                         for a in e.attributes().flatten() {
                             let _attr_name = String::from_utf8_lossy(a.key.as_ref());
                             if a.key.as_ref() == b"token" {
-                                let v = a.unescape_value().map_err(|e| VigilanteError::Ptz(e.to_string()))?.to_string();
+                                let v = a
+                                    .unescape_value()
+                                    .map_err(|e| VigilanteError::Ptz(e.to_string()))?
+                                    .to_string();
                                 if !v.is_empty() {
                                     println!("   🎯 ProfileToken encontrado: [TOKEN_HIDDEN_FOR_SECURITY]");
                                     return Ok(v);
@@ -138,7 +147,9 @@ impl OnvifClient {
     }
 
     /// Intenta obtener ProfileToken con fallback a endpoint alternativo
-    pub async fn get_profile_token_with_fallback(&self) -> Result<(String, String), VigilanteError> {
+    pub async fn get_profile_token_with_fallback(
+        &self,
+    ) -> Result<(String, String), VigilanteError> {
         // Primero intenta con el endpoint actual
         match self.get_profile_token().await {
             Ok(token) => Ok((self.endpoint.clone(), token)),
@@ -147,7 +158,8 @@ impl OnvifClient {
                 println!("🔄 Intentando fallback a endpoint /media...");
 
                 // Fallback: reemplazar último segmento por 'media'
-                let mut alt = Url::parse(&self.endpoint).map_err(|e| VigilanteError::Ptz(e.to_string()))?;
+                let mut alt =
+                    Url::parse(&self.endpoint).map_err(|e| VigilanteError::Ptz(e.to_string()))?;
                 if let Ok(mut segs) = alt.path_segments_mut() {
                     segs.pop_if_empty();
                 }
@@ -160,11 +172,18 @@ impl OnvifClient {
                 alt.set_path(&path);
                 let alt_endpoint = alt.as_str().to_string();
 
-                let alt_client = Self::new(alt_endpoint.clone(), self.username.clone(), self.password.clone());
-                let token = alt_client.get_profile_token().await
-                    .map_err(|e| VigilanteError::Ptz(format!("GetProfiles fallback(media) error: {}", e)))?;
+                let alt_client = Self::new(
+                    alt_endpoint.clone(),
+                    self.username.clone(),
+                    self.password.clone(),
+                );
+                let token = alt_client.get_profile_token().await.map_err(|e| {
+                    VigilanteError::Ptz(format!("GetProfiles fallback(media) error: {}", e))
+                })?;
 
-                println!("✅ ProfileToken obtenido desde endpoint /media: [TOKEN_HIDDEN_FOR_SECURITY]");
+                println!(
+                    "✅ ProfileToken obtenido desde endpoint /media: [TOKEN_HIDDEN_FOR_SECURITY]"
+                );
                 Ok((alt_endpoint, token))
             }
         }

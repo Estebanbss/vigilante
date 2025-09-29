@@ -26,11 +26,12 @@ impl SystemStatus {
 
     async fn check_camera(&self, state: &Arc<AppState>) -> bool {
         // Check if pipeline is running
-        let pipeline_running = {
-            *state.gstreamer.pipeline_running.lock().unwrap()
-        };
+        let pipeline_running = { *state.gstreamer.pipeline_running.lock().unwrap() };
 
-        log::info!("🔍 Status check - Camera: pipeline_running={}", pipeline_running);
+        log::info!(
+            "🔍 Status check - Camera: pipeline_running={}",
+            pipeline_running
+        );
 
         // If the pipeline is running, the camera works
         if pipeline_running {
@@ -45,7 +46,12 @@ impl SystemStatus {
         let has_recent_recording = if let Some(latest_ts) = snapshot.latest_timestamp {
             let time_diff = now.signed_duration_since(latest_ts);
             let is_recent = time_diff <= recent_threshold;
-            log::info!("🔍 Status check - Camera: latest_recording_ts={:?}, time_diff={:?}, is_recent={}", latest_ts, time_diff, is_recent);
+            log::info!(
+                "🔍 Status check - Camera: latest_recording_ts={:?}, time_diff={:?}, is_recent={}",
+                latest_ts,
+                time_diff,
+                is_recent
+            );
             is_recent
         } else {
             log::info!("🔍 Status check - Camera: no latest timestamp found");
@@ -57,11 +63,12 @@ impl SystemStatus {
 
     async fn check_audio(&self, state: &Arc<AppState>) -> bool {
         // First check if pipeline is running - if so, audio should be available
-        let pipeline_running = {
-            *state.gstreamer.pipeline_running.lock().unwrap()
-        };
+        let pipeline_running = { *state.gstreamer.pipeline_running.lock().unwrap() };
 
-        log::info!("🔍 Status check - Audio: pipeline_running={}", pipeline_running);
+        log::info!(
+            "🔍 Status check - Audio: pipeline_running={}",
+            pipeline_running
+        );
 
         if pipeline_running {
             log::info!("🔍 Status check - Audio: pipeline is running, assuming audio works");
@@ -74,7 +81,10 @@ impl SystemStatus {
             *audio_lock
         };
 
-        log::info!("🔍 Status check - Audio: audio_available={}", audio_available);
+        log::info!(
+            "🔍 Status check - Audio: audio_available={}",
+            audio_available
+        );
 
         if audio_available {
             return true;
@@ -89,7 +99,12 @@ impl SystemStatus {
         let has_recent_recording = if let Some(latest_ts) = snapshot.latest_timestamp {
             let time_diff = now.signed_duration_since(latest_ts);
             let is_recent = time_diff <= recent_threshold;
-            log::info!("🔍 Status check - Audio: latest_recording_ts={:?}, time_diff={:?}, is_recent={}", latest_ts, time_diff, is_recent);
+            log::info!(
+                "🔍 Status check - Audio: latest_recording_ts={:?}, time_diff={:?}, is_recent={}",
+                latest_ts,
+                time_diff,
+                is_recent
+            );
             is_recent
         } else {
             log::info!("🔍 Status check - Audio: no latest timestamp found");
@@ -101,20 +116,27 @@ impl SystemStatus {
 
     async fn check_recordings(&self, state: &Arc<AppState>) -> bool {
         // First check if pipeline is running - if so, recordings should be happening
-        let pipeline_running = {
-            *state.gstreamer.pipeline_running.lock().unwrap()
-        };
+        let pipeline_running = { *state.gstreamer.pipeline_running.lock().unwrap() };
 
-        log::info!("🔍 Status check - Recordings: pipeline_running={}", pipeline_running);
+        log::info!(
+            "🔍 Status check - Recordings: pipeline_running={}",
+            pipeline_running
+        );
 
         if pipeline_running {
-            log::info!("🔍 Status check - Recordings: pipeline is running, assuming recordings work");
+            log::info!(
+                "🔍 Status check - Recordings: pipeline is running, assuming recordings work"
+            );
             return true;
         }
 
         // If pipeline is not running, check snapshot for recent recordings
         let snapshot = state.system.recording_snapshot.lock().await.clone();
-        log::info!("🔍 Status check - Recordings: total_count={}, latest_timestamp={:?}", snapshot.total_count, snapshot.latest_timestamp);
+        log::info!(
+            "🔍 Status check - Recordings: total_count={}, latest_timestamp={:?}",
+            snapshot.total_count,
+            snapshot.latest_timestamp
+        );
 
         // Consider that works if there are recent recordings
         if snapshot.total_count > 0 {
@@ -124,7 +146,11 @@ impl SystemStatus {
             if let Some(latest_ts) = snapshot.latest_timestamp {
                 let time_diff = now.signed_duration_since(latest_ts);
                 let is_recent = time_diff <= recent_threshold;
-                log::info!("🔍 Status check - Recordings: time_diff={:?}, is_recent={}", time_diff, is_recent);
+                log::info!(
+                    "🔍 Status check - Recordings: time_diff={:?}, is_recent={}",
+                    time_diff,
+                    is_recent
+                );
                 return is_recent;
             }
         }

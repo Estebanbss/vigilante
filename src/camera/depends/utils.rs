@@ -16,34 +16,46 @@ impl CameraUtils {
 
         // Verificar que empiece con rtsp://
         if !url.starts_with("rtsp://") {
-            return Err(VigilanteError::Parse("URL must start with rtsp://".to_string()));
+            return Err(VigilanteError::Parse(
+                "URL must start with rtsp://".to_string(),
+            ));
         }
 
         // Verificar que tenga un host válido (no localhost o IPs privadas en producción)
         let url_without_scheme = &url[7..]; // Remover "rtsp://"
-        let host_end = url_without_scheme.find('/').unwrap_or(url_without_scheme.len());
+        let host_end = url_without_scheme
+            .find('/')
+            .unwrap_or(url_without_scheme.len());
         let host = &url_without_scheme[..host_end];
 
         // Verificar que no sea localhost o IPs privadas
         if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-            return Err(VigilanteError::Auth("Localhost connections not allowed".to_string()));
+            return Err(VigilanteError::Auth(
+                "Localhost connections not allowed".to_string(),
+            ));
         }
 
         // Verificar IPs privadas (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
         if let Some(ip) = host.split(':').next() {
             if Self::is_private_ip(ip) {
-                return Err(VigilanteError::Auth("Private IP addresses not allowed".to_string()));
+                return Err(VigilanteError::Auth(
+                    "Private IP addresses not allowed".to_string(),
+                ));
             }
         }
 
         // Verificar longitud máxima
         if url.len() > 2048 {
-            return Err(VigilanteError::Parse("URL too long (max 2048 characters)".to_string()));
+            return Err(VigilanteError::Parse(
+                "URL too long (max 2048 characters)".to_string(),
+            ));
         }
 
         // Verificar caracteres peligrosos
         if url.contains("..") || url.contains("<") || url.contains(">") {
-            return Err(VigilanteError::Parse("URL contains invalid characters".to_string()));
+            return Err(VigilanteError::Parse(
+                "URL contains invalid characters".to_string(),
+            ));
         }
 
         Ok(())
@@ -87,9 +99,13 @@ impl CameraUtils {
                     let pass = before_at[colon_pos + 1..].to_string();
 
                     // Validar que las credenciales no estén vacías y no contengan caracteres peligrosos
-                    if !user.is_empty() && !pass.is_empty() &&
-                       !user.contains('\n') && !pass.contains('\n') &&
-                       !user.contains('\r') && !pass.contains('\r') {
+                    if !user.is_empty()
+                        && !pass.is_empty()
+                        && !user.contains('\n')
+                        && !pass.contains('\n')
+                        && !user.contains('\r')
+                        && !pass.contains('\r')
+                    {
                         return Some((user, pass));
                     }
                 }
@@ -107,17 +123,27 @@ impl CameraUtils {
 
         // Verificar longitud (mínimo 16 caracteres para seguridad)
         if token.len() < 16 {
-            return Err(VigilanteError::Auth("Token too short (minimum 16 characters)".to_string()));
+            return Err(VigilanteError::Auth(
+                "Token too short (minimum 16 characters)".to_string(),
+            ));
         }
 
         // Verificar longitud máxima
         if token.len() > 512 {
-            return Err(VigilanteError::Auth("Token too long (maximum 512 characters)".to_string()));
+            return Err(VigilanteError::Auth(
+                "Token too long (maximum 512 characters)".to_string(),
+            ));
         }
 
         // Verificar caracteres válidos (solo alfanuméricos, guiones, underscores, puntos)
-        if !token.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
-            return Err(VigilanteError::Auth("Token contains invalid characters (only alphanumeric, -, _, . allowed)".to_string()));
+        if !token
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            return Err(VigilanteError::Auth(
+                "Token contains invalid characters (only alphanumeric, -, _, . allowed)"
+                    .to_string(),
+            ));
         }
 
         // Verificar que no contenga palabras comunes de diccionario
@@ -125,7 +151,9 @@ impl CameraUtils {
         let token_lower = token.to_lowercase();
         for word in &common_words {
             if token_lower.contains(word) {
-                return Err(VigilanteError::Auth("Token contains common dictionary words".to_string()));
+                return Err(VigilanteError::Auth(
+                    "Token contains common dictionary words".to_string(),
+                ));
             }
         }
 
@@ -147,12 +175,22 @@ impl CameraUtils {
     /// Verifica si una cadena contiene información sensible
     pub fn contains_sensitive_info(text: &str) -> bool {
         let sensitive_patterns = [
-            "password", "passwd", "pwd", "secret", "token", "key", "auth",
-            "credential", "bearer", "authorization"
+            "password",
+            "passwd",
+            "pwd",
+            "secret",
+            "token",
+            "key",
+            "auth",
+            "credential",
+            "bearer",
+            "authorization",
         ];
 
         let text_lower = text.to_lowercase();
-        sensitive_patterns.iter().any(|pattern| text_lower.contains(pattern))
+        sensitive_patterns
+            .iter()
+            .any(|pattern| text_lower.contains(pattern))
     }
 
     /// Genera un timestamp formateado para nombres de archivo

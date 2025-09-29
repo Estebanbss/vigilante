@@ -6,14 +6,14 @@ pub mod depends;
 
 pub use depends::journal::LogReader;
 
-use axum::{extract::Path, http::StatusCode, response::Json, response::sse::Sse};
-use serde_json::json;
-use std::env;
-use std::convert::Infallible;
-use std::task::Poll;
-use futures::stream::{self, Stream};
-use std::time::Duration;
 use crate::AppState;
+use axum::{extract::Path, http::StatusCode, response::sse::Sse, response::Json};
+use futures::stream::{self, Stream};
+use serde_json::json;
+use std::convert::Infallible;
+use std::env;
+use std::task::Poll;
+use std::time::Duration;
 
 /// Manager principal para logs.
 #[derive(Clone)]
@@ -38,7 +38,9 @@ impl Default for LogsManager {
     }
 }
 
-pub async fn stream_journal_logs() -> impl axum::response::IntoResponse { "OK" }
+pub async fn stream_journal_logs() -> impl axum::response::IntoResponse {
+    "OK"
+}
 
 /// Handler para obtener entradas de log por fecha.
 /// Ruta: GET /api/logs/entries/:date
@@ -59,7 +61,10 @@ pub async fn get_log_entries_handler(
             "date": date,
             "entries": entries
         }))),
-        Err(e) => Err((StatusCode::NOT_FOUND, format!("No logs found for date {}: {}", date, e))),
+        Err(e) => Err((
+            StatusCode::NOT_FOUND,
+            format!("No logs found for date {}: {}", date, e),
+        )),
     }
 }
 
@@ -80,7 +85,9 @@ pub async fn stream_logs_sse(
             Err(tokio::sync::broadcast::error::TryRecvError::Closed) => Poll::Ready(None),
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
                 // Lagged, send a message
-                Poll::Ready(Some(Ok(axum::response::sse::Event::default().data("Log stream lagged"))))
+                Poll::Ready(Some(Ok(
+                    axum::response::sse::Event::default().data("Log stream lagged")
+                )))
             }
         }
     });

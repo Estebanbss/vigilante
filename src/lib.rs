@@ -132,8 +132,7 @@ pub struct DayMeta {
     pub last_scanned_mtime: Option<std::time::SystemTime>,
 }
 
-#[derive(Debug)]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct AppState {
     pub camera: state::CameraConfig,
     pub storage: state::StorageConfig,

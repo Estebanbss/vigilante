@@ -2,14 +2,14 @@
 //!
 //! Procesa frames para detectar cambios y activar alertas.
 
+use crate::error::VigilanteError;
+use crate::metrics::depends::collectors::MOTION_EVENTS_TOTAL;
 use crate::AppState;
+use chrono;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
-use chrono;
 use tokio::io::AsyncWriteExt;
-use crate::metrics::depends::collectors::MOTION_EVENTS_TOTAL;
-use crate::error::VigilanteError;
+use tokio::sync::Mutex;
 
 pub struct MotionDetector {
     pub log_path: std::path::PathBuf,
@@ -38,7 +38,11 @@ impl MotionDetector {
     pub async fn detect_motion(&self, frame: &[u8]) -> bool {
         let mut prev = self.previous_frame.lock().await;
         let motion = if let Some(ref prev_frame) = *prev {
-            let diff: f64 = frame.iter().zip(prev_frame.iter()).map(|(a, b)| (a.abs_diff(*b) as f64).powi(2)).sum();
+            let diff: f64 = frame
+                .iter()
+                .zip(prev_frame.iter())
+                .map(|(a, b)| (a.abs_diff(*b) as f64).powi(2))
+                .sum();
             let mse = diff / frame.len() as f64;
             mse.sqrt() > 10.0 // threshold
         } else {
@@ -55,7 +59,11 @@ impl MotionDetector {
                 let dir = self.context.storage_path().join(&date);
                 std::fs::create_dir_all(&dir).unwrap();
                 let log_path = dir.join(format!("log_{}.txt", date));
-                let file = OpenOptions::new().create(true).append(true).open(log_path).unwrap();
+                let file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_path)
+                    .unwrap();
                 *writer = Some(file.into());
             }
             if let Some(ref mut w) = *writer {

@@ -2,11 +2,11 @@
 //!
 //! Gestiona conexiones bidireccionales para streaming.
 
+use crate::error::VigilanteError;
+use crate::AppState;
 use axum::extract::ws::{Message, WebSocket};
 use serde_json;
 use std::sync::Arc;
-use crate::AppState;
-use crate::error::VigilanteError;
 
 #[derive(Clone)]
 pub struct WebSocketHandler {
@@ -54,7 +54,11 @@ impl WebSocketHandler {
         }
     }
 
-    async fn handle_text_message(&self, socket: &mut WebSocket, message: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn handle_text_message(
+        &self,
+        socket: &mut WebSocket,
+        message: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Handle different message types
         match message {
             "ping" => {
@@ -69,7 +73,9 @@ impl WebSocketHandler {
             }
             _ => {
                 // Unknown message, echo back
-                socket.send(Message::Text(format!("echo: {}", message))).await?;
+                socket
+                    .send(Message::Text(format!("echo: {}", message)))
+                    .await?;
             }
         }
         Ok(())

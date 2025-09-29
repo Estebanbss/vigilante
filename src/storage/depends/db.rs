@@ -4,8 +4,7 @@
 
 use crate::error::VigilanteError;
 
-pub struct StorageDb {
-}
+pub struct StorageDb {}
 
 impl StorageDb {
     pub fn new(_path: &str) -> Result<Self, VigilanteError> {

@@ -5,7 +5,9 @@ use gstreamer::{self as gst, prelude::*, MessageView, Pipeline};
 use gstreamer_app as gst_app;
 use std::sync::Arc;
 
-pub async fn start_simple_pipeline(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn start_simple_pipeline(
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let camera_url = state.camera.rtsp_url.clone();
 
     loop {
@@ -172,7 +174,9 @@ pub async fn start_simple_pipeline(state: Arc<AppState>) -> Result<(), Box<dyn s
                         let width = 320usize;
                         let height = 180usize;
                         let data = map.as_slice();
-                        if data.len() < width * height { return Ok(gst::FlowSuccess::Ok); }
+                        if data.len() < width * height {
+                            return Ok(gst::FlowSuccess::Ok);
+                        }
 
                         // Simple motion detection - just log for now
                         let ts = Local::now().format("%H:%M:%S").to_string();

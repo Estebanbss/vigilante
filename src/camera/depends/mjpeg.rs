@@ -3,12 +3,12 @@
 //! Gestiona la distribución de frames MJPEG a través de canales
 //! para streaming continuo.
 
+use crate::error::VigilanteError;
 use crate::AppState;
-use std::sync::Arc;
+use bytes::Bytes;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use bytes::Bytes;
-use crate::error::VigilanteError;
+use std::sync::Arc;
 
 pub struct MjpegStreamer {
     pub mjpeg_tx: tokio::sync::broadcast::Sender<Bytes>,

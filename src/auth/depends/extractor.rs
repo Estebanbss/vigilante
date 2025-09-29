@@ -19,10 +19,7 @@ where
 {
     type Rejection = (StatusCode, &'static str);
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let context = Arc::<AppState>::from_ref(state);
         let manager = context.auth();
         let provided = parts

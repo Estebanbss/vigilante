@@ -2,10 +2,10 @@
 //!
 //! Gestiona la transmisión de audio en tiempo real.
 
+use crate::error::VigilanteError;
 use crate::AppState;
 use std::sync::Arc;
 use tokio::sync::watch;
-use crate::error::VigilanteError;
 
 #[derive(Clone)]
 pub struct AudioStreamer {
@@ -16,10 +16,7 @@ pub struct AudioStreamer {
 impl AudioStreamer {
     pub fn new(context: Arc<AppState>) -> Self {
         let audio_rx = context.streaming.audio_mp3_tx.subscribe();
-        Self {
-            context,
-            audio_rx,
-        }
+        Self { context, audio_rx }
     }
 
     pub async fn start_stream(&self) -> Result<(), VigilanteError> {

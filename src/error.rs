@@ -83,10 +83,13 @@ impl axum::response::IntoResponse for VigilanteError {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match &self {
             VigilanteError::Auth(_) => (axum::http::StatusCode::UNAUTHORIZED, self.to_string()),
-            VigilanteError::Config(_) | VigilanteError::Database(_) | VigilanteError::Io(_) => {
-                (axum::http::StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
-            }
-            VigilanteError::Ptz(_) | VigilanteError::GStreamer(_) | VigilanteError::Streaming(_) => {
+            VigilanteError::Config(_) | VigilanteError::Database(_) | VigilanteError::Io(_) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                self.to_string(),
+            ),
+            VigilanteError::Ptz(_)
+            | VigilanteError::GStreamer(_)
+            | VigilanteError::Streaming(_) => {
                 (axum::http::StatusCode::BAD_REQUEST, self.to_string())
             }
             VigilanteError::Parse(_) | VigilanteError::Http(_) | VigilanteError::Other(_) => {
@@ -97,7 +100,10 @@ impl axum::response::IntoResponse for VigilanteError {
         axum::response::Response::builder()
             .status(status)
             .header("content-type", "application/json")
-            .body(axum::body::Body::from(format!("{{\"error\": \"{}\"}}", message)))
+            .body(axum::body::Body::from(format!(
+                "{{\"error\": \"{}\"}}",
+                message
+            )))
             .unwrap()
     }
 }

@@ -3,15 +3,16 @@
 //! Maneja la configuración y ejecución del pipeline de GStreamer
 //! para grabación continua de video.
 
-use crate::AppState;
+use crate::camera::depends::motion::MotionDetector;
 use crate::error::{Result, VigilanteError};
-use std::sync::Arc;
+use crate::AppState;
+use bytes::Bytes;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer::Fraction;
+use gstreamer_app as gst_app;
 use gstreamer_rtsp::RTSPLowerTrans;
-use bytes::Bytes;
-use crate::camera::depends::motion::MotionDetector;
+use std::sync::Arc;
 use tokio;
 
 pub struct CameraPipeline {
@@ -19,7 +20,8 @@ pub struct CameraPipeline {
     pub mjpeg_tx: tokio::sync::broadcast::Sender<Bytes>,
     pub motion_detector: Arc<MotionDetector>,
     pub context: Arc<AppState>,
-}impl CameraPipeline {
+}
+impl CameraPipeline {
     pub fn new(context: Arc<AppState>, motion_detector: Arc<MotionDetector>) -> Self {
         let mjpeg_tx = context.streaming.mjpeg_tx.clone();
         Self {
@@ -45,7 +47,9 @@ pub struct CameraPipeline {
         // Decode - use specific elements instead of decodebin for better control
         let rtph264depay = gst::ElementFactory::make("rtph264depay")
             .build()
-            .map_err(|e| VigilanteError::GStreamer(format!("Failed to create rtph264depay: {}", e)))?;
+            .map_err(|e| {
+                VigilanteError::GStreamer(format!("Failed to create rtph264depay: {}", e))
+            })?;
 
         let h264parse = gst::ElementFactory::make("h264parse")
             .build()
@@ -54,17 +58,40 @@ pub struct CameraPipeline {
 
         let avdec_h264 = gst::ElementFactory::make("avdec_h264")
             .build()
-            .map_err(|e| VigilanteError::GStreamer(format!("Failed to create avdec_h264: {}", e)))?;
+            .map_err(|e| {
+                VigilanteError::GStreamer(format!("Failed to create avdec_h264: {}", e))
+            })?;
 
         // Tee for branching
-        let tee = gst::ElementFactory::make("tee").build().map_err(|_| VigilanteError::GStreamer("Failed to create tee".to_string()))?;
+        let tee = gst::ElementFactory::make("tee")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create tee".to_string()))?;
 
         // MJPEG branch
-        let queue_mjpeg = gst::ElementFactory::make("queue").build().map_err(|_| VigilanteError::GStreamer("Failed to create queue_mjpeg".to_string()))?;
-        let videoconvert_mjpeg = gst::ElementFactory::make("videoconvert").build().map_err(|_| VigilanteError::GStreamer("Failed to create videoconvert_mjpeg".to_string()))?;
-        let videoscale_mjpeg = gst::ElementFactory::make("videoscale").build().map_err(|_| VigilanteError::GStreamer("Failed to create videoscale_mjpeg".to_string()))?;
-        let videorate_mjpeg = gst::ElementFactory::make("videorate").build().map_err(|_| VigilanteError::GStreamer("Failed to create videorate_mjpeg".to_string()))?;
-        let capsfilter_mjpeg = gst::ElementFactory::make("capsfilter").build().map_err(|_| VigilanteError::GStreamer("Failed to create capsfilter_mjpeg".to_string()))?;
+        let queue_mjpeg = gst::ElementFactory::make("queue")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create queue_mjpeg".to_string()))?;
+        let videoconvert_mjpeg =
+            gst::ElementFactory::make("videoconvert")
+                .build()
+                .map_err(|_| {
+                    VigilanteError::GStreamer("Failed to create videoconvert_mjpeg".to_string())
+                })?;
+        let videoscale_mjpeg = gst::ElementFactory::make("videoscale")
+            .build()
+            .map_err(|_| {
+                VigilanteError::GStreamer("Failed to create videoscale_mjpeg".to_string())
+            })?;
+        let videorate_mjpeg = gst::ElementFactory::make("videorate")
+            .build()
+            .map_err(|_| {
+                VigilanteError::GStreamer("Failed to create videorate_mjpeg".to_string())
+            })?;
+        let capsfilter_mjpeg = gst::ElementFactory::make("capsfilter")
+            .build()
+            .map_err(|_| {
+                VigilanteError::GStreamer("Failed to create capsfilter_mjpeg".to_string())
+            })?;
         let mjpeg_caps = gst::Caps::builder("video/x-raw")
             .field("width", 1280i32)
             .field("height", 720i32)
@@ -73,22 +100,38 @@ pub struct CameraPipeline {
             .build();
         capsfilter_mjpeg.set_property("caps", &mjpeg_caps);
 
-        let jpegenc = gst::ElementFactory::make("jpegenc").build().map_err(|_| VigilanteError::GStreamer("Failed to create jpegenc".to_string()))?;
+        let jpegenc = gst::ElementFactory::make("jpegenc")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create jpegenc".to_string()))?;
         jpegenc.set_property("quality", 85i32);
 
-        let appsink_mjpeg = gst::ElementFactory::make("appsink").build().map_err(|_| VigilanteError::GStreamer("Failed to create appsink_mjpeg".to_string()))?;
-        appsink_mjpeg.set_property("emit-signals", true);
-        appsink_mjpeg.set_property("sync", false);
-        appsink_mjpeg.set_property("max-buffers", 1u32);
-        appsink_mjpeg.set_property("drop", true);
+        let appsink_mjpeg = gst_app::AppSink::builder().build();
+        appsink_mjpeg.set_property("emit-signals", &true);
+        appsink_mjpeg.set_property("sync", &false);
+        appsink_mjpeg.set_max_buffers(1);
+        appsink_mjpeg.set_drop(true);
+        let jpeg_caps = gst::Caps::builder("image/jpeg").build();
+        appsink_mjpeg.set_caps(Some(&jpeg_caps));
 
         // Recording branch
-        let queue_rec = gst::ElementFactory::make("queue").build().map_err(|_| VigilanteError::GStreamer("Failed to create queue_rec".to_string()))?;
-        let videoconvert_rec = gst::ElementFactory::make("videoconvert").build().map_err(|_| VigilanteError::GStreamer("Failed to create videoconvert_rec".to_string()))?;
-        let x264enc = gst::ElementFactory::make("x264enc").build().map_err(|_| VigilanteError::GStreamer("Failed to create x264enc".to_string()))?;
-        let mp4mux = gst::ElementFactory::make("matroskamux").build().map_err(|_| VigilanteError::GStreamer("Failed to create matroskamux".to_string()))?;
+        let queue_rec = gst::ElementFactory::make("queue")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create queue_rec".to_string()))?;
+        let videoconvert_rec = gst::ElementFactory::make("videoconvert")
+            .build()
+            .map_err(|_| {
+                VigilanteError::GStreamer("Failed to create videoconvert_rec".to_string())
+            })?;
+        let x264enc = gst::ElementFactory::make("x264enc")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create x264enc".to_string()))?;
+        let mp4mux = gst::ElementFactory::make("matroskamux")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create matroskamux".to_string()))?;
         mp4mux.set_property("writing-app", "vigilante"); // Opcional, para metadata
-        let filesink = gst::ElementFactory::make("filesink").build().map_err(|_| VigilanteError::GStreamer("Failed to create filesink".to_string()))?;
+        let filesink = gst::ElementFactory::make("filesink")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create filesink".to_string()))?;
         let timestamp = crate::camera::depends::utils::CameraUtils::format_timestamp();
         let date = timestamp.split('_').next().unwrap(); // YYYY-MM-DD
         let dir = self.context.storage_path().join(date);
@@ -137,54 +180,102 @@ pub struct CameraPipeline {
         });
 
         // Add elements (include rtph264depay in the add_many call)
-        pipeline.add_many([
-            &source,
-            &rtph264depay,
-            &h264parse,
-            &avdec_h264,
-            &tee,
-            &queue_mjpeg,
-            &videoconvert_mjpeg,
-            &videoscale_mjpeg,
-            &videorate_mjpeg,
-            &capsfilter_mjpeg,
-            &jpegenc,
-            &appsink_mjpeg,
-            &queue_rec,
-            &videoconvert_rec,
-            &x264enc,
-            &mp4mux,
-            &filesink,
-        ]).map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
+        pipeline
+            .add_many([
+                &source,
+                &rtph264depay,
+                &h264parse,
+                &avdec_h264,
+                &tee,
+                &queue_mjpeg,
+                &videoconvert_mjpeg,
+                &videoscale_mjpeg,
+                &videorate_mjpeg,
+                &capsfilter_mjpeg,
+                &jpegenc,
+                appsink_mjpeg.upcast_ref(),
+                &queue_rec,
+                &videoconvert_rec,
+                &x264enc,
+                &mp4mux,
+                &filesink,
+            ])
+            .map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
         // Link the decode chain
-        gst::Element::link_many([&rtph264depay, &h264parse, &avdec_h264]).map_err(|_| VigilanteError::GStreamer("Failed to link decode chain".to_string()))?;
+        gst::Element::link_many([&rtph264depay, &h264parse, &avdec_h264])
+            .map_err(|_| VigilanteError::GStreamer("Failed to link decode chain".to_string()))?;
 
         // Link avdec_h264 directly to tee
-        avdec_h264.link(&tee).map_err(|_| VigilanteError::GStreamer("Failed to link avdec_h264 to tee".to_string()))?;
+        avdec_h264.link(&tee).map_err(|_| {
+            VigilanteError::GStreamer("Failed to link avdec_h264 to tee".to_string())
+        })?;
 
         // Motion branch
-        let queue_motion = gst::ElementFactory::make("queue").build().map_err(|_| VigilanteError::GStreamer("Failed to create queue_motion".to_string()))?;
-        let videoconvert_motion = gst::ElementFactory::make("videoconvert").build().map_err(|_| VigilanteError::GStreamer("Failed to create videoconvert_motion".to_string()))?;
-        let appsink_motion = gst::ElementFactory::make("appsink").build().map_err(|_| VigilanteError::GStreamer("Failed to create appsink_motion".to_string()))?;
-        appsink_motion.set_property("emit-signals", true);
-        appsink_motion.set_property("caps", gst::Caps::builder("video/x-raw").build());
+        let queue_motion = gst::ElementFactory::make("queue")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create queue_motion".to_string()))?;
+        let videoconvert_motion =
+            gst::ElementFactory::make("videoconvert")
+                .build()
+                .map_err(|_| {
+                    VigilanteError::GStreamer("Failed to create videoconvert_motion".to_string())
+                })?;
+        let motion_caps = gst::Caps::builder("video/x-raw").build();
+        let appsink_motion = gst_app::AppSink::builder().caps(&motion_caps).build();
+        appsink_motion.set_property("emit-signals", &true);
+        appsink_motion.set_property("sync", &false);
 
         // Add motion elements
-        pipeline.add_many([&queue_motion, &videoconvert_motion, &appsink_motion]).map_err(|_| VigilanteError::GStreamer("Failed to add motion elements".to_string()))?;
-        gst::Element::link_many([&queue_motion, &videoconvert_motion, &appsink_motion]).map_err(|_| VigilanteError::GStreamer("Failed to link motion".to_string()))?;
+        pipeline
+            .add_many([
+                &queue_motion,
+                &videoconvert_motion,
+                appsink_motion.upcast_ref(),
+            ])
+            .map_err(|_| VigilanteError::GStreamer("Failed to add motion elements".to_string()))?;
+        gst::Element::link_many([
+            &queue_motion,
+            &videoconvert_motion,
+            appsink_motion.upcast_ref(),
+        ])
+        .map_err(|_| VigilanteError::GStreamer("Failed to link motion".to_string()))?;
         // Connect motion signal
         let detector_clone = Arc::clone(&self.motion_detector);
-        appsink_motion.connect("new-sample", false, move |values| {
+        let appsink_motion_signal = appsink_motion.clone();
+        appsink_motion.connect("new-sample", false, move |_| {
             let detector = Arc::clone(&detector_clone);
-            let sample = values[1].get::<gst::Sample>().unwrap();
-            let buffer = sample.buffer().unwrap();
-            let map = buffer.map_readable().unwrap();
+
+            let sample = match appsink_motion_signal.pull_sample() {
+                Ok(sample) => sample,
+                Err(err) => {
+                    log::warn!("⚠️ Failed to pull motion sample: {:?}", err);
+                    return Some(gst::FlowReturn::Error.to_value());
+                }
+            };
+
+            let buffer = match sample.buffer() {
+                Some(buffer) => buffer,
+                None => {
+                    log::warn!("⚠️ Motion sample missing buffer");
+                    return Some(gst::FlowReturn::Ok.to_value());
+                }
+            };
+
+            let map = match buffer.map_readable() {
+                Ok(map) => map,
+                Err(err) => {
+                    log::warn!("⚠️ Failed to map motion buffer: {:?}", err);
+                    return Some(gst::FlowReturn::Error.to_value());
+                }
+            };
+
             let frame = map.as_slice().to_vec();
             tokio::spawn(async move {
                 let _ = detector.detect_motion(&frame).await;
             });
-            None
+
+            Some(gst::FlowReturn::Ok.to_value())
         });
 
         // Link static parts
@@ -195,34 +286,66 @@ pub struct CameraPipeline {
             &videorate_mjpeg,
             &capsfilter_mjpeg,
             &jpegenc,
-            &appsink_mjpeg,
-        ]).map_err(|_| VigilanteError::GStreamer("Failed to link MJPEG".to_string()))?;
-        gst::Element::link_many([&queue_rec, &videoconvert_rec, &x264enc, &mp4mux, &filesink]).map_err(|_| VigilanteError::GStreamer("Failed to link recording".to_string()))?;
+            appsink_mjpeg.upcast_ref(),
+        ])
+        .map_err(|_| VigilanteError::GStreamer("Failed to link MJPEG".to_string()))?;
+        gst::Element::link_many([&queue_rec, &videoconvert_rec, &x264enc, &mp4mux, &filesink])
+            .map_err(|_| VigilanteError::GStreamer("Failed to link recording".to_string()))?;
 
         // Connect MJPEG signal
         let context_weak = Arc::downgrade(&self.context);
-        appsink_mjpeg.connect("new-sample", false, move |values| {
+        let appsink_mjpeg_signal = appsink_mjpeg.clone();
+        appsink_mjpeg.connect("new-sample", false, move |_| {
             let context = match context_weak.upgrade() {
                 Some(c) => c,
-                None => return None,
+                None => {
+                    log::warn!("📹 MJPEG context dropped, stopping callback");
+                    return Some(gst::FlowReturn::Flushing.to_value());
+                }
             };
-            let sample = values[1].get::<gst::Sample>().unwrap();
-            let buffer = sample.buffer().unwrap();
-            let map = buffer.map_readable().unwrap();
+
+            let sample = match appsink_mjpeg_signal.pull_sample() {
+                Ok(sample) => sample,
+                Err(err) => {
+                    log::warn!("📹 Failed to pull MJPEG sample: {:?}", err);
+                    return Some(gst::FlowReturn::Error.to_value());
+                }
+            };
+
+            let buffer = match sample.buffer() {
+                Some(buffer) => buffer,
+                None => {
+                    log::warn!("📹 MJPEG sample missing buffer");
+                    return Some(gst::FlowReturn::Ok.to_value());
+                }
+            };
+
+            let map = match buffer.map_readable() {
+                Ok(map) => map,
+                Err(err) => {
+                    log::warn!("📹 Failed to map MJPEG buffer: {:?}", err);
+                    return Some(gst::FlowReturn::Error.to_value());
+                }
+            };
+
             let data = map.as_slice();
 
-            // Debug logging for MJPEG frames
             log::info!("📹 MJPEG frame received, size: {} bytes", data.len());
 
-            let result = context.streaming.mjpeg_tx.send(Bytes::copy_from_slice(data));
+            let result = context
+                .streaming
+                .mjpeg_tx
+                .send(Bytes::copy_from_slice(data));
             match result {
                 Ok(_) => log::info!("📹 MJPEG frame sent to broadcast channel"),
-                Err(e) => log::warn!("📹 Failed to send MJPEG frame to broadcast channel: {:?}", e),
+                Err(e) => log::warn!(
+                    "📹 Failed to send MJPEG frame to broadcast channel: {:?}",
+                    e
+                ),
             }
-            None
+
+            Some(gst::FlowReturn::Ok.to_value())
         });
-
-
 
         // Link tee to branches (request source pads from tee)
         let tee_src_pad_mjpeg = tee.request_pad_simple("src_%u").unwrap();
@@ -256,9 +379,11 @@ pub struct CameraPipeline {
         log::info!("🔧 Start recording called");
         if let Some(ref pipeline) = self.pipeline {
             log::info!("🔧 Pipeline exists, setting state to Playing");
-            pipeline.set_state(gst::State::Playing).map_err(|_| VigilanteError::GStreamer("Failed to start pipeline".to_string()))?;
+            pipeline
+                .set_state(gst::State::Playing)
+                .map_err(|_| VigilanteError::GStreamer("Failed to start pipeline".to_string()))?;
             log::info!("🔧 Pipeline state set to Playing successfully");
-            
+
             // Start periodic recording status logging
             let context = Arc::clone(&self.context);
             tokio::spawn(async move {
@@ -271,20 +396,27 @@ pub struct CameraPipeline {
                     let dir = context.storage_path().join(date);
                     let filename = format!("{}.mkv", date);
                     let path = dir.join(&filename);
-                    
+
                     if path.exists() {
                         if let Ok(metadata) = std::fs::metadata(&path) {
                             let size_mb = metadata.len() / (1024 * 1024);
-                            log::info!("✅ Archivo creciendo: {} ({} MB) - path: {}", filename, size_mb, path.display());
+                            log::info!(
+                                "✅ Archivo creciendo: {} ({} MB) - path: {}",
+                                filename,
+                                size_mb,
+                                path.display()
+                            );
                         }
                     }
                 }
             });
-            
+
             Ok(())
         } else {
             log::info!("🔧 Pipeline not found in start_recording");
-            Err(VigilanteError::GStreamer("Pipeline not warmed up".to_string()))
+            Err(VigilanteError::GStreamer(
+                "Pipeline not warmed up".to_string(),
+            ))
         }
     }
 }

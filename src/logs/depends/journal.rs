@@ -14,12 +14,20 @@ impl LogReader {
         Self { storage_path }
     }
 
-    pub async fn get_log_entries(&self, date: &str, limit: Option<usize>) -> Result<Vec<String>, String> {
-        let log_path = Path::new(&self.storage_path).join(date).join(format!("{}.txt", date));
+    pub async fn get_log_entries(
+        &self,
+        date: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<String>, String> {
+        let log_path = Path::new(&self.storage_path)
+            .join(date)
+            .join(format!("{}.txt", date));
         if !log_path.exists() {
             return Ok(Vec::new());
         }
-        let content = fs::read_to_string(&log_path).await.map_err(|e| format!("Failed to read log file: {}", e))?;
+        let content = fs::read_to_string(&log_path)
+            .await
+            .map_err(|e| format!("Failed to read log file: {}", e))?;
         let mut entries: Vec<String> = content.lines().map(|s| s.to_string()).collect();
         if let Some(lim) = limit {
             entries.truncate(lim);

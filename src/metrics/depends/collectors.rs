@@ -2,34 +2,35 @@
 //!
 //! Define y registra métricas de Prometheus.
 
-use prometheus::{register_counter, register_gauge, Counter, Gauge, Encoder, TextEncoder};
 use lazy_static::lazy_static;
+use prometheus::{register_counter, register_gauge, Counter, Encoder, Gauge, TextEncoder};
 
 lazy_static! {
     pub static ref HTTP_REQUESTS_TOTAL: Counter = register_counter!(
         "vigilante_http_requests_total",
         "Total number of HTTP requests"
-    ).unwrap();
-
+    )
+    .unwrap();
     pub static ref HTTP_REQUESTS_DURATION: Counter = register_counter!(
         "vigilante_http_requests_duration_seconds_total",
         "Total duration of HTTP requests in seconds"
-    ).unwrap();
-
+    )
+    .unwrap();
     pub static ref HTTP_REQUESTS_ERRORS: Counter = register_counter!(
         "vigilante_http_requests_errors_total",
         "Total number of HTTP request errors"
-    ).unwrap();
-
+    )
+    .unwrap();
     pub static ref UPTIME_SECONDS: Gauge = register_gauge!(
         "vigilante_uptime_seconds",
         "Uptime of the service in seconds"
-    ).unwrap();
-
+    )
+    .unwrap();
     pub static ref MOTION_EVENTS_TOTAL: Counter = register_counter!(
         "vigilante_motion_events_total",
         "Total number of motion detection events"
-    ).unwrap();
+    )
+    .unwrap();
 }
 
 pub struct MetricsCollector;

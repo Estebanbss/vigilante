@@ -25,7 +25,11 @@ impl AuthMiddleware {
                 if host == bypass_domain {
                     // Si hay secreto requerido, verificar
                     if let Some(required_secret) = &context.auth.bypass_domain_secret {
-                        if let Some(provided_secret) = request.headers().get("x-bypass-secret").and_then(|s| s.to_str().ok()) {
+                        if let Some(provided_secret) = request
+                            .headers()
+                            .get("x-bypass-secret")
+                            .and_then(|s| s.to_str().ok())
+                        {
                             if provided_secret == required_secret {
                                 return Ok(next.run(request).await);
                             }

@@ -7,16 +7,16 @@ pub mod depends;
 pub use depends::audio::AudioStreamer;
 pub use depends::websocket::WebSocketHandler;
 
+use crate::error::VigilanteError;
 use axum::{
     extract::State,
-    response::{IntoResponse, Response},
     http::{header, StatusCode},
+    response::{IntoResponse, Response},
 };
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as TokioStreamExt;
-use crate::error::VigilanteError;
 
 /// Manager principal para streaming.
 #[derive(Clone)]
@@ -60,9 +60,7 @@ impl StreamManager {
 }
 
 #[axum::debug_handler]
-pub async fn stream_audio_handler(
-    State(state): State<Arc<crate::AppState>>,
-) -> impl IntoResponse {
+pub async fn stream_audio_handler(State(state): State<Arc<crate::AppState>>) -> impl IntoResponse {
     use axum::body::Body;
 
     let mut audio_rx = state.streaming.audio_mp3_tx.subscribe();
@@ -97,7 +95,10 @@ pub async fn stream_mjpeg_handler(
     if method == axum::http::Method::HEAD {
         return Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
+            .header(
+                header::CONTENT_TYPE,
+                "multipart/x-mixed-replace; boundary=frame",
+            )
             .header(header::CACHE_CONTROL, "no-cache")
             .header(header::CONNECTION, "close")
             .body(axum::body::Body::empty())
@@ -120,7 +121,10 @@ pub async fn stream_mjpeg_handler(
 
     let stream = TokioStreamExt::map(BroadcastStream::new(mjpeg_rx), |result| match result {
         Ok(bytes) => {
-            log::info!("📺 MJPEG frame received in stream handler, size: {} bytes", bytes.len());
+            log::info!(
+                "📺 MJPEG frame received in stream handler, size: {} bytes",
+                bytes.len()
+            );
             // Format as multipart
             let multipart_frame = format!(
                 "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
@@ -130,7 +134,7 @@ pub async fn stream_mjpeg_handler(
             frame_data.extend_from_slice(&bytes);
             frame_data.extend_from_slice(b"\r\n");
             Ok::<_, Infallible>(bytes::Bytes::from(frame_data))
-        },
+        }
         Err(e) => {
             log::warn!("📺 MJPEG broadcast channel error: {:?}", e);
             Ok(bytes::Bytes::new())
@@ -141,7 +145,10 @@ pub async fn stream_mjpeg_handler(
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
+        .header(
+            header::CONTENT_TYPE,
+            "multipart/x-mixed-replace; boundary=frame",
+        )
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::CONNECTION, "close")
         .body(body)

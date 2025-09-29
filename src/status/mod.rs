@@ -4,9 +4,9 @@
 
 pub mod depends;
 
-pub use depends::system::SystemStatus;
 use crate::AppState;
 use axum::{extract::State, response::Json};
+pub use depends::system::SystemStatus;
 use std::sync::Arc;
 
 /// Manager principal para estado.

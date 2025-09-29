@@ -7,10 +7,10 @@ pub mod depends;
 
 pub use depends::OnvifClient;
 
+use crate::error::VigilanteError;
 use crate::{auth::RequireAuth, AppState};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use std::sync::Arc;
-use crate::error::VigilanteError;
 
 #[derive(serde::Serialize)]
 pub struct ApiResponse {
@@ -32,13 +32,19 @@ impl PtzManager {
     /// Ejecuta un comando PTZ con manejo automático de cliente y perfil
     async fn execute_command<F>(&self, command: F) -> Result<(), VigilanteError>
     where
-        F: for<'a> FnOnce(&'a OnvifClient, &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), VigilanteError>> + Send + 'a>>,
+        F: for<'a> FnOnce(
+            &'a OnvifClient,
+            &'a str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), VigilanteError>> + Send + 'a>,
+        >,
     {
         let client = OnvifClient::from_url(&self.onvif_url)?;
         let (endpoint, token) = client.get_profile_token_with_fallback().await?;
 
         // Crear cliente con el endpoint correcto
-        let final_client = OnvifClient::new(endpoint, client.username.clone(), client.password.clone());
+        let final_client =
+            OnvifClient::new(endpoint, client.username.clone(), client.password.clone());
 
         println!("🎯 Ejecutando comando PTZ con ProfileToken: {}", token);
         command(&final_client, &token).await
@@ -46,14 +52,52 @@ impl PtzManager {
 
     pub async fn move_camera(&self, direction: &str) -> Result<(), VigilanteError> {
         match direction {
-            "left" => self.execute_command(|client, token| Box::pin(depends::commands::pan_left(client, token))).await,
-            "right" => self.execute_command(|client, token| Box::pin(depends::commands::pan_right(client, token))).await,
-            "up" => self.execute_command(|client, token| Box::pin(depends::commands::tilt_up(client, token))).await,
-            "down" => self.execute_command(|client, token| Box::pin(depends::commands::tilt_down(client, token))).await,
-            "zoom_in" => self.execute_command(|client, token| Box::pin(depends::commands::zoom_in(client, token))).await,
-            "zoom_out" => self.execute_command(|client, token| Box::pin(depends::commands::zoom_out(client, token))).await,
-            "stop" => self.execute_command(|client, token| Box::pin(depends::commands::stop_all(client, token))).await,
-            _ => Err(VigilanteError::Ptz(format!("Dirección PTZ desconocida: {}", direction))),
+            "left" => {
+                self.execute_command(|client, token| {
+                    Box::pin(depends::commands::pan_left(client, token))
+                })
+                .await
+            }
+            "right" => {
+                self.execute_command(|client, token| {
+                    Box::pin(depends::commands::pan_right(client, token))
+                })
+                .await
+            }
+            "up" => {
+                self.execute_command(|client, token| {
+                    Box::pin(depends::commands::tilt_up(client, token))
+                })
+                .await
+            }
+            "down" => {
+                self.execute_command(|client, token| {
+                    Box::pin(depends::commands::tilt_down(client, token))
+                })
+                .await
+            }
+            "zoom_in" => {
+                self.execute_command(|client, token| {
+                    Box::pin(depends::commands::zoom_in(client, token))
+                })
+                .await
+            }
+            "zoom_out" => {
+                self.execute_command(|client, token| {
+                    Box::pin(depends::commands::zoom_out(client, token))
+                })
+                .await
+            }
+            "stop" => {
+                self.execute_command(|client, token| {
+                    Box::pin(depends::commands::stop_all(client, token))
+                })
+                .await
+            }
+            _ => Err(VigilanteError::Ptz(format!(
+                "Dirección PTZ desconocida: {}",
+                direction
+            ))),
         }
     }
 }

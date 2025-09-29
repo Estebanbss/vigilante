@@ -6,10 +6,10 @@ use crate::error::VigilanteError;
 
 pub mod depends;
 
-pub use depends::middleware::AuthMiddleware;
+pub use depends::bypass::BypassHandler;
 pub use depends::check::TokenChecker;
 pub use depends::extractor::RequireAuth;
-pub use depends::bypass::BypassHandler;
+pub use depends::middleware::AuthMiddleware;
 
 #[derive(Clone, Debug, Default)]
 pub struct AuthConfig {
@@ -50,7 +50,13 @@ pub async fn flexible_auth_middleware(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     // Usar AuthMiddleware para validación completa con bypass
-    match crate::auth::depends::middleware::AuthMiddleware::auth_guard(axum::extract::State(context), req, next).await {
+    match crate::auth::depends::middleware::AuthMiddleware::auth_guard(
+        axum::extract::State(context),
+        req,
+        next,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(status) => axum::response::Response::builder()
             .status(status)
