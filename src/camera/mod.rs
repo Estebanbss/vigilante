@@ -12,7 +12,6 @@ pub use depends::utils::CameraUtils;
 
 use std::sync::Arc;
 use crate::AppState;
-use gstreamer as gst;
 
 /// Manager principal para la cámara.
 #[derive(Clone)]
@@ -37,7 +36,7 @@ impl Default for CameraManager {
 }
 
 pub async fn start_camera_pipeline(_camera_rtsp_url: String, state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    gst::init()?;
+    // gst::init()?; // Already called in main.rs
 
     let detector = Arc::new(depends::motion::MotionDetector::new(state.clone()));
     let mut pipeline = depends::ffmpeg::CameraPipeline::new(state.clone(), Arc::clone(&detector));
@@ -50,6 +49,7 @@ pub async fn start_camera_pipeline(_camera_rtsp_url: String, state: Arc<AppState
     // Mark audio as available (for now, since camera pipeline indicates system is working)
     *state.streaming.audio_available.lock().unwrap() = true;
     *state.streaming.last_audio_timestamp.lock().unwrap() = Some(std::time::Instant::now());
+    log::info!("🔧 Audio available flag set to true");
 
     // Loop for any additional processing, but motion is handled in pipeline
     loop {

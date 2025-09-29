@@ -133,6 +133,7 @@ pub struct CameraPipeline {
         // Store pipeline locally and in AppState
         self.pipeline = Some(pipeline.clone());
         *self.context.gstreamer.pipeline.lock().await = Some(pipeline);
+        log::info!("🔧 Pipeline stored in AppState successfully");
         Ok(())
     }
 
