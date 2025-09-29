@@ -3,6 +3,7 @@
 //! Separa las responsabilidades de AppState en structs más pequeños y enfocados.
 
 use crate::{AuthManager, NotificationManager, RecordingSnapshot};
+use bytes::Bytes;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -32,6 +33,7 @@ pub struct StreamingState {
     pub audio_mp3_tx: broadcast::Sender<bytes::Bytes>,
     pub audio_available: Arc<StdMutex<bool>>,
     pub last_audio_timestamp: Arc<StdMutex<Option<std::time::Instant>>>,
+    pub mp4_init_segment: Arc<StdMutex<Option<Bytes>>>,
 }
 
 /// Estado de logging

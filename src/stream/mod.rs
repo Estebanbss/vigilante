@@ -15,8 +15,7 @@ use axum::{
 };
 use std::convert::Infallible;
 use std::sync::Arc;
-use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::StreamExt as TokioStreamExt;
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
 /// Manager principal para streaming.
 pub struct StreamManager {
@@ -133,22 +132,40 @@ pub async fn stream_mjpeg_handler(
         }
     }
 
-    let mjpeg_rx = state.streaming.mjpeg_tx.subscribe();
+    let init_segment = {
+        let guard = state.streaming.mp4_init_segment.lock().unwrap();
+        guard.clone()
+    };
+
+    let mut broadcast_stream = BroadcastStream::new(state.streaming.mjpeg_tx.subscribe());
     log::info!("📺 MP4 stream handler: subscribed to broadcast channel");
 
-    let stream = TokioStreamExt::map(BroadcastStream::new(mjpeg_rx), |result| match result {
-        Ok(bytes) => {
+    let stream = async_stream::stream! {
+        if let Some(init) = init_segment {
             log::debug!(
-                "📺 MP4 fragment received in stream handler, size: {} bytes",
-                bytes.len()
+                "📺 Sending MP4 init segment to new client ({} bytes)",
+                init.len()
             );
-            Ok::<_, Infallible>(bytes)
+            yield Ok::<_, Infallible>(init);
+        } else {
+            log::warn!("📺 Client connected before MP4 init segment was available");
         }
-        Err(e) => {
-            log::warn!("📺 MP4 broadcast channel error: {:?}", e);
-            Ok(bytes::Bytes::new())
+
+        while let Some(result) = broadcast_stream.next().await {
+            match result {
+                Ok(bytes) => {
+                    log::debug!(
+                        "📺 MP4 fragment received in stream handler, size: {} bytes",
+                        bytes.len()
+                    );
+                    yield Ok::<_, Infallible>(bytes);
+                }
+                Err(e) => {
+                    log::warn!("📺 MP4 broadcast channel error: {:?}", e);
+                }
+            }
         }
-    });
+    };
 
     let body = axum::body::Body::from_stream(stream);
 

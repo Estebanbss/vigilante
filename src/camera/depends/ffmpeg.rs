@@ -36,11 +36,21 @@ impl CameraPipeline {
     pub async fn warm_up(&mut self) -> Result<()> {
         let pipeline = gst::Pipeline::new();
 
+        {
+            let mut init_guard = self
+                .context
+                .streaming
+                .mp4_init_segment
+                .lock()
+                .unwrap();
+            *init_guard = None;
+        }
+
         let source = gst::ElementFactory::make("rtspsrc")
             .build()
             .map_err(|e| VigilanteError::GStreamer(format!("Failed to create rtspsrc: {}", e)))?;
         source.set_property("location", self.context.camera_rtsp_url());
-        source.set_property("latency", 1000u32);
+    source.set_property("latency", 500u32);
         source.set_property("protocols", RTSPLowerTrans::TCP);
         source.set_property("do-rtcp", true);
 
@@ -406,6 +416,22 @@ impl CameraPipeline {
                 };
 
                 let data = Bytes::copy_from_slice(map.as_slice());
+
+                {
+                    let mut init_guard = context.streaming.mp4_init_segment.lock().unwrap();
+                    if init_guard.is_none() {
+                        let slice = data.as_ref();
+                        let has_ftyp = slice.windows(4).any(|w| w == b"ftyp");
+                        let has_moov = slice.windows(4).any(|w| w == b"moov");
+                        if has_ftyp || has_moov {
+                            *init_guard = Some(data.clone());
+                            log::info!(
+                                "📦 Segmento MP4 inicial cacheado ({} bytes)",
+                                slice.len()
+                            );
+                        }
+                    }
+                }
 
                 log::info!("📹 Live MP4 fragment received, size: {} bytes", data.len());
 
