@@ -112,7 +112,15 @@ pub struct CameraPipeline {
             let buffer = sample.buffer().unwrap();
             let map = buffer.map_readable().unwrap();
             let data = map.as_slice();
-            let _ = context.streaming.mjpeg_tx.send(Bytes::copy_from_slice(data));
+
+            // Debug logging for MJPEG frames
+            log::debug!("📹 MJPEG frame received, size: {} bytes", data.len());
+
+            let result = context.streaming.mjpeg_tx.send(Bytes::copy_from_slice(data));
+            match result {
+                Ok(_) => log::debug!("📹 MJPEG frame sent to broadcast channel"),
+                Err(e) => log::warn!("📹 Failed to send MJPEG frame to broadcast channel: {:?}", e),
+            }
             None
         });
 

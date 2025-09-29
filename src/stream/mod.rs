@@ -116,9 +116,17 @@ pub async fn stream_mjpeg_handler(
     }
 
     let mjpeg_rx = state.streaming.mjpeg_tx.subscribe();
+    log::info!("📺 MJPEG stream handler: subscribed to broadcast channel");
+
     let stream = TokioStreamExt::map(BroadcastStream::new(mjpeg_rx), |result| match result {
-        Ok(bytes) => Ok::<_, Infallible>(bytes),
-        Err(_) => Ok(bytes::Bytes::new()), // Send empty bytes on lag
+        Ok(bytes) => {
+            log::debug!("📺 MJPEG frame received in stream handler, size: {} bytes", bytes.len());
+            Ok::<_, Infallible>(bytes)
+        },
+        Err(e) => {
+            log::warn!("📺 MJPEG broadcast channel error: {:?}", e);
+            Ok(bytes::Bytes::new())
+        }
     });
 
     let body = axum::body::Body::from_stream(stream);
