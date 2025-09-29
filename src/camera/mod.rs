@@ -47,6 +47,7 @@ pub async fn start_camera_pipeline(_camera_rtsp_url: String, state: Arc<AppState
     streamer.start_streaming().await?;
 
     // Mark audio as available (for now, since camera pipeline indicates system is working)
+    log::info!("🔧 About to set audio available flag");
     *state.streaming.audio_available.lock().unwrap() = true;
     *state.streaming.last_audio_timestamp.lock().unwrap() = Some(std::time::Instant::now());
     log::info!("🔧 Audio available flag set to true");
