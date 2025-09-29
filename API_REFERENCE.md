@@ -21,8 +21,8 @@ Todos los endpoints requieren autenticación mediante:
 - `GET /api/metrics` - Métricas de rendimiento Prometheus (HTTP GET)
 
 ### Cámara y Streaming
-- `GET /stream/mjpeg` - Stream MJPEG en vivo (HTTP GET)
-- `GET /stream/audio` - Stream de audio MP3 (HTTP GET)
+- `GET /api/live/mjpeg` - Stream MJPEG en vivo (HTTP GET)
+- `GET /api/live/audio` - Stream de audio MP3 (HTTP GET)
 
 ### Control PTZ
 - `POST /api/ptz/pan_left` - Mover cámara a la izquierda (HTTP POST)
@@ -36,8 +36,6 @@ Todos los endpoints requieren autenticación mediante:
 ### Almacenamiento
 - `GET /api/recordings/summary` - Resumen de grabaciones por día (HTTP GET)
 - `GET /api/recordings/day/:date` - Lista detallada de grabaciones de un día específico (HTTP GET)
-- `GET /api/recordings/{path}` - Streaming de grabación antigua (HTTP GET)
-- `DELETE /api/recordings/{path}` - Eliminar grabación (HTTP DELETE)
 - `GET /api/recordings/sse` - Eventos SSE de grabaciones (Server-Sent Events)
 
 ### WebSocket
@@ -52,16 +50,16 @@ Todos los endpoints requieren autenticación mediante:
 ### Ver stream en vivo (HTTP GET)
 ```bash
 curl -H "Authorization: Bearer mi_token_seguro" \
-     http://localhost:8080/stream/mjpeg
+     http://localhost:8080/api/live/mjpeg
 ```
 
 ### Streaming con token en query (HTTP GET)
 ```bash
 # MJPEG
-curl "http://localhost:8080/stream/mjpeg?token=mi_token_seguro"
+curl "http://localhost:8080/api/live/mjpeg?token=mi_token_seguro"
 
 # Audio
-curl "http://localhost:8080/stream/audio?token=mi_token_seguro"
+curl "http://localhost:8080/api/live/audio?token=mi_token_seguro"
 ```
 
 ### Mover cámara (HTTP POST)

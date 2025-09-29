@@ -439,9 +439,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/live/audio", get(stream_audio_handler))
         .route("/api/logs/stream", get(stream_logs_sse))
         .route("/api/logs/entries/:date", get(get_log_entries_handler))
-    .route("/api/recordings/summary", get(recordings_summary_ws))
-    .route("/api/recordings/day/:date", get(recordings_by_day))
-    .route("/api/storage/stream", get(storage_stream_sse))
+        .route("/api/recordings/summary", get(recordings_summary_ws))
+        .route("/api/recordings/day/:date", get(recordings_by_day))
+        .route("/api/storage/stream", get(storage_stream_sse))
         .route("/api/recordings/stream/*path", get(stream_live_recording))
         .route("/api/recordings/delete/*path", delete(delete_recording))
         // Rutas para el control PTZ
