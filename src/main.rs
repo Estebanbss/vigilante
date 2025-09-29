@@ -180,6 +180,34 @@ async fn log_requests(req: Request<Body>, next: Next) -> Response {
 
     // Capturar el body de la respuesta para logging si es pequeño
     let (parts, body) = response.into_parts();
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let is_streaming = content_type.contains("multipart/x-mixed-replace")
+        || content_type.contains("text/event-stream")
+        || content_type.starts_with("audio/")
+        || content_type.starts_with("video/");
+
+    if is_streaming {
+        info!(
+            "← {} {} {} ({} ms) [size: stream] [body: <stream>]",
+            method,
+            uri,
+            status.as_u16(),
+            elapsed.as_millis()
+        );
+
+        metrics::depends::collectors::MetricsCollector::increment_requests();
+        metrics::depends::collectors::MetricsCollector::record_duration(elapsed.as_secs_f64());
+        if status.is_client_error() || status.is_server_error() {
+            metrics::depends::collectors::MetricsCollector::increment_errors();
+        }
+
+        return Response::from_parts(parts, body);
+    }
+
     let body_bytes = match to_bytes(body, 2048).await {
         Ok(bytes) => bytes,
         Err(_) => Bytes::new(),
