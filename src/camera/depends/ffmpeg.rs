@@ -131,6 +131,7 @@ pub struct CameraPipeline {
         source.link(&decode).map_err(|_| "Failed to link source to decode")?;
 
         // Store pipeline locally and in AppState
+        log::info!("🔧 About to store pipeline in AppState");
         self.pipeline = Some(pipeline.clone());
         *self.context.gstreamer.pipeline.lock().await = Some(pipeline);
         log::info!("🔧 Pipeline stored in AppState successfully");
@@ -138,8 +139,11 @@ pub struct CameraPipeline {
     }
 
     pub async fn start_recording(&self) -> Result<()> {
+        log::info!("🔧 About to start recording pipeline");
         if let Some(ref pipeline) = self.pipeline {
+            log::info!("🔧 Setting pipeline state to Playing");
             pipeline.set_state(gst::State::Playing).map_err(|_| VigilanteError::GStreamer("Failed to start pipeline".to_string()))?;
+            log::info!("🔧 Pipeline started successfully");
             
             // Start periodic recording status logging
             let context = Arc::clone(&self.context);
@@ -165,6 +169,7 @@ pub struct CameraPipeline {
             
             Ok(())
         } else {
+            log::info!("🔧 Pipeline not warmed up");
             Err(VigilanteError::GStreamer("Pipeline not warmed up".to_string()))
         }
     }
