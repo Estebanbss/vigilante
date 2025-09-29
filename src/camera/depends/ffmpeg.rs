@@ -183,6 +183,9 @@ impl CameraPipeline {
         let rtppcmadepay = gst::ElementFactory::make("rtppcmadepay")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create rtppcmadepay".to_string()))?;
+        let alawdec = gst::ElementFactory::make("alawdec")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create alawdec".to_string()))?;
         let audioconvert = gst::ElementFactory::make("audioconvert")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create audioconvert".to_string()))?;
@@ -224,6 +227,7 @@ impl CameraPipeline {
                 &jpegenc,
                 appsink_mjpeg.upcast_ref(),
                 &rtppcmadepay,
+                &alawdec,
                 &audioconvert,
                 &audioresample,
                 &lamemp3enc,
@@ -233,6 +237,7 @@ impl CameraPipeline {
 
         let rtph264depay_clone = rtph264depay.clone();
         let rtppcmadepay_clone = rtppcmadepay.clone();
+        let alawdec_clone = alawdec.clone();
         let audioconvert_clone = audioconvert.clone();
         let audioresample_clone = audioresample.clone();
         let lamemp3enc_clone = lamemp3enc.clone();
@@ -267,6 +272,7 @@ impl CameraPipeline {
                                         // Now link the audio branch
                                         if let Err(e) = gst::Element::link_many([
                                             &rtppcmadepay_clone,
+                                            &alawdec_clone,
                                             &audioconvert_clone,
                                             &audioresample_clone,
                                             &lamemp3enc_clone,
