@@ -233,6 +233,10 @@ impl CameraPipeline {
 
         let rtph264depay_clone = rtph264depay.clone();
         let rtppcmadepay_clone = rtppcmadepay.clone();
+        let audioconvert_clone = audioconvert.clone();
+        let audioresample_clone = audioresample.clone();
+        let lamemp3enc_clone = lamemp3enc.clone();
+        let appsink_audio_clone = appsink_audio.clone();
         source.connect_pad_added(move |_, src_pad| {
             log::info!("🔧 RTSP source created new pad: {:?}", src_pad.name());
 
@@ -253,13 +257,25 @@ impl CameraPipeline {
                             }
                             "audio" => {
                                 log::info!("🔊 Found audio pad from RTSP source, caps: {:?}", caps);
-                                log::info!("🔊 Linking to rtppcmadepay");
+                                log::info!("🔊 Linking audio branch dynamically");
                                 let sink_pad = rtppcmadepay_clone.static_pad("sink");
                                 if let Some(sink_pad) = sink_pad {
                                     if let Err(e) = src_pad.link(&sink_pad) {
                                         log::error!("🔊 Failed to link RTSP audio pad to rtppcmadepay sink: {:?}", e);
                                     } else {
                                         log::info!("🔊 Successfully linked RTSP audio pad to rtppcmadepay sink");
+                                        // Now link the audio branch
+                                        if let Err(e) = gst::Element::link_many([
+                                            &rtppcmadepay_clone,
+                                            &audioconvert_clone,
+                                            &audioresample_clone,
+                                            &lamemp3enc_clone,
+                                            appsink_audio_clone.upcast_ref(),
+                                        ]) {
+                                            log::error!("🔊 Failed to link audio branch: {:?}", e);
+                                        } else {
+                                            log::info!("🔊 Successfully linked audio branch");
+                                        }
                                     }
                                 }
                             }
@@ -308,15 +324,6 @@ impl CameraPipeline {
             appsink_mjpeg.upcast_ref(),
         ])
         .map_err(|_| VigilanteError::GStreamer("Failed to link MJPEG branch".to_string()))?;
-
-        gst::Element::link_many([
-            &rtppcmadepay,
-            &audioconvert,
-            &audioresample,
-            &lamemp3enc,
-            appsink_audio.upcast_ref(),
-        ])
-        .map_err(|_| VigilanteError::GStreamer("Failed to link audio branch".to_string()))?;
 
         let detector_for_motion = Arc::clone(&self.motion_detector);
         let motion_handle = runtime_handle.clone();
