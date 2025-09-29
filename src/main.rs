@@ -149,7 +149,7 @@ use camera::start_camera_pipeline;
 use logs::{get_log_entries_handler, stream_logs_sse};
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
-    delete_recording, recordings_summary_ws, refresh_recording_snapshot,
+    delete_recording, recordings_summary_ws, recordings_by_day, refresh_recording_snapshot,
     storage_stream_sse, stream_live_recording,
 };
 use stream::{stream_audio_handler, stream_mjpeg_handler};
@@ -464,6 +464,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/logs/stream", get(stream_logs_sse))
         .route("/api/logs/entries/:date", get(get_log_entries_handler))
     .route("/api/recordings/summary", get(recordings_summary_ws))
+    .route("/api/recordings/day/:date", get(recordings_by_day))
     .route("/api/storage/stream", get(storage_stream_sse))
         .route("/api/recordings/stream/*path", get(stream_live_recording))
         .route("/api/recordings/delete/*path", delete(delete_recording))

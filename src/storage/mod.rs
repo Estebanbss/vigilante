@@ -21,6 +21,7 @@ use std::sync::Mutex;
 use chrono;
 use serde::Serialize;
 use crate::error::VigilanteError;
+use crate::RecordingEntry;
 
 #[derive(Serialize)]
 pub struct DayRecordings {
@@ -147,6 +148,77 @@ async fn count_recordings_in_day(day_path: &std::path::Path) -> Result<usize, Vi
     }
 
     Ok(count)
+}
+
+async fn list_recordings_in_day(day_path: &std::path::Path, date: &str) -> Result<Vec<RecordingEntry>, VigilanteError> {
+    let mut entries = tokio::fs::read_dir(day_path)
+        .await
+        .map_err(|e| VigilanteError::Io(e))?;
+
+    let mut recordings = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| VigilanteError::Io(e))? {
+        let path = entry.path();
+
+        // Procesar archivos con extensiones de video
+        if path.is_file() {
+            if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
+                match extension {
+                    "mkv" | "mp4" | "avi" | "mov" | "flv" | "wmv" => {
+                        if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                            let file_name = path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+
+                            let size = metadata.len();
+                            let modified = metadata.modified()
+                                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                            let modified_dt = chrono::DateTime::<chrono::Utc>::from(modified);
+
+                            // Calcular duración aproximada (esto es básico, se puede mejorar)
+                            let duration = None; // TODO: implementar extracción de duración con ffprobe
+
+                            recordings.push(RecordingEntry {
+                                name: file_name.clone(),
+                                path: format!("{}/{}", day_path.file_name()
+                                    .and_then(|n| n.to_str()).unwrap_or("unknown"), file_name),
+                                size,
+                                last_modified: modified_dt,
+                                duration,
+                                day: date.to_string(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Ordenar por fecha de modificación (más reciente primero)
+    recordings.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+
+    Ok(recordings)
+}
+
+/// Obtener lista detallada de grabaciones de un día específico
+pub async fn recordings_by_day(
+    axum::extract::Path(date): axum::extract::Path<String>,
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> Result<axum::Json<Vec<crate::RecordingEntry>>, VigilanteError> {
+    let storage_path = state.storage_path();
+    let day_path = storage_path.join(&date);
+
+    // Verificar que el directorio existe
+    if !day_path.exists() || !day_path.is_dir() {
+        return Err(VigilanteError::Other(format!("No recordings found for date: {}", date)));
+    }
+
+    // Obtener lista de grabaciones del día
+    let recordings = list_recordings_in_day(&day_path, &date).await?;
+
+    Ok(axum::Json(recordings))
 }
 
 async fn calculate_directory_size(day_path: &std::path::Path) -> Result<u64, VigilanteError> {

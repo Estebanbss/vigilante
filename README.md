@@ -5,7 +5,7 @@ Un sistema de vigilancia completo en Rust que proporciona grabación continua, s
 ## Características
 
 - **Grabación Continua**: Captura video desde streams RTSP usando GStreamer con segmentación automática
-- **Streaming en Vivo**: MJPEG y HLS para visualización en tiempo real
+- **Streaming en Vivo**: MJPEG para visualización en tiempo real
 - **Control PTZ**: Integración completa con cámaras ONVIF para movimiento remoto
 - **API REST**: Endpoints completos para gestión de grabaciones y control del sistema
 - **Almacenamiento Organizado**: Estructura de archivos por fecha con metadatos
@@ -62,9 +62,6 @@ LISTEN_ADDR=0.0.0.0:8080
 # Directorio para almacenar grabaciones
 STORAGE_PATH=/ruta/al/almacenamiento
 
-# Habilitar streaming HLS
-ENABLE_HLS=true
-
 # Permitir tokens en query parameters (útil para players sin headers)
 STREAM_TOKEN_IN_QUERY=true
 ```
@@ -105,8 +102,6 @@ Todos los endpoints requieren autenticación mediante el header `Authorization: 
 #### Cámara y Streaming
 - `GET /stream/mjpeg` - Stream MJPEG en vivo
 - `GET /stream/audio` - Stream de audio MP3
-- `GET /stream/hls/playlist.m3u8` - Playlist HLS
-- `GET /stream/hls/{segment}.ts` - Segmentos HLS
 
 #### Control PTZ
 - `POST /api/ptz/pan_left` - Mover cámara a la izquierda
@@ -119,6 +114,7 @@ Todos los endpoints requieren autenticación mediante el header `Authorization: 
 
 #### Almacenamiento
 - `GET /api/recordings/summary` - Resumen de grabaciones por día
+- `GET /api/recordings/day/{date}` - Lista detallada de grabaciones de un día específico
 - `GET /api/recordings/{path}` - Streaming de grabación antigua
 - `DELETE /api/recordings/{path}` - Eliminar grabación
 - `GET /api/recordings/sse` - Eventos SSE de grabaciones
@@ -167,7 +163,7 @@ Respuesta:
 
 - **Camera Module**: Gestión de pipelines GStreamer y captura RTSP
 - **Storage Module**: Organización y streaming de grabaciones
-- **Stream Module**: Manejo de streams en vivo (MJPEG, HLS, WebSocket)
+- **Stream Module**: Manejo de streams en vivo (MJPEG, WebSocket)
 - **PTZ Module**: Control de cámaras ONVIF
 - **Auth Module**: Autenticación y autorización
 - **Metrics Module**: Recolección de métricas Prometheus
