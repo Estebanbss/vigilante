@@ -6,7 +6,7 @@ use crate::{AuthManager, NotificationManager, RecordingSnapshot};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use tokio::sync::{broadcast, watch, Mutex as TokioMutex};
+use tokio::sync::{broadcast, Mutex as TokioMutex};
 
 /// Configuración de cámara
 #[derive(Clone, Debug)]
@@ -29,7 +29,7 @@ pub struct StorageConfig {
 pub struct StreamingState {
     pub mjpeg_tx: broadcast::Sender<bytes::Bytes>,
     pub mjpeg_low_tx: broadcast::Sender<bytes::Bytes>,
-    pub audio_mp3_tx: watch::Sender<bytes::Bytes>,
+    pub audio_mp3_tx: broadcast::Sender<bytes::Bytes>,
     pub audio_available: Arc<StdMutex<bool>>,
     pub last_audio_timestamp: Arc<StdMutex<Option<std::time::Instant>>>,
 }

@@ -5,12 +5,11 @@
 use crate::error::VigilanteError;
 use crate::AppState;
 use std::sync::Arc;
-use tokio::sync::watch;
+use tokio::sync::broadcast;
 
-#[derive(Clone)]
 pub struct AudioStreamer {
     context: Arc<AppState>,
-    audio_rx: watch::Receiver<bytes::Bytes>,
+    audio_rx: broadcast::Receiver<bytes::Bytes>,
 }
 
 impl AudioStreamer {
@@ -25,9 +24,8 @@ impl AudioStreamer {
     }
 
     pub async fn get_audio_chunk(&mut self) -> Option<Vec<u8>> {
-        match self.audio_rx.changed().await {
-            Ok(_) => {
-                let chunk = self.audio_rx.borrow().clone();
+        match self.audio_rx.recv().await {
+            Ok(chunk) => {
                 if chunk.is_empty() {
                     None
                 } else {
@@ -35,15 +33,6 @@ impl AudioStreamer {
                 }
             }
             Err(_) => None, // Channel closed
-        }
-    }
-
-    pub async fn get_current_audio(&self) -> Option<Vec<u8>> {
-        let chunk = self.audio_rx.borrow().clone();
-        if chunk.is_empty() {
-            None
-        } else {
-            Some(chunk.to_vec())
         }
     }
 

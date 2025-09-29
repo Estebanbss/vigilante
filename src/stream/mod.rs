@@ -19,7 +19,6 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as TokioStreamExt;
 
 /// Manager principal para streaming.
-#[derive(Clone)]
 pub struct StreamManager {
     audio_streamer: AudioStreamer,
     websocket_handler: WebSocketHandler,
@@ -67,10 +66,14 @@ pub async fn stream_audio_handler(State(state): State<Arc<crate::AppState>>) -> 
 
     // Create a stream that yields audio chunks
     let stream = async_stream::stream! {
-        while audio_rx.changed().await.is_ok() {
-            let chunk = audio_rx.borrow().clone();
-            if !chunk.is_empty() {
-                yield Ok::<_, std::io::Error>(chunk);
+        loop {
+            match audio_rx.recv().await {
+                Ok(chunk) => {
+                    if !chunk.is_empty() {
+                        yield Ok::<_, std::io::Error>(chunk);
+                    }
+                }
+                Err(_) => break, // Channel closed
             }
         }
     };
