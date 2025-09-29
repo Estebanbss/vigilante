@@ -122,12 +122,32 @@ Todos los endpoints requieren autenticación mediante el header `Authorization: 
 #### WebSocket
 - `WS /ws` - Conexión WebSocket para frames MJPEG y comandos
 
+#### Logs
+- `GET /api/logs/stream` - Streaming de logs en tiempo real (Server-Sent Events)
+- `GET /api/logs/entries/{date}` - Obtener entradas de log por fecha
+
+### Tecnologías Utilizadas
+- **HTTP REST API**: Endpoints GET/POST/DELETE para gestión del sistema
+- **WebSocket (WS)**: Conexión en tiempo real para frames MJPEG y comandos
+- **Server-Sent Events (SSE)**: Streaming de eventos de grabaciones y logs
+- **MJPEG Streaming**: Video en vivo comprimido
+- **MP3 Audio Streaming**: Audio en tiempo real
+
 ### Ejemplos de Uso
 
 #### Ver stream en vivo
 ```bash
 curl -H "Authorization: Bearer mi_token_seguro" \
      http://localhost:8080/stream/mjpeg
+```
+
+#### Streaming con token en query
+```bash
+# MJPEG
+curl "http://localhost:8080/stream/mjpeg?token=mi_token_seguro"
+
+# Audio
+curl "http://localhost:8080/stream/audio?token=mi_token_seguro"
 ```
 
 #### Mover cámara
@@ -155,6 +175,99 @@ Respuesta:
     "records": 18
   }
 ]
+```
+
+#### Obtener grabaciones de un día específico
+```bash
+curl -H "Authorization: Bearer mi_token_seguro" \
+     http://localhost:8080/api/recordings/day/2025-09-28
+```
+
+Respuesta:
+```json
+[
+  {
+    "name": "recording_001.mkv",
+    "path": "2025-09-28/recording_001.mkv",
+    "size": 154857267,
+    "last_modified": "2025-09-28T10:30:15.123Z",
+    "duration": null,
+    "day": "2025-09-28"
+  }
+]
+```
+
+#### Verificar estado del sistema
+```bash
+curl -H "Authorization: Bearer mi_token_seguro" \
+     http://localhost:8080/api/status
+```
+
+Respuesta:
+```json
+{
+  "camera_works": true,
+  "audio_works": true,
+  "recordings_work": true
+}
+```
+
+#### Eventos SSE de grabaciones
+```bash
+curl -H "Authorization: Bearer mi_token_seguro" \
+     -H "Accept: text/event-stream" \
+     http://localhost:8080/api/recordings/sse
+```
+
+#### Streaming de logs
+```bash
+curl -H "Authorization: Bearer mi_token_seguro" \
+     -H "Accept: text/event-stream" \
+     http://localhost:8080/api/logs/stream
+```
+
+#### Obtener entradas de log por fecha
+```bash
+curl -H "Authorization: Bearer mi_token_seguro" \
+     http://localhost:8080/api/logs/entries/2025-09-28
+```
+
+#### WebSocket para frames en tiempo real
+```javascript
+const ws = new WebSocket('ws://localhost:8080/ws?token=mi_token_seguro');
+
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === 'frame') {
+        displayFrame(data.frame);
+    }
+};
+```
+
+#### Eliminar grabación
+```bash
+curl -X DELETE \
+     -H "Authorization: Bearer mi_token_seguro" \
+     http://localhost:8080/api/recordings/2025-09-28/recording_001.mkv
+```
+
+## Documentación Completa de la API
+
+Para información detallada sobre todos los endpoints, ejemplos completos y especificaciones técnicas, consulta el archivo [`API_REFERENCE.md`](API_REFERENCE.md).
+
+## Respuestas de Error
+
+Los endpoints devuelven códigos HTTP estándar:
+- `200` - Éxito
+- `401` - No autorizado
+- `404` - Recurso no encontrado
+- `500` - Error interno del servidor
+
+Respuesta de error ejemplo:
+```json
+{
+  "error": "Descripción del error"
+}
 ```
 
 ## Arquitectura

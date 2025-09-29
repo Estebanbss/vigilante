@@ -2,28 +2,7 @@
 
 ## Tecnologías Utilizadas
 
-- **HTTP REST API**: Endpoints GET/POST para gestión ### Eventos SSE de grabaciones (Server-Sent Events)
-```bash
-curl -H "Authorization: Bearer mi_token_seguro" \
-     -H "Accept: text/event-stream" \
-     http://localhost:8080/api/recordings/sse
-```
-
-Respuesta SSE:
-```
-data: {"type": "recording_started", "path": "2025-09-28/recording_001.mkv"}
-
-data: {"type": "recording_stopped", "path": "2025-09-28/recording_001.mkv"}
-```
-
-### Streaming de logs (Server-Sent Events)
-```bash
-curl -H "Authorization: Bearer mi_token_seguro" \
-     -H "Accept: text/event-stream" \
-     http://localhost:8080/api/logs/stream
-```
-
-### WebSocket para frames en tiempo real (WebSocket)ema
+- **HTTP REST API**: Endpoints GET/POST/DELETE para gestión del sistema
 - **WebSocket (WS)**: Conexión en tiempo real para frames MJPEG y comandos
 - **Server-Sent Events (SSE)**: Streaming de eventos de grabaciones y logs
 - **MJPEG Streaming**: Video en vivo comprimido (GET)
@@ -74,6 +53,15 @@ Todos los endpoints requieren autenticación mediante:
 ```bash
 curl -H "Authorization: Bearer mi_token_seguro" \
      http://localhost:8080/stream/mjpeg
+```
+
+### Streaming con token en query (HTTP GET)
+```bash
+# MJPEG
+curl "http://localhost:8080/stream/mjpeg?token=mi_token_seguro"
+
+# Audio
+curl "http://localhost:8080/stream/audio?token=mi_token_seguro"
 ```
 
 ### Mover cámara (HTTP POST)
@@ -146,20 +134,25 @@ Respuesta JSON (HTTP 200):
 }
 ```
 
-### Streaming con token en query (HTTP GET)
-```bash
-# MJPEG
-curl "http://localhost:8080/stream/mjpeg?token=mi_token_seguro"
-
-# Audio
-curl "http://localhost:8080/stream/audio?token=mi_token_seguro"
-```
-
 ### Eventos SSE de grabaciones (Server-Sent Events)
 ```bash
 curl -H "Authorization: Bearer mi_token_seguro" \
      -H "Accept: text/event-stream" \
      http://localhost:8080/api/recordings/sse
+```
+
+Respuesta SSE:
+```
+data: {"type": "recording_started", "path": "2025-09-28/recording_001.mkv"}
+
+data: {"type": "recording_stopped", "path": "2025-09-28/recording_001.mkv"}
+```
+
+### Streaming de logs (Server-Sent Events)
+```bash
+curl -H "Authorization: Bearer mi_token_seguro" \
+     -H "Accept: text/event-stream" \
+     http://localhost:8080/api/logs/stream
 ```
 
 ### WebSocket para frames en tiempo real
@@ -180,6 +173,43 @@ ws.onmessage = (event) => {
 curl -X DELETE \
      -H "Authorization: Bearer mi_token_seguro" \
      http://localhost:8080/api/recordings/2025-09-28/recording_001.mkv
+```
+
+### Obtener entradas de log por fecha (HTTP GET)
+```bash
+curl -H "Authorization: Bearer mi_token_seguro" \
+     http://localhost:8080/api/logs/entries/2025-09-28
+```
+
+Respuesta JSON (HTTP 200):
+```json
+[
+  {
+    "timestamp": "2025-09-28T10:30:15.123Z",
+    "level": "INFO",
+    "message": "Recording started: 2025-09-28/recording_001.mkv"
+  },
+  {
+    "timestamp": "2025-09-28T11:15:22.456Z",
+    "level": "INFO",
+    "message": "Recording stopped: 2025-09-28/recording_001.mkv"
+  }
+]
+```
+
+## Respuestas de Error
+
+Los endpoints devuelven códigos HTTP estándar:
+- `200` - Éxito
+- `401` - No autorizado
+- `404` - Recurso no encontrado
+- `500` - Error interno del servidor
+
+Respuesta de error ejemplo:
+```json
+{
+  "error": "Descripción del error"
+}
 ```
 
 ## Respuestas de Error
