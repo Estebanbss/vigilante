@@ -40,7 +40,7 @@ impl CameraPipeline {
             .build()
             .map_err(|e| VigilanteError::GStreamer(format!("Failed to create rtspsrc: {}", e)))?;
         source.set_property("location", self.context.camera_rtsp_url());
-        source.set_property("latency", 2000u32);
+        source.set_property("latency", 500u32);
         source.set_property("protocols", RTSPLowerTrans::TCP);
         source.set_property("do-rtcp", true);
 
@@ -192,14 +192,10 @@ impl CameraPipeline {
         let audioresample = gst::ElementFactory::make("audioresample")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create audioresample".to_string()))?;
-        let lamemp3enc = gst::ElementFactory::make("lamemp3enc")
-            .build()
-            .map_err(|_| VigilanteError::GStreamer("Failed to create lamemp3enc".to_string()))?;
-        lamemp3enc.set_property("bitrate", 64i32); // 64 kbps for better quality
         let appsink_audio = gst_app::AppSink::builder().build();
         appsink_audio.set_property("emit-signals", &true);
         appsink_audio.set_property("sync", &false);
-        appsink_audio.set_max_buffers(5); // Allow more buffers
+        appsink_audio.set_max_buffers(2); // Reduce buffering
         appsink_audio.set_drop(false); // Don't drop buffers
 
         pipeline
@@ -231,7 +227,6 @@ impl CameraPipeline {
                 &alawdec,
                 &audioconvert,
                 &audioresample,
-                &lamemp3enc,
                 appsink_audio.upcast_ref(),
             ])
             .map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
@@ -241,7 +236,6 @@ impl CameraPipeline {
         let alawdec_clone = alawdec.clone();
         let audioconvert_clone = audioconvert.clone();
         let audioresample_clone = audioresample.clone();
-        let lamemp3enc_clone = lamemp3enc.clone();
         let appsink_audio_clone = appsink_audio.clone();
         source.connect_pad_added(move |_, src_pad| {
             log::info!("🔧 RTSP source created new pad: {:?}", src_pad.name());
@@ -276,7 +270,6 @@ impl CameraPipeline {
                                             &alawdec_clone,
                                             &audioconvert_clone,
                                             &audioresample_clone,
-                                            &lamemp3enc_clone,
                                             appsink_audio_clone.upcast_ref(),
                                         ]) {
                                             log::error!("🔊 Failed to link audio branch: {:?}", e);
