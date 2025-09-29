@@ -203,13 +203,23 @@ impl CameraPipeline {
             VigilanteError::GStreamer("Failed to set pipeline to Ready".to_string())
         })?;
 
+        let mp4mux_audio_pad = mp4mux
+            .request_pad_simple("audio_%u")
+            .ok_or_else(|| {
+                VigilanteError::GStreamer(
+                    "Failed to request initial mp4mux audio pad (audio_%u)".to_string(),
+                )
+            })?;
+        log::info!("🔧 Reserved mp4mux audio pad for live branch: {}", mp4mux_audio_pad.name());
+        let mp4mux_audio_pad_weak = mp4mux_audio_pad.downgrade();
+
         let rtph264depay_clone = rtph264depay.clone();
         let rtppcmadepay_clone = rtppcmadepay.clone();
         let alawdec_clone = alawdec.clone();
         let audioconvert_clone = audioconvert.clone();
         let audioresample_clone = audioresample.clone();
         let voaacenc_clone = voaacenc.clone();
-        let mp4mux_clone = mp4mux.clone();
+        let mp4mux_audio_pad_weak_clone = mp4mux_audio_pad_weak.clone();
         source.connect_pad_added(move |_, src_pad| {
             log::info!("🔧 RTSP source created new pad: {:?}", src_pad.name());
 
@@ -250,23 +260,31 @@ impl CameraPipeline {
                                             log::info!("🔊 Successfully linked audio branch");
                                             // Link voaacenc to mp4mux audio pad
                                             if let Some(mp4mux_audio_pad) =
-                                                mp4mux_clone.request_pad_simple("audio_%u")
+                                                mp4mux_audio_pad_weak_clone.upgrade()
                                             {
-                                                let voaacenc_src_pad =
-                                                    voaacenc_clone.static_pad("src").unwrap();
-                                                if let Err(e) =
-                                                    voaacenc_src_pad.link(&mp4mux_audio_pad)
-                                                {
-                                                    log::error!(
-                                                        "🔊 Failed to link voaacenc to mp4mux: {:?}",
-                                                        e
+                                                if mp4mux_audio_pad.is_linked() {
+                                                    log::info!(
+                                                        "🔊 mp4mux audio pad already linked, skipping"
                                                     );
                                                 } else {
-                                                    log::info!("🔊 Successfully linked audio to mp4mux");
+                                                    let voaacenc_src_pad =
+                                                        voaacenc_clone.static_pad("src").unwrap();
+                                                    if let Err(e) =
+                                                        voaacenc_src_pad.link(&mp4mux_audio_pad)
+                                                    {
+                                                        log::error!(
+                                                            "🔊 Failed to link voaacenc to mp4mux: {:?}",
+                                                            e
+                                                        );
+                                                    } else {
+                                                        log::info!(
+                                                            "🔊 Successfully linked audio to mp4mux"
+                                                        );
+                                                    }
                                                 }
                                             } else {
                                                 log::error!(
-                                                    "🔊 Failed to request mp4mux audio pad (audio_%u)"
+                                                    "🔊 mp4mux audio pad weak ref unavailable during linking"
                                                 );
                                             }
                                         }
