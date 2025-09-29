@@ -105,15 +105,19 @@ pub async fn stream_mjpeg_handler(
             .unwrap();
     }
 
-    // Check if pipeline is running before attempting to stream
+    // Check if pipeline is running, start it if not
     let pipeline_running = *state.gstreamer.pipeline_running.lock().unwrap();
     if !pipeline_running {
-        log::warn!("MP4 stream requested but pipeline is not running");
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .header(header::CONTENT_TYPE, "text/plain")
-            .body(axum::body::Body::from("Camera pipeline not running"))
-            .unwrap();
+        log::info!("📺 MP4 stream requested but pipeline not running, starting recording automatically");
+        if let Err(e) = state.camera_pipeline.start_recording().await {
+            log::error!("📺 Failed to start recording: {:?}", e);
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(header::CONTENT_TYPE, "text/plain")
+                .body(axum::body::Body::from("Failed to start camera pipeline"))
+                .unwrap();
+        }
+        log::info!("📺 Pipeline started successfully for streaming");
     }
 
     let mjpeg_rx = state.streaming.mjpeg_tx.subscribe();
