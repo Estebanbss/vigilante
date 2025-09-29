@@ -65,6 +65,17 @@ pub struct CameraPipeline {
         let appsink_mjpeg = gst::ElementFactory::make("appsink").build().map_err(|_| VigilanteError::GStreamer("Failed to create appsink_mjpeg".to_string()))?;
         appsink_mjpeg.set_property("emit-signals", true);
 
+        // Connect MJPEG signal handler
+        let mjpeg_tx_clone = self.mjpeg_tx.clone();
+        appsink_mjpeg.connect("new-sample", false, move |values| {
+            let sample = values[1].get::<gst::Sample>().unwrap();
+            let buffer = sample.buffer().unwrap();
+            let map = buffer.map_readable().unwrap();
+            let data = map.as_slice();
+            let _ = mjpeg_tx_clone.send(Bytes::copy_from_slice(data));
+            None
+        });
+
         // Recording branch
         let queue_rec = gst::ElementFactory::make("queue").build().map_err(|_| VigilanteError::GStreamer("Failed to create queue_rec".to_string()))?;
         let videoconvert_rec = gst::ElementFactory::make("videoconvert").build().map_err(|_| VigilanteError::GStreamer("Failed to create videoconvert_rec".to_string()))?;
