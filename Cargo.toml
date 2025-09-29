@@ -8,7 +8,7 @@ default = []
 tokio-console = ["console-subscriber"]
 
 [dependencies]
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.7", features = ["macros", "ws"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
@@ -33,7 +33,7 @@ simplelog = "0.12"
 console-subscriber = { version = "0.2", optional = true }
 
 # Prometheus metrics
-prometheus = "0.13"
+prometheus = "0.14"
 lazy_static = "1.4"
 
 # SQLite for persistent metadata cache
@@ -46,3 +46,8 @@ gstreamer-video = "0.22"
 gstreamer-pbutils = "0.22"
 gstreamer-webrtc = "0.22"
 gstreamer-sdp = "0.22"
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+
+[dev-dependencies]
+rstest = "0.26.1"
+tokio-test = "0.4.4"

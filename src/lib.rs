@@ -1,19 +1,22 @@
 pub mod auth;
 pub mod camera;
+pub mod error;
 pub mod logs;
 pub mod metrics;
 pub mod ptz;
+pub mod state;
 pub mod status;
 pub mod storage;
 pub mod stream;
 
-use bytes::Bytes;
+use auth::AuthManager;
+
 use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex as StdMutex},
 };
-use tokio::sync::{broadcast, watch, Mutex};
+use tokio::sync::broadcast;
 
 // Evento para notificaciones de recordings (más eficiente que clonar todo el snapshot)
 #[derive(Clone, Debug, serde::Serialize)]
@@ -80,8 +83,13 @@ impl NotificationManager {
     }
 }
 
+impl Default for NotificationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // Dependencias de GStreamer
-use gstreamer as gst;
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct DaySummary {
@@ -125,34 +133,48 @@ pub struct DayMeta {
 }
 
 #[derive(Debug)]
+#[derive(Clone)]
 pub struct AppState {
-    pub camera_rtsp_url: String,
-    pub camera_onvif_url: String,
-    pub proxy_token: String,
-    pub storage_path: PathBuf,
-    pub storage_root: PathBuf,
-    pub pipeline: Arc<Mutex<Option<gst::Pipeline>>>,
-    pub mjpeg_tx: broadcast::Sender<Bytes>,
-    pub mjpeg_low_tx: broadcast::Sender<Bytes>,
-    pub audio_mp3_tx: watch::Sender<Bytes>,
-    pub audio_available: Arc<StdMutex<bool>>,
-    // Timestamp del último audio recibido para detectar caídas
-    pub last_audio_timestamp: Arc<StdMutex<Option<std::time::Instant>>>,
-    // Detección manual de movimiento (cuando ONVIF no está disponible)
-    pub enable_manual_motion_detection: bool,
-    // Permite validar token por query (p.ej., ?token=...) en rutas de streaming
-    pub allow_query_token_streams: bool,
-    // Writer para logging de eventos de movimiento
-    pub log_writer: Arc<StdMutex<Option<std::io::BufWriter<std::fs::File>>>>,
-    // Dominio base para bypass de autenticación (host exacto o subdominios). Ej: "nubellesalon.com"
-    pub bypass_base_domain: Option<String>,
-    // Secreto adicional para validar bypass (header X-Bypass-Secret). Si definido, se exige para bypass.
-    pub bypass_domain_secret: Option<String>,
-    // Timestamp de inicio de la aplicación para calcular uptime real
-    pub start_time: std::time::SystemTime,
-    // Caché de grabaciones y resúmenes para evitar escaneos costosos en cada request
-    pub recording_snapshot: Arc<Mutex<RecordingSnapshot>>,
-    pub notifications: Arc<NotificationManager>,
-    // SQLite connection for persistent metadata cache
-    pub db_conn: Arc<StdMutex<rusqlite::Connection>>,
+    pub camera: state::CameraConfig,
+    pub storage: state::StorageConfig,
+    pub streaming: Arc<state::StreamingState>,
+    pub logging: Arc<state::LoggingState>,
+    pub system: Arc<state::SystemState>,
+    pub auth: state::AuthState,
+    pub gstreamer: Arc<state::GStreamerState>,
+}
+
+impl AppState {
+    pub fn auth(&self) -> &AuthManager {
+        &self.auth.manager
+    }
+
+    // Métodos de conveniencia para acceso directo a campos comunes
+    pub fn camera_rtsp_url(&self) -> &str {
+        &self.camera.rtsp_url
+    }
+
+    pub fn camera_onvif_url(&self) -> &str {
+        &self.camera.onvif_url
+    }
+
+    pub fn proxy_token(&self) -> &str {
+        &self.auth.proxy_token
+    }
+
+    pub fn storage_path(&self) -> &PathBuf {
+        &self.storage.path
+    }
+
+    pub fn storage_root(&self) -> &PathBuf {
+        &self.storage.root
+    }
+
+    pub fn db_conn(&self) -> &Arc<StdMutex<rusqlite::Connection>> {
+        &self.storage.db_conn
+    }
+
+    pub fn log_tx(&self) -> &broadcast::Sender<String> {
+        &self.logging.log_tx
+    }
 }

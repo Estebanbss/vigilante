@@ -1,12 +1,12 @@
-use axum::body::Body;
+use axum::body::{Body, to_bytes, Bytes};
 use axum::{
-    http::{header, HeaderValue, Method, Request, StatusCode},
+    extract::Request,
+    http::{header, HeaderValue, Method, StatusCode},
     middleware::{from_fn, from_fn_with_state, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Router,
 };
-use bytes::Bytes;
 use dotenvy::dotenv;
 use std::{
     env, fs,
@@ -15,18 +15,142 @@ use std::{
     sync::{Arc, Mutex as StdMutex},
     time::{Duration, Instant},
 };
-use tokio::sync::{broadcast, watch, Mutex};
+use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
 
-use vigilante::{auth, camera, logs, metrics, ptz, storage, stream, AppState, RecordingSnapshot, NotificationManager};
+// Custom logger that sends JSON logs to broadcast channel and stdout
+struct BroadcastLogger {
+    tx: broadcast::Sender<String>,
+}
+
+impl log::Log for BroadcastLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            let level = record.level().to_string();
+            let message = record.args().to_string();
+
+            // Try to parse as structured log, otherwise use generic format
+            let json_log = if message.starts_with("→ ") || message.starts_with("← ") {
+                // Structured request/response log
+                self.parse_request_response_log(&timestamp, &level, &message)
+            } else {
+                // Generic log
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "level": level,
+                    "message": message
+                }).to_string()
+            };
+
+            // Print to stdout
+            println!("{}", json_log);
+            // Send to channel
+            let _ = self.tx.send(json_log);
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+impl BroadcastLogger {
+    fn parse_request_response_log(&self, timestamp: &str, level: &str, message: &str) -> String {
+        if let Some(stripped) = message.strip_prefix("→ ") {
+            // Request: "→ GET /api/live/mjpeg?token=abc"
+            let parts: Vec<&str> = stripped.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let method = parts[0];
+                let full_uri = parts[1..].join(" ");
+                // Parse URI and query
+                if let Some((path, query)) = full_uri.split_once('?') {
+                    return serde_json::json!({
+                        "timestamp": timestamp,
+                        "level": level,
+                        "request": {
+                            "method": method,
+                            "uri": path,
+                            "query": query
+                        }
+                    }).to_string();
+                } else {
+                    return serde_json::json!({
+                        "timestamp": timestamp,
+                        "level": level,
+                        "request": {
+                            "method": method,
+                            "uri": full_uri
+                        }
+                    }).to_string();
+                }
+            }
+        } else if let Some(stripped) = message.strip_prefix("← ") {
+            // Response: "← GET /api/live/mjpeg 200 (45 ms) [size: 1234] [body: {"key": "value"}]"
+            let parts: Vec<&str> = stripped.split_whitespace().collect();
+            if parts.len() >= 4 {
+                let method = parts[0];
+                let uri_parts = &parts[1..parts.len()-3];
+                let uri = uri_parts.join(" ");
+                let status = parts[parts.len()-3].parse::<u16>().unwrap_or(0);
+                let duration_str = parts[parts.len()-2].trim_end_matches(" ms)");
+                let duration_ms = duration_str.parse::<u64>().unwrap_or(0);
+                
+                // Parse size and body from the remaining parts
+                let mut response_size = 0u64;
+                let mut response_body = None;
+                
+                // Find [size: ...] and [body: ...] in the message
+                let remaining = parts[parts.len()-1..].join(" ");
+                if let Some(size_start) = remaining.find("[size:") {
+                    if let Some(size_end) = remaining[size_start..].find("]") {
+                        let size_str = &remaining[size_start+6..size_start+size_end];
+                        response_size = size_str.parse::<u64>().unwrap_or(0);
+                    }
+                }
+                if let Some(body_start) = remaining.find("[body:") {
+                    if let Some(body_end) = remaining[body_start..].find("]") {
+                        let body_str = &remaining[body_start+6..body_start+body_end];
+                        if !body_str.is_empty() {
+                            response_body = Some(body_str.to_string());
+                        }
+                    }
+                }
+                
+                return serde_json::json!({
+                    "timestamp": timestamp,
+                    "level": level,
+                    "response": {
+                        "method": method,
+                        "uri": uri,
+                        "status": status,
+                        "duration_ms": duration_ms,
+                        "response_size": response_size,
+                        "response_body": response_body
+                    }
+                }).to_string();
+            }
+        }
+        // Fallback
+        serde_json::json!({
+            "timestamp": timestamp,
+            "level": level,
+            "message": message
+        }).to_string()
+    }
+}
+
+use vigilante::{auth, camera, logs, metrics, ptz, storage, stream, AppState, RecordingSnapshot, NotificationManager, auth::AuthManager, state};
 
 use auth::flexible_auth_middleware;
 use camera::start_camera_pipeline;
-use logs::stream_journal_logs;
+use logs::{get_log_entries_handler, stream_logs_sse};
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
-    delete_recording, get_recordings_by_date, recordings_summary_ws, refresh_recording_snapshot,
-    storage_stream_sse, stream_recording,
+    delete_recording, recordings_summary_ws, refresh_recording_snapshot,
+    storage_stream_sse, stream_live_recording,
 };
 use stream::{stream_audio_handler, stream_mjpeg_handler};
 use vigilante::status::get_system_status;
@@ -68,15 +192,41 @@ async fn log_requests(req: Request<Body>, next: Next) -> Response {
     let response = next.run(req).await;
     let status = response.status();
     let elapsed = started.elapsed();
+
+    // Capturar el body de la respuesta para logging si es pequeño
+    let (parts, body) = response.into_parts();
+        let body_bytes = match to_bytes(body, 2048).await {
+        Ok(bytes) => bytes,
+        Err(_) => Bytes::new(),
+    };
+    let response_size = body_bytes.len() as u64;
+
+    // Incluir body en logs si es pequeño y parece JSON
+    let response_body = if body_bytes.len() < 2048 && body_bytes.starts_with(b"{") {
+        Some(String::from_utf8_lossy(&body_bytes).to_string())
+    } else {
+        None
+    };
+
     info!(
-        "← {} {} {} ({} ms)",
+        "← {} {} {} ({} ms) [size: {}] [body: {}]",
         method,
         uri,
         status.as_u16(),
-        elapsed.as_millis()
+        elapsed.as_millis(),
+        response_size,
+        response_body.as_deref().unwrap_or("")
     );
 
-    response
+    // Incrementar métricas
+    metrics::depends::collectors::MetricsCollector::increment_requests();
+    metrics::depends::collectors::MetricsCollector::record_duration(elapsed.as_secs_f64());
+    if status.is_client_error() || status.is_server_error() {
+        metrics::depends::collectors::MetricsCollector::increment_errors();
+    }
+
+    // Reconstruir la response
+    Response::from_parts(parts, Body::from(body_bytes))
 }
 
 async fn metrics_handler() -> impl IntoResponse {
@@ -101,7 +251,13 @@ async fn metrics_handler() -> impl IntoResponse {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
 
-    simplelog::SimpleLogger::init(log::LevelFilter::Info, simplelog::Config::default()).unwrap();
+    // Initialize log channel first
+    let (log_tx, _log_rx) = broadcast::channel::<String>(100);
+
+    // Initialize custom logger that broadcasts logs
+    let logger = BroadcastLogger { tx: log_tx.clone() };
+    log::set_boxed_logger(Box::new(logger)).unwrap();
+    log::set_max_level(log::LevelFilter::Info);
 
     #[cfg(feature = "tokio-console")]
     {
@@ -113,18 +269,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("GStreamer initialized successfully");
 
-    let camera_rtsp_url =
-        env::var("CAMERA_RTSP_URL").expect("CAMERA_RTSP_URL environment variable must be set");
-    let camera_onvif_url =
-        env::var("CAMERA_ONVIF_URL").expect("CAMERA_ONVIF_URL environment variable must be set");
-    let proxy_token =
-        env::var("PROXY_TOKEN").expect("PROXY_TOKEN environment variable must be set");
+    // Initialize metrics
+    metrics::depends::collectors::MetricsCollector::init();
+
+    // Cargar variables de entorno críticas con manejo de errores adecuado
+    let camera_rtsp_url = env::var("CAMERA_RTSP_URL")
+        .map_err(|_| "CAMERA_RTSP_URL environment variable must be set")?;
+    let camera_onvif_url = env::var("CAMERA_ONVIF_URL")
+        .map_err(|_| "CAMERA_ONVIF_URL environment variable must be set")?;
+    let proxy_token = env::var("PROXY_TOKEN")
+        .map_err(|_| "PROXY_TOKEN environment variable must be set")?;
     if proxy_token.is_empty() {
-        panic!("PROXY_TOKEN cannot be empty");
+        return Err("PROXY_TOKEN cannot be empty".into());
     }
     let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let storage_path =
-        env::var("STORAGE_PATH").expect("STORAGE_PATH environment variable must be set");
+    let storage_path = env::var("STORAGE_PATH")
+        .map_err(|_| "STORAGE_PATH environment variable must be set")?;
     // Detección manual de movimiento (activada por defecto)
     let enable_manual_motion_detection = env::var("ENABLE_MANUAL_MOTION_DETECTION")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -193,34 +353,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mjpeg_tx, _mjpeg_rx) = broadcast::channel::<Bytes>(32);
     let (mjpeg_low_tx, _mjpeg_low_rx) = broadcast::channel::<Bytes>(32);
-    let (audio_mp3_tx, _audio_rx) = watch::channel::<Bytes>(Bytes::new());
+    let (audio_mp3_tx, _audio_rx) = tokio::sync::watch::channel::<Bytes>(Bytes::new());
+    let (log_tx, _log_rx) = broadcast::channel::<String>(100);
     let notifications = Arc::new(NotificationManager::new());
 
-    let state = Arc::new(AppState {
-        camera_rtsp_url: camera_rtsp_url.clone(),
-        camera_onvif_url: camera_onvif_url.clone(),
-        proxy_token: proxy_token.clone(),
-        storage_path: storage_path_buf.clone(),
-        storage_root: storage_root.clone(),
-        pipeline: Arc::new(Mutex::new(None)),
+    // Initialize auth manager
+    let auth_manager = AuthManager::new(auth::AuthConfig {
+        bearer_token: Some(proxy_token.clone()),
+    })?;
+
+    // Create separate state structs
+    let camera_config = state::CameraConfig {
+        rtsp_url: camera_rtsp_url.clone(),
+        onvif_url: camera_onvif_url.clone(),
+        enable_manual_motion_detection,
+    };
+
+    let storage_config = state::StorageConfig {
+        path: storage_path_buf.clone(),
+        root: storage_root.clone(),
+        db_conn: db_conn.clone(),
+    };
+
+    let streaming_state = Arc::new(state::StreamingState {
         mjpeg_tx,
         mjpeg_low_tx,
         audio_mp3_tx,
         audio_available: Arc::new(StdMutex::new(false)),
         last_audio_timestamp: Arc::new(StdMutex::new(None)),
-        enable_manual_motion_detection,
-        allow_query_token_streams,
+    });
+
+    let logging_state = Arc::new(state::LoggingState {
+        log_tx,
         log_writer: Arc::new(StdMutex::new(None)),
-        bypass_base_domain: env::var("BYPASS_DOMAIN").ok().map(|d| d.to_lowercase()),
-        bypass_domain_secret: env::var("BYPASS_DOMAIN_SECRET").ok(),
+    });
+
+    let system_state = Arc::new(state::SystemState {
         start_time: std::time::SystemTime::now(),
         recording_snapshot: Arc::new(Mutex::new(RecordingSnapshot::default())),
         notifications,
-        db_conn,
+    });
+
+    let auth_state = state::AuthState {
+        manager: auth_manager,
+        proxy_token: proxy_token.clone(),
+        allow_query_token_streams,
+        bypass_base_domain: env::var("BYPASS_DOMAIN").ok().map(|d| d.to_lowercase()),
+        bypass_domain_secret: env::var("BYPASS_DOMAIN_SECRET").ok(),
+    };
+
+    let gstreamer_state = Arc::new(state::GStreamerState {
+        pipeline: Arc::new(Mutex::new(None)),
+    });
+
+    let state = Arc::new(AppState {
+        camera: camera_config,
+        storage: storage_config,
+        streaming: streaming_state,
+        logging: logging_state,
+        system: system_state,
+        auth: auth_state,
+        gstreamer: gstreamer_state,
     });
 
     // Construir snapshot inicial antes de atender solicitudes
-    refresh_recording_snapshot(&state).await;
+    if let Err(e) = refresh_recording_snapshot(&state).await {
+        warn!("Failed to build initial recording snapshot: {}", e);
+        // No es crítico, continuar con snapshot vacío
+    }
 
     // Refrescar caché de grabaciones de forma periódica
     {
@@ -229,7 +429,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                let _ = refresh_recording_snapshot(&state_clone).await;
+                if let Err(e) = refresh_recording_snapshot(&state_clone).await {
+                    warn!("Failed to refresh recording snapshot: {}", e);
+                    // Continuar el loop, no es crítico
+                }
+            }
+        });
+    }
+
+    // Actualizar métricas de uptime periódicamente
+    {
+        let start_time = state.system.start_time;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                if let Ok(elapsed) = start_time.elapsed() {
+                    metrics::depends::collectors::MetricsCollector::set_uptime(elapsed.as_secs_f64());
+                }
             }
         });
     }
@@ -244,11 +461,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/metrics", get(metrics_handler))
         .route("/api/live/mjpeg", get(stream_mjpeg_handler))
         .route("/api/live/audio", get(stream_audio_handler))
-        .route("/api/logs/stream", get(stream_journal_logs))
+        .route("/api/logs/stream", get(stream_logs_sse))
+        .route("/api/logs/entries/:date", get(get_log_entries_handler))
     .route("/api/recordings/summary", get(recordings_summary_ws))
     .route("/api/storage/stream", get(storage_stream_sse))
-        .route("/api/recordings/by-date/:date", get(get_recordings_by_date))
-        .route("/api/recordings/stream/*path", get(stream_recording))
+        .route("/api/recordings/stream/*path", get(stream_live_recording))
         .route("/api/recordings/delete/*path", delete(delete_recording))
         // Rutas para el control PTZ
         .route("/api/ptz/pan/left", post(pan_left))

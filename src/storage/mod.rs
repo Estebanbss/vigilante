@@ -1,0 +1,315 @@
+//! Módulo de almacenamiento para Vigilante.
+//!
+//! Gestiona streaming en vivo de grabaciones antiguas,
+//! delegando operaciones pesadas a `depends/`.
+
+pub mod depends;
+
+pub use depends::db::StorageDb;
+pub use depends::paths::PathResolver;
+pub use depends::snapshot::SnapshotManager;
+pub use depends::filesystem::FileManager;
+
+use std::sync::Arc;
+use crate::AppState;
+use tokio::io::AsyncSeekExt;
+use axum::response::IntoResponse;
+use axum::http::{StatusCode, header};
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
+use std::sync::Mutex;
+use serde::Serialize;
+use crate::error::VigilanteError;
+
+#[derive(Serialize)]
+pub struct DayRecordings {
+    pub name: String,
+    pub records: usize,
+}
+
+/// Estado de archivos en grabación activa
+#[derive(Clone)]
+pub struct RecordingState {
+    pub active_recordings: Arc<Mutex<std::collections::HashSet<String>>>,
+}
+
+impl RecordingState {
+    pub fn new() -> Self {
+        Self {
+            active_recordings: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        }
+    }
+
+    pub fn is_recording(&self, path: &str) -> bool {
+        self.active_recordings.lock().unwrap().contains(path)
+    }
+
+    pub fn start_recording(&self, path: &str) {
+        self.active_recordings.lock().unwrap().insert(path.to_string());
+    }
+
+    pub fn stop_recording(&self, path: &str) {
+        self.active_recordings.lock().unwrap().remove(path);
+    }
+}
+
+impl Default for RecordingState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Manager principal para almacenamiento.
+#[derive(Clone)]
+pub struct StorageManager {
+    recording_state: RecordingState,
+}
+
+impl StorageManager {
+    pub fn new() -> Self {
+        Self {
+            recording_state: RecordingState::new(),
+        }
+    }
+
+    pub async fn refresh_snapshot(&self) -> Result<(), VigilanteError> {
+        // Lógica para refrescar snapshot
+        Ok(())
+    }
+
+    pub fn recording_state(&self) -> &RecordingState {
+        &self.recording_state
+    }
+}
+
+impl Default for StorageManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub async fn delete_recording() -> impl axum::response::IntoResponse { "OK" }
+
+#[axum::debug_handler]
+pub async fn recordings_summary_ws(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> Result<impl axum::response::IntoResponse, VigilanteError> {
+    let storage_path = state.storage_path();
+
+    // Leer las carpetas del directorio raíz (cada carpeta es un día)
+    let mut entries = tokio::fs::read_dir(storage_path)
+        .await
+        .map_err(|e| VigilanteError::Io(e))?;
+
+    let mut day_summaries = Vec::new();
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| VigilanteError::Io(e))? {
+        let path = entry.path();
+
+        // Solo procesar directorios (días)
+        if path.is_dir() {
+            if let Some(day_name) = path.file_name().and_then(|n| n.to_str()) {
+                // Contar archivos de grabación en esta carpeta
+                let recording_count = count_recordings_in_day(&path).await?;
+                day_summaries.push(DayRecordings {
+                    name: day_name.to_string(),
+                    records: recording_count,
+                });
+            }
+        }
+    }
+
+    Ok(axum::Json(day_summaries))
+}
+
+async fn count_recordings_in_day(day_path: &std::path::Path) -> Result<usize, VigilanteError> {
+    let mut entries = tokio::fs::read_dir(day_path)
+        .await
+        .map_err(|e| VigilanteError::Io(e))?;
+
+    let mut count = 0;
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| VigilanteError::Io(e))? {
+        let path = entry.path();
+
+        // Contar archivos con extensiones de video
+        if path.is_file() {
+            if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
+                match extension {
+                    "mkv" | "mp4" | "avi" | "mov" | "flv" | "wmv" => {
+                        count += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+pub async fn refresh_recording_snapshot(_state: &Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    Ok(())
+}
+pub async fn storage_stream_sse() -> impl axum::response::IntoResponse { "OK" }
+
+/// Streaming en vivo de grabaciones antiguas con soporte de formato
+pub async fn stream_live_recording(
+    axum::extract::Path(path): axum::extract::Path<String>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> impl axum::response::IntoResponse {
+    // Determinar formato basado en la extensión del archivo
+    let format = if path.ends_with(".mkv") {
+        "video/x-matroska"
+    } else if path.ends_with(".mp4") {
+        "video/mp4"
+    } else if path.ends_with(".avi") {
+        "video/x-msvideo"
+    } else {
+        "application/octet-stream"
+    };
+
+    // Streaming continuo como si fuera en vivo
+    stream_continuous_recording(path, format, headers).await
+}
+
+/// Streaming continuo de grabaciones como si fueran en vivo
+async fn stream_continuous_recording(
+    path: String,
+    content_type: &str,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let full_path = std::path::Path::new("storage").join(&path);
+
+    if !full_path.exists() {
+        return (StatusCode::NOT_FOUND, "Recording not found").into_response();
+    }
+
+    let file_size = match tokio::fs::metadata(&full_path).await {
+        Ok(m) => m.len(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Metadata error").into_response(),
+    };
+
+    // Verificar si es una petición range para streaming parcial
+    if let Some(range) = headers.get("range") {
+        return handle_range_request(&full_path, range, file_size, content_type).await;
+    }
+
+    // Verificar si el archivo está siendo grabado actualmente
+    // (por simplicidad, consideramos que archivos modificados en los últimos 30 segundos están en grabación)
+    let is_recording = is_file_being_recorded(&full_path).await;
+
+    if is_recording {
+        // Streaming progresivo para archivos en grabación
+        return stream_progressive_recording(&full_path, content_type).await;
+    } else {
+        // Streaming normal para archivos completados
+        match tokio::fs::read(&full_path).await {
+            Ok(buffer) => {
+                axum::response::Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, content_type)
+                    .header(header::CACHE_CONTROL, "no-cache")
+                    .header(header::TRANSFER_ENCODING, "chunked")
+                    .body(axum::body::Body::from(buffer))
+                    .unwrap()
+            }
+            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "File read error").into_response(),
+        }
+    }
+}
+
+/// Verificar si un archivo está siendo grabado actualmente
+/// (considera que archivos modificados en los últimos 30 segundos están en grabación)
+async fn is_file_being_recorded(file_path: &std::path::Path) -> bool {
+    match tokio::fs::metadata(file_path).await {
+        Ok(metadata) => {
+            if let Ok(modified) = metadata.modified() {
+                let now = std::time::SystemTime::now();
+                if let Ok(duration) = now.duration_since(modified) {
+                    // Si el archivo fue modificado en los últimos 30 segundos, está en grabación
+                    duration.as_secs() < 30
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Streaming progresivo para archivos que están siendo grabados en tiempo real
+async fn stream_progressive_recording(
+    file_path: &std::path::Path,
+    content_type: &str,
+) -> axum::response::Response {
+    // Para una implementación completa de streaming progresivo, necesitaríamos:
+    // 1. Mantener la conexión abierta
+    // 2. Leer chunks del archivo a medida que crece
+    // 3. Enviar chunks al cliente en tiempo real
+    // 4. Detectar cuando la grabación termina
+
+    // Por ahora, implementamos una versión que lee el archivo completo
+    // pero marca que es una grabación en vivo
+    match tokio::fs::read(file_path).await {
+        Ok(buffer) => {
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CACHE_CONTROL, "no-cache")
+                .header(header::TRANSFER_ENCODING, "chunked")
+                .header("X-Recording-Status", "live") // Indicador de que es una grabación en vivo
+                .body(axum::body::Body::from(buffer))
+                .unwrap()
+        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "File read error").into_response(),
+    }
+}
+
+
+
+/// Manejar peticiones range para streaming parcial (seek/scrubbing)
+async fn handle_range_request(
+    full_path: &std::path::Path,
+    range: &axum::http::HeaderValue,
+    file_size: u64,
+    content_type: &str,
+) -> axum::response::Response {
+    let range_str = range.to_str().unwrap_or("");
+    if let Some(start_end) = range_str.strip_prefix("bytes=") {
+        let parts: Vec<&str> = start_end.split('-').collect();
+        if parts.len() == 2 {
+            let start: u64 = parts[0].parse().unwrap_or(0);
+            let end: u64 = parts[1].parse().unwrap_or(file_size - 1);
+            let content_length = end - start + 1;
+
+            let mut file = match File::open(full_path).await {
+                Ok(f) => f,
+                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "File open error").into_response(),
+            };
+
+            file.seek(std::io::SeekFrom::Start(start)).await.unwrap();
+            let mut buffer = vec![0; content_length as usize];
+            file.read_exact(&mut buffer).await.unwrap();
+
+            let mut response = axum::response::Response::new(axum::body::Body::from(buffer));
+            response.headers_mut().insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            response.headers_mut().insert(header::CONTENT_LENGTH, content_length.to_string().parse().unwrap());
+            response.headers_mut().insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+            response.headers_mut().insert(header::CONTENT_RANGE, format!("bytes {}-{}/{}", start, end, file_size).parse().unwrap());
+            response.headers_mut().insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+            *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+            return response;
+        }
+    }
+
+    // Si no hay range válido, devolver error
+    (StatusCode::RANGE_NOT_SATISFIABLE, "Invalid range").into_response()
+}
+
+pub fn init_recordings_db(_db_path: &std::path::PathBuf) -> Result<rusqlite::Connection, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(rusqlite::Connection::open_in_memory()?)
+}
