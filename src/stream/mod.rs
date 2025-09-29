@@ -121,7 +121,7 @@ pub async fn stream_mjpeg_handler(
 
     let stream = TokioStreamExt::map(BroadcastStream::new(mjpeg_rx), |result| match result {
         Ok(bytes) => {
-            log::info!(
+            log::debug!(
                 "📺 MJPEG frame received in stream handler, size: {} bytes",
                 bytes.len()
             );

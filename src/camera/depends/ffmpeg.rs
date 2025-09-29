@@ -350,10 +350,10 @@ impl CameraPipeline {
 
                 let data = Bytes::copy_from_slice(map.as_slice());
 
-                log::info!("📹 MJPEG frame received, size: {} bytes", data.len());
+                log::debug!("📹 MJPEG frame received, size: {} bytes", data.len());
 
                 match context.streaming.mjpeg_tx.send(data) {
-                    Ok(_) => log::info!("📹 MJPEG frame sent to broadcast channel"),
+                    Ok(_) => log::debug!("📹 MJPEG frame sent to broadcast channel"),
                     Err(e) => log::warn!(
                         "📹 Failed to send MJPEG frame to broadcast channel: {:?}",
                         e
