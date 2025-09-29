@@ -404,6 +404,12 @@ impl CameraPipeline {
         queue_live_src_pad.link(&mp4mux_video_pad).unwrap();
         log::info!("🔧 Linked live queue to mp4mux video pad");
 
+        // Set pipeline to Playing to create mp4mux src pad
+        pipeline.set_state(gst::State::Playing).map_err(|_| {
+            VigilanteError::GStreamer("Failed to set pipeline to Playing for mp4mux".to_string())
+        })?;
+        log::info!("🔧 Pipeline set to Playing for mp4mux linking");
+
         mp4mux.link(&appsink_live).unwrap();
         log::info!("🔧 Linked mp4mux to live appsink");
 
