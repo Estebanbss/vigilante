@@ -297,7 +297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cors = CorsLayer::new()
         .allow_origin(allowed_origins)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers([
             header::AUTHORIZATION,
             header::CONTENT_TYPE,
@@ -467,12 +467,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/ptz/stop", post(ptz_stop))
         // Ruta de estado simple
         .route("/api/status", get(get_system_status))
-        // Logging de requests
-        .layer(from_fn(log_requests))
-        // CORS middleware debe ir ANTES de autenticación para manejar preflight OPTIONS
-        .layer(cors)
         // Middleware flexible: valida token por header O por query
         .layer(from_fn_with_state(state.clone(), flexible_auth_middleware))
+        // CORS middleware permite preflight antes de llegar al handler
+        .layer(cors)
+        // Logging de requests (debe envolver toda la pila para registrar cualquier respuesta)
+        .layer(from_fn(log_requests))
         .with_state(state);
 
     let addr: SocketAddr = listen_addr.parse()?;
