@@ -9,7 +9,6 @@ use crate::AppState;
 use bytes::Bytes;
 use gstreamer as gst;
 use gstreamer::prelude::*;
-use gstreamer::Fraction;
 use gstreamer_app as gst_app;
 use gstreamer_rtsp::RTSPLowerTrans;
 use std::sync::Arc;
@@ -126,58 +125,18 @@ impl CameraPipeline {
         appsink_motion.set_max_buffers(1);
         appsink_motion.set_drop(true);
 
-        let queue_mjpeg = gst::ElementFactory::make("queue")
+        let queue_live = gst::ElementFactory::make("queue")
             .build()
-            .map_err(|_| VigilanteError::GStreamer("Failed to create queue_mjpeg".to_string()))?;
-        let avdec_mjpeg = gst::ElementFactory::make("avdec_h264")
+            .map_err(|_| VigilanteError::GStreamer("Failed to create queue_live".to_string()))?;
+        let mp4mux = gst::ElementFactory::make("mp4mux")
             .build()
-            .map_err(|_| VigilanteError::GStreamer("Failed to create avdec_mjpeg".to_string()))?;
-        let videoconvert_mjpeg =
-            gst::ElementFactory::make("videoconvert")
-                .build()
-                .map_err(|_| {
-                    VigilanteError::GStreamer("Failed to create videoconvert_mjpeg".to_string())
-                })?;
-        let videoscale_mjpeg = gst::ElementFactory::make("videoscale")
-            .build()
-            .map_err(|_| {
-                VigilanteError::GStreamer("Failed to create videoscale_mjpeg".to_string())
-            })?;
-        let capsfilter_mjpeg_size =
-            gst::ElementFactory::make("capsfilter")
-                .build()
-                .map_err(|_| {
-                    VigilanteError::GStreamer("Failed to create capsfilter_mjpeg_size".to_string())
-                })?;
-        let mjpeg_size_caps = gst::Caps::builder("video/x-raw")
-            .field("width", 1280i32)
-            .field("height", 720i32)
-            .build();
-        capsfilter_mjpeg_size.set_property("caps", &mjpeg_size_caps);
-        let videorate_mjpeg = gst::ElementFactory::make("videorate")
-            .build()
-            .map_err(|_| {
-                VigilanteError::GStreamer("Failed to create videorate_mjpeg".to_string())
-            })?;
-        let capsfilter_mjpeg_rate =
-            gst::ElementFactory::make("capsfilter")
-                .build()
-                .map_err(|_| {
-                    VigilanteError::GStreamer("Failed to create capsfilter_mjpeg_rate".to_string())
-                })?;
-        let mjpeg_rate_caps = gst::Caps::builder("video/x-raw")
-            .field("framerate", Fraction::new(15, 1))
-            .build();
-        capsfilter_mjpeg_rate.set_property("caps", &mjpeg_rate_caps);
-        let jpegenc = gst::ElementFactory::make("jpegenc")
-            .build()
-            .map_err(|_| VigilanteError::GStreamer("Failed to create jpegenc".to_string()))?;
-        jpegenc.set_property("quality", 85i32);
-        let appsink_mjpeg = gst_app::AppSink::builder().build();
-        appsink_mjpeg.set_property("emit-signals", &true);
-        appsink_mjpeg.set_property("sync", &false);
-        appsink_mjpeg.set_max_buffers(1);
-        appsink_mjpeg.set_drop(true);
+            .map_err(|_| VigilanteError::GStreamer("Failed to create mp4mux".to_string()))?;
+        mp4mux.set_property("fragmented", &true);
+        let appsink_live = gst_app::AppSink::builder().build();
+        appsink_live.set_property("emit-signals", &true);
+        appsink_live.set_property("sync", &false);
+        appsink_live.set_max_buffers(1);
+        appsink_live.set_drop(true);
 
         // Audio elements (PCMA)
         let rtppcmadepay = gst::ElementFactory::make("rtppcmadepay")
@@ -218,21 +177,14 @@ impl CameraPipeline {
                 &videoscale_motion,
                 &capsfilter_motion,
                 appsink_motion.upcast_ref(),
-                &queue_mjpeg,
-                &avdec_mjpeg,
-                &videoconvert_mjpeg,
-                &videoscale_mjpeg,
-                &capsfilter_mjpeg_size,
-                &videorate_mjpeg,
-                &capsfilter_mjpeg_rate,
-                &jpegenc,
-                appsink_mjpeg.upcast_ref(),
+                &queue_live,
+                &mp4mux,
+                appsink_live.upcast_ref(),
                 &rtppcmadepay,
                 &alawdec,
                 &audioconvert,
                 &audioresample,
                 &lamemp3enc,
-                appsink_audio.upcast_ref(),
             ])
             .map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
@@ -242,7 +194,7 @@ impl CameraPipeline {
         let audioconvert_clone = audioconvert.clone();
         let audioresample_clone = audioresample.clone();
         let lamemp3enc_clone = lamemp3enc.clone();
-        let appsink_audio_clone = appsink_audio.clone();
+        let mp4mux_clone = mp4mux.clone();
         source.connect_pad_added(move |_, src_pad| {
             log::info!("🔧 RTSP source created new pad: {:?}", src_pad.name());
 
@@ -277,11 +229,18 @@ impl CameraPipeline {
                                             &audioconvert_clone,
                                             &audioresample_clone,
                                             &lamemp3enc_clone,
-                                            appsink_audio_clone.upcast_ref(),
                                         ]) {
                                             log::error!("🔊 Failed to link audio branch: {:?}", e);
                                         } else {
                                             log::info!("🔊 Successfully linked audio branch");
+                                            // Link lamemp3enc to mp4mux audio pad
+                                            let mp4mux_audio_pad = mp4mux_clone.request_pad_simple("sink_%u").unwrap();
+                                            let lamemp3enc_src_pad = lamemp3enc_clone.static_pad("src").unwrap();
+                                            if let Err(e) = lamemp3enc_src_pad.link(&mp4mux_audio_pad) {
+                                                log::error!("🔊 Failed to link lamemp3enc to mp4mux: {:?}", e);
+                                            } else {
+                                                log::info!("🔊 Successfully linked audio to mp4mux");
+                                            }
                                         }
                                     }
                                 }
@@ -319,18 +278,9 @@ impl CameraPipeline {
         ])
         .map_err(|_| VigilanteError::GStreamer("Failed to link motion branch".to_string()))?;
 
-        gst::Element::link_many([
-            &queue_mjpeg,
-            &avdec_mjpeg,
-            &videoconvert_mjpeg,
-            &videoscale_mjpeg,
-            &capsfilter_mjpeg_size,
-            &videorate_mjpeg,
-            &capsfilter_mjpeg_rate,
-            &jpegenc,
-            appsink_mjpeg.upcast_ref(),
-        ])
-        .map_err(|_| VigilanteError::GStreamer("Failed to link MJPEG branch".to_string()))?;
+        gst::Element::link_many([&mp4mux, appsink_live.upcast_ref()]).map_err(|_| {
+            VigilanteError::GStreamer("Failed to link live branch".to_string())
+        })?;
 
         let detector_for_motion = Arc::clone(&self.motion_detector);
         let motion_handle = runtime_handle.clone();
@@ -374,12 +324,12 @@ impl CameraPipeline {
         log::info!("🚶 Motion appsink callbacks configured");
 
         let context_weak = Arc::downgrade(&self.context);
-        let mjpeg_callbacks = gst_app::AppSinkCallbacks::builder()
+        let live_callbacks = gst_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
                 let context = match context_weak.upgrade() {
                     Some(c) => c,
                     None => {
-                        log::warn!("📹 MJPEG context dropped, stopping callback");
+                        log::warn!("📹 Live context dropped, stopping callback");
                         return Err(gst::FlowError::Flushing);
                     }
                 };
@@ -387,7 +337,7 @@ impl CameraPipeline {
                 let sample = match sink.pull_sample() {
                     Ok(sample) => sample,
                     Err(err) => {
-                        log::warn!("📹 Failed to pull MJPEG sample: {:?}", err);
+                        log::warn!("📹 Failed to pull live sample: {:?}", err);
                         return Err(gst::FlowError::Error);
                     }
                 };
@@ -395,7 +345,7 @@ impl CameraPipeline {
                 let buffer = match sample.buffer() {
                     Some(buffer) => buffer,
                     None => {
-                        log::warn!("📹 MJPEG sample missing buffer");
+                        log::warn!("📹 Live sample missing buffer");
                         return Ok(gst::FlowSuccess::Ok);
                     }
                 };
@@ -403,19 +353,19 @@ impl CameraPipeline {
                 let map = match buffer.map_readable() {
                     Ok(map) => map,
                     Err(err) => {
-                        log::warn!("📹 Failed to map MJPEG buffer: {:?}", err);
+                        log::warn!("📹 Failed to map live buffer: {:?}", err);
                         return Err(gst::FlowError::Error);
                     }
                 };
 
                 let data = Bytes::copy_from_slice(map.as_slice());
 
-                log::debug!("📹 MJPEG frame received, size: {} bytes", data.len());
+                log::debug!("📹 Live frame received, size: {} bytes", data.len());
 
                 match context.streaming.mjpeg_tx.send(data) {
-                    Ok(_) => log::debug!("📹 MJPEG frame sent to broadcast channel"),
+                    Ok(_) => log::debug!("📹 Live frame sent to broadcast channel"),
                     Err(e) => log::warn!(
-                        "📹 Failed to send MJPEG frame to broadcast channel: {:?}",
+                        "📹 Failed to send live frame to broadcast channel: {:?}",
                         e
                     ),
                 }
@@ -423,59 +373,10 @@ impl CameraPipeline {
                 Ok(gst::FlowSuccess::Ok)
             })
             .build();
-        appsink_mjpeg.set_callbacks(mjpeg_callbacks);
-        log::info!("📺 MJPEG appsink callbacks configured");
+        appsink_live.set_callbacks(live_callbacks);
+        log::info!("📺 Live appsink callbacks configured");
 
-        let context_weak_audio = Arc::downgrade(&self.context);
-        let audio_callbacks = gst_app::AppSinkCallbacks::builder()
-            .new_sample(move |sink| {
-                let context = match context_weak_audio.upgrade() {
-                    Some(c) => c,
-                    None => {
-                        log::warn!("🔊 Audio context dropped, stopping callback");
-                        return Err(gst::FlowError::Flushing);
-                    }
-                };
 
-                let sample = match sink.pull_sample() {
-                    Ok(sample) => sample,
-                    Err(err) => {
-                        log::warn!("🔊 Failed to pull audio sample: {:?}", err);
-                        return Err(gst::FlowError::Error);
-                    }
-                };
-
-                let buffer = match sample.buffer() {
-                    Some(buffer) => buffer,
-                    None => {
-                        log::warn!("🔊 Audio sample missing buffer");
-                        return Ok(gst::FlowSuccess::Ok);
-                    }
-                };
-
-                let map = match buffer.map_readable() {
-                    Ok(map) => map,
-                    Err(err) => {
-                        log::warn!("🔊 Failed to map audio buffer: {:?}", err);
-                        return Err(gst::FlowError::Error);
-                    }
-                };
-
-                let data = Bytes::copy_from_slice(map.as_slice());
-
-                log::debug!("🔊 Audio chunk received, size: {} bytes", data.len());
-
-                // Set audio available flag
-                *context.streaming.audio_available.lock().unwrap() = true;
-
-                // Send to watch channel
-                let _ = context.streaming.audio_mp3_tx.send(data);
-
-                Ok(gst::FlowSuccess::Ok)
-            })
-            .build();
-        appsink_audio.set_callbacks(audio_callbacks);
-        log::info!("🔊 Audio appsink callbacks configured");
 
         let tee_src_pad_rec = tee.request_pad_simple("src_%u").unwrap();
         let queue_rec_sink_pad = queue_rec.static_pad("sink").unwrap();
@@ -487,10 +388,15 @@ impl CameraPipeline {
         tee_src_pad_motion.link(&queue_motion_sink_pad).unwrap();
         log::info!("🔧 Linked tee to motion queue");
 
-        let tee_src_pad_mjpeg = tee.request_pad_simple("src_%u").unwrap();
-        let queue_mjpeg_sink_pad = queue_mjpeg.static_pad("sink").unwrap();
-        tee_src_pad_mjpeg.link(&queue_mjpeg_sink_pad).unwrap();
-        log::info!("🔧 Linked tee to MJPEG queue");
+        let tee_src_pad_live = tee.request_pad_simple("src_%u").unwrap();
+        let queue_live_sink_pad = queue_live.static_pad("sink").unwrap();
+        tee_src_pad_live.link(&queue_live_sink_pad).unwrap();
+        log::info!("🔧 Linked tee to live queue");
+
+        let mp4mux_video_pad = mp4mux.request_pad_simple("sink_%u").unwrap();
+        let queue_live_src_pad = queue_live.static_pad("src").unwrap();
+        queue_live_src_pad.link(&mp4mux_video_pad).unwrap();
+        log::info!("🔧 Linked live queue to mp4mux video pad");
 
         log::info!("🔧 About to set pipeline running flag");
         self.pipeline = Some(pipeline.clone());
