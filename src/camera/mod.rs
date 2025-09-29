@@ -42,9 +42,9 @@ pub async fn start_camera_pipeline(
     state: Arc<AppState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Set pipeline running flag immediately when task starts
-    log::info!("🔧 Camera pipeline task started, setting pipeline_running=true");
-    *state.gstreamer.pipeline_running.lock().unwrap() = true;
-    log::info!("🔧 Pipeline running flag set at task start");
+    log::info!("🔧 Camera pipeline task started, warming up");
+    // *state.gstreamer.pipeline_running.lock().unwrap() = true;
+    // log::info!("🔧 Pipeline running flag set at task start");
 
     // Create motion detector
     let motion_detector = Arc::new(MotionDetector::new(Arc::clone(&state)));
@@ -75,6 +75,10 @@ pub async fn start_camera_pipeline(
             return Err(e.into());
         }
     }
+
+    // Now set the flag
+    *state.gstreamer.pipeline_running.lock().unwrap() = true;
+    log::info!("🔧 Pipeline running flag set after successful start");
 
     // Keep the task alive with health checks
     log::info!("🔧 Camera pipeline task running, monitoring pipeline...");

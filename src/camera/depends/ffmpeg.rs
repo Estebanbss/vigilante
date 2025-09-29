@@ -40,7 +40,7 @@ impl CameraPipeline {
             .build()
             .map_err(|e| VigilanteError::GStreamer(format!("Failed to create rtspsrc: {}", e)))?;
         source.set_property("location", self.context.camera_rtsp_url());
-        source.set_property("latency", 500u32);
+        source.set_property("latency", 1000u32);
         source.set_property("protocols", RTSPLowerTrans::TCP);
         source.set_property("do-rtcp", true);
 
@@ -137,8 +137,8 @@ impl CameraPipeline {
         let appsink_live = gst_app::AppSink::builder().build();
         appsink_live.set_property("emit-signals", &true);
         appsink_live.set_property("sync", &false);
-        appsink_live.set_max_buffers(1);
-        appsink_live.set_drop(true);
+        appsink_live.set_max_buffers(10);
+        appsink_live.set_drop(false);
 
         // Audio elements (PCMA)
         let rtppcmadepay = gst::ElementFactory::make("rtppcmadepay")
@@ -328,6 +328,7 @@ impl CameraPipeline {
         let context_weak = Arc::downgrade(&self.context);
         let live_callbacks = gst_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
+                log::info!("📹 Live callback called");
                 let context = match context_weak.upgrade() {
                     Some(c) => c,
                     None => {
@@ -410,7 +411,7 @@ impl CameraPipeline {
     }
 
     pub async fn start_recording(&self) -> Result<()> {
-        log::info!("🔧 Start recording called");
+        log::info!("🔧 Start recording called, pipeline: {:?}", self.pipeline.is_some());
         if let Some(ref pipeline) = self.pipeline {
             log::info!("🔧 Pipeline exists, setting state to Playing");
             pipeline
