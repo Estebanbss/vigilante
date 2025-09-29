@@ -132,7 +132,7 @@ pub struct DayMeta {
     pub last_scanned_mtime: Option<std::time::SystemTime>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AppState {
     pub camera: state::CameraConfig,
     pub storage: state::StorageConfig,
@@ -141,6 +141,7 @@ pub struct AppState {
     pub system: Arc<state::SystemState>,
     pub auth: state::AuthState,
     pub gstreamer: Arc<state::GStreamerState>,
+    pub camera_pipeline: Arc<StdMutex<Option<Arc<crate::camera::depends::ffmpeg::CameraPipeline>>>>,
 }
 
 impl AppState {

@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio;
 use tokio::runtime::Handle;
 
+#[derive(Debug)]
 pub struct CameraPipeline {
     pub pipeline: Option<gst::Pipeline>,
     pub mjpeg_tx: tokio::sync::broadcast::Sender<Bytes>,

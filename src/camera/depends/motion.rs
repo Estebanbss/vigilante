@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
+#[derive(Debug)]
 pub struct MotionDetector {
     pub log_path: std::path::PathBuf,
     pub context: Arc<AppState>,

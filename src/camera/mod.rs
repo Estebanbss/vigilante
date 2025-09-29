@@ -50,17 +50,21 @@ pub async fn start_camera_pipeline(
     let motion_detector = Arc::new(MotionDetector::new(Arc::clone(&state)));
 
     // Create and setup camera pipeline using the new logic
-    let mut camera_pipeline = CameraPipeline::new(Arc::clone(&state), Arc::clone(&motion_detector));
+    let mut camera_pipeline_inner = CameraPipeline::new(Arc::clone(&state), Arc::clone(&motion_detector));
 
     // Warm up the pipeline (create elements and link them)
-    match camera_pipeline.warm_up().await {
+    match camera_pipeline_inner.warm_up().await {
         Ok(_) => log::info!("🔧 Pipeline warmed up successfully"),
         Err(e) => {
             log::error!("❌ Failed to warm up pipeline: {}", e);
             *state.gstreamer.pipeline_running.lock().unwrap() = false;
-            return Err(e.into());
+            return Err(Box::new(e));
         }
     }
+
+    // Now wrap in Arc
+    let camera_pipeline = Arc::new(camera_pipeline_inner);
+    *state.camera_pipeline.lock().unwrap() = Some(Arc::clone(&camera_pipeline));
 
     // Start recording (set pipeline to PLAYING state)
     match camera_pipeline.start_recording().await {

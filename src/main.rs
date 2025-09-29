@@ -429,6 +429,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         system: system_state,
         auth: auth_state,
         gstreamer: gstreamer_state,
+        camera_pipeline: Arc::new(StdMutex::new(None)),
     });
 
     // Construir snapshot inicial antes de atender solicitudes
