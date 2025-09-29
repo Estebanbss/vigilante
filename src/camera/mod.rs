@@ -72,14 +72,15 @@ pub async fn start_camera_pipeline(_camera_rtsp_url: String, state: Arc<AppState
     // Keep the task alive with health checks
     log::info!("🔧 Camera pipeline task running, monitoring pipeline...");
     let mut last_health_check = std::time::Instant::now();
-    let mut last_mjpeg_frame = std::time::Instant::now();
+    let last_mjpeg_frame = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
     // Spawn a task to monitor MJPEG frames
     let state_clone = Arc::clone(&state);
+    let last_mjpeg_frame_clone = Arc::clone(&last_mjpeg_frame);
     tokio::spawn(async move {
         let mut rx = state_clone.streaming.mjpeg_tx.subscribe();
         while let Ok(_) = rx.recv().await {
-            last_mjpeg_frame = std::time::Instant::now();
+            *last_mjpeg_frame_clone.lock().unwrap() = std::time::Instant::now();
         }
     });
 
@@ -116,7 +117,7 @@ pub async fn start_camera_pipeline(_camera_rtsp_url: String, state: Arc<AppState
             }
 
             // Check if MJPEG frames are still being received (within last 10 seconds)
-            let time_since_last_frame = last_mjpeg_frame.elapsed();
+            let time_since_last_frame = last_mjpeg_frame.lock().unwrap().elapsed();
             if time_since_last_frame > std::time::Duration::from_secs(10) {
                 log::warn!("⚠️ No MJPEG frames received in {:.1}s - possible stream issue", time_since_last_frame.as_secs_f64());
             } else {
