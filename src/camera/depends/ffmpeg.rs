@@ -124,17 +124,7 @@ pub struct CameraPipeline {
             None
         });
 
-        // Connect decode to tee (dynamic pads)
-        let tee_weak = tee.downgrade();
-        decode.connect_pad_added(move |_, pad| {
-            let tee = match tee_weak.upgrade() {
-                Some(t) => t,
-                None => return,
-            };
-            let sink_pad = tee.request_pad_simple("sink_%u").unwrap();
-            pad.link(&sink_pad).unwrap();
-            log::info!("🔧 Linked decode to tee sink");
-        });
+
 
         // Link tee to branches (request source pads from tee)
         let tee_src_pad_mjpeg = tee.request_pad_simple("src_%u").unwrap();
@@ -156,18 +146,30 @@ pub struct CameraPipeline {
         source.link(&decode).map_err(|_| "Failed to link source to decode")?;
         log::info!("🔧 Linked source to decode");
 
-        // Manually link decode to tee - try to get decode's source pad
-        std::thread::sleep(std::time::Duration::from_millis(500)); // Wait for decode to create pads
-        let decode_pads = decode.pads();
-        log::info!("🔧 Decode has {} pads total", decode_pads.len());
-
-        for pad in decode_pads {
-            if pad.direction() == gst::PadDirection::Src {
-                log::info!("🔧 Found decode source pad, linking to tee");
+        // Set up async pad linking for decode -> tee
+        let tee_clone = tee.clone();
+        let tee_weak = Arc::downgrade(&Arc::new(tee_clone));
+        decode.connect_pad_added(move |_, src_pad| {
+            let tee_weak = tee_weak.clone();
+            if let Some(tee) = tee_weak.upgrade() {
+                log::info!("🔧 Decode created new source pad, linking to tee");
                 let tee_sink = tee.request_pad_simple("sink_%u").unwrap();
-                pad.link(&tee_sink).unwrap();
-                log::info!("🔧 Successfully linked decode src to tee sink");
-                break; // Only link the first source pad
+                if let Err(e) = src_pad.link(&tee_sink) {
+                    log::error!("🔧 Failed to link decode src to tee sink: {:?}", e);
+                } else {
+                    log::info!("🔧 Successfully linked decode src to tee sink");
+                }
+            }
+        });
+
+        // Also try to link any existing pads immediately
+        for pad in decode.src_pads() {
+            log::info!("🔧 Found existing decode source pad, linking to tee");
+            let tee_sink = tee.request_pad_simple("sink_%u").unwrap();
+            if let Err(e) = pad.link(&tee_sink) {
+                log::error!("🔧 Failed to link existing decode src to tee sink: {:?}", e);
+            } else {
+                log::info!("🔧 Successfully linked existing decode src to tee sink");
             }
         }
 
