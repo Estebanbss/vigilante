@@ -61,7 +61,6 @@ pub struct CameraPipeline {
         // MJPEG branch
         let queue_mjpeg = gst::ElementFactory::make("queue").build().map_err(|_| VigilanteError::GStreamer("Failed to create queue_mjpeg".to_string()))?;
         let videoconvert_mjpeg = gst::ElementFactory::make("videoconvert").build().map_err(|_| VigilanteError::GStreamer("Failed to create videoconvert_mjpeg".to_string()))?;
-        videoconvert_mjpeg.set_property("caps", gst::Caps::builder("video/x-raw").field("format", "RGB").build());
         let jpegenc = gst::ElementFactory::make("avenc_mjpeg").build().map_err(|_| VigilanteError::GStreamer("Failed to create avenc_mjpeg".to_string()))?;
         let appsink_mjpeg = gst::ElementFactory::make("appsink").build().map_err(|_| VigilanteError::GStreamer("Failed to create appsink_mjpeg".to_string()))?;
         appsink_mjpeg.set_property("emit-signals", true);
