@@ -62,5 +62,5 @@ pub struct AuthState {
 /// Estado de GStreamer
 #[derive(Debug)]
 pub struct GStreamerState {
-    pub pipeline: Arc<TokioMutex<Option<gstreamer::Pipeline>>>,
+    pub pipeline_running: Arc<StdMutex<bool>>,
 }

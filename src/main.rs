@@ -379,7 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let gstreamer_state = Arc::new(state::GStreamerState {
-        pipeline: Arc::new(Mutex::new(None)),
+        pipeline_running: Arc::new(StdMutex::new(false)),
     });
 
     let state = Arc::new(AppState {

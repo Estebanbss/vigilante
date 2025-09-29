@@ -4,8 +4,6 @@
 
 use crate::AppState;
 use std::sync::Arc;
-use gstreamer as gst;
-use gst::prelude::ElementExtManual;
 
 #[derive(Clone, Debug, serde::Serialize, Default)]
 pub struct SystemStatus {
@@ -27,30 +25,22 @@ impl SystemStatus {
     }
 
     async fn check_camera(&self, state: &Arc<AppState>) -> bool {
-        // Verificar si el pipeline de GStreamer está activo
-        let (pipeline_exists, pipeline_state) = {
-            let pipeline_lock = state.gstreamer.pipeline.lock().await;
-            let exists = pipeline_lock.is_some();
-            let state = if let Some(ref pipeline) = *pipeline_lock {
-                Some(pipeline.current_state())
-            } else {
-                None
-            };
-            (exists, state)
+        // Check if pipeline is running
+        let pipeline_running = {
+            *state.gstreamer.pipeline_running.lock().unwrap()
         };
 
-        log::info!("🔍 Status check - Camera: pipeline_exists={}, pipeline_state={:?}", pipeline_exists, pipeline_state);
+        log::info!("🔍 Status check - Camera: pipeline_running={}", pipeline_running);
 
-        // Si el pipeline existe y está reproduciendo, la cámara funciona
-        if pipeline_exists && matches!(pipeline_state, Some(gst::State::Playing)) {
+        // If the pipeline is running, the camera works
+        if pipeline_running {
             return true;
         }
 
-        // Si no hay pipeline activo, verificar si hay grabaciones recientes
-        // Esto indica que la cámara funcionó recientemente
+        // If not running, check for recent recordings
         let snapshot = state.system.recording_snapshot.lock().await.clone();
         let now = chrono::Utc::now();
-        let recent_threshold = chrono::Duration::minutes(30); // Últimos 30 minutos
+        let recent_threshold = chrono::Duration::minutes(30);
 
         let has_recent_recording = if let Some(latest_ts) = snapshot.latest_timestamp {
             let time_diff = now.signed_duration_since(latest_ts);
@@ -68,12 +58,7 @@ impl SystemStatus {
     async fn check_audio(&self, state: &Arc<AppState>) -> bool {
         // First check if pipeline is running - if so, audio should be available
         let pipeline_running = {
-            let pipeline_lock = state.gstreamer.pipeline.lock().await;
-            if let Some(ref pipeline) = *pipeline_lock {
-                matches!(pipeline.current_state(), gst::State::Playing)
-            } else {
-                false
-            }
+            *state.gstreamer.pipeline_running.lock().unwrap()
         };
 
         log::info!("🔍 Status check - Audio: pipeline_running={}", pipeline_running);
@@ -117,12 +102,7 @@ impl SystemStatus {
     async fn check_recordings(&self, state: &Arc<AppState>) -> bool {
         // First check if pipeline is running - if so, recordings should be happening
         let pipeline_running = {
-            let pipeline_lock = state.gstreamer.pipeline.lock().await;
-            if let Some(ref pipeline) = *pipeline_lock {
-                matches!(pipeline.current_state(), gst::State::Playing)
-            } else {
-                false
-            }
+            *state.gstreamer.pipeline_running.lock().unwrap()
         };
 
         log::info!("🔍 Status check - Recordings: pipeline_running={}", pipeline_running);

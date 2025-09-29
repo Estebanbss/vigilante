@@ -130,11 +130,11 @@ pub struct CameraPipeline {
         // Link source to decode
         source.link(&decode).map_err(|_| "Failed to link source to decode")?;
 
-        // Store pipeline locally and in AppState
+        // Store pipeline locally and set running flag
         log::info!("🔧 About to store pipeline in AppState");
         self.pipeline = Some(pipeline.clone());
-        *self.context.gstreamer.pipeline.lock().await = Some(pipeline);
-        log::info!("🔧 Pipeline stored in AppState successfully");
+        *self.context.gstreamer.pipeline_running.lock().unwrap() = true;
+        log::info!("🔧 Pipeline running flag set to true");
         Ok(())
     }
 
