@@ -122,50 +122,11 @@ pub struct CameraPipeline {
         // Add elements (include rtph264depay in the add_many call)
         pipeline.add_many([&source, &rtph264depay, &h264parse, &avdec_h264, &tee, &queue_mjpeg, &videoconvert_mjpeg, &jpegenc, &appsink_mjpeg, &queue_rec, &videoconvert_rec, &x264enc, &mp4mux, &filesink]).map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
-        // Add elements (include rtph264depay in the add_many call)
-        pipeline.add_many([&source, &rtph264depay, &h264parse, &avdec_h264, &tee, &queue_mjpeg, &videoconvert_mjpeg, &jpegenc, &appsink_mjpeg, &queue_rec, &videoconvert_rec, &x264enc, &mp4mux, &filesink]).map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
-
         // Link the decode chain
         gst::Element::link_many([&rtph264depay, &h264parse, &avdec_h264]).map_err(|_| VigilanteError::GStreamer("Failed to link decode chain".to_string()))?;
 
         // Link avdec_h264 directly to tee
         avdec_h264.link(&tee).map_err(|_| VigilanteError::GStreamer("Failed to link avdec_h264 to tee".to_string()))?;
-
-        // Set up dynamic pad linking for rtspsrc -> rtph264depay
-        // This must be done AFTER adding elements to pipeline
-        let rtph264depay_clone = rtph264depay.clone();
-        source.connect_pad_added(move |_, src_pad| {
-            log::info!("🔧 RTSP source created new pad: {:?}", src_pad.name());
-
-            // Check if this is a video pad by examining caps
-            let caps = src_pad.current_caps();
-            if let Some(caps) = caps {
-                if let Some(structure) = caps.structure(0) {
-                    if let Ok(media) = structure.get::<&str>("media") {
-                        if media == "video" {
-                            log::info!("🔧 Found video pad from RTSP source, linking to rtph264depay");
-                            let sink_pad = rtph264depay_clone.static_pad("sink").unwrap();
-                            if let Err(e) = src_pad.link(&sink_pad) {
-                                log::error!("🔧 Failed to link RTSP src pad to rtph264depay sink: {:?}", e);
-                            } else {
-                                log::info!("🔧 Successfully linked RTSP src pad to rtph264depay sink");
-                            }
-                        }
-                    }
-                }
-            } else {
-                log::warn!("🔧 RTSP pad created without caps, will try to link anyway");
-                // Try to link anyway if no caps available yet
-                let sink_pad = rtph264depay_clone.static_pad("sink");
-                if let Some(sink_pad) = sink_pad {
-                    if let Err(e) = src_pad.link(&sink_pad) {
-                        log::error!("🔧 Failed to link RTSP src pad to rtph264depay sink (no caps): {:?}", e);
-                    } else {
-                        log::info!("🔧 Successfully linked RTSP src pad to rtph264depay sink (no caps check)");
-                    }
-                }
-            }
-        });
 
         // Motion branch
         let queue_motion = gst::ElementFactory::make("queue").build().map_err(|_| VigilanteError::GStreamer("Failed to create queue_motion".to_string()))?;
