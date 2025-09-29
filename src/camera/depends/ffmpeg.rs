@@ -154,6 +154,22 @@ pub struct CameraPipeline {
 
         // Link source to decode
         source.link(&decode).map_err(|_| "Failed to link source to decode")?;
+        log::info!("🔧 Linked source to decode");
+
+        // Manually link decode to tee - try to get decode's source pad
+        std::thread::sleep(std::time::Duration::from_millis(500)); // Wait for decode to create pads
+        let decode_pads = decode.pads();
+        log::info!("🔧 Decode has {} pads total", decode_pads.len());
+
+        for pad in decode_pads {
+            if pad.direction() == gst::PadDirection::Src {
+                log::info!("🔧 Found decode source pad, linking to tee");
+                let tee_sink = tee.request_pad_simple("sink_%u").unwrap();
+                pad.link(&tee_sink).unwrap();
+                log::info!("🔧 Successfully linked decode src to tee sink");
+                break; // Only link the first source pad
+            }
+        }
 
         // Store pipeline locally and set running flag
         log::info!("🔧 About to set pipeline running flag");
