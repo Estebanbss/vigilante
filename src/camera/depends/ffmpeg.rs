@@ -132,7 +132,6 @@ impl CameraPipeline {
         let mp4mux = gst::ElementFactory::make("mp4mux")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create mp4mux".to_string()))?;
-        mp4mux.set_property("fragmented", &true);
         mp4mux.set_property("streamable", &true);
         let appsink_live = gst_app::AppSink::builder().build();
         appsink_live.set_property("emit-signals", &true);
