@@ -142,10 +142,7 @@ pub async fn stream_mjpeg_handler(
         let segments_guard = state.streaming.mp4_init_segments.lock().unwrap();
         segments_guard.clone()
     };
-    let init_complete = {
-        let complete_guard = state.streaming.mp4_init_complete.lock().unwrap();
-        *complete_guard
-    };
+
 
     let mut receiver = state.streaming.mjpeg_tx.subscribe();
     const MAX_FRAGMENT_BUNDLE: usize = 3;
