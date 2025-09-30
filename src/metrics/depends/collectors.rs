@@ -31,6 +31,16 @@ lazy_static! {
         "Total number of motion detection events"
     )
     .unwrap();
+    pub static ref LIVE_LATENCY_EWMA_MS: Gauge = register_gauge!(
+        "vigilante_live_latency_ewma_ms",
+        "Latencia suavizada (EWMA) del streaming en vivo en milisegundos"
+    )
+    .unwrap();
+    pub static ref LIVE_LATENCY_LAST_MS: Gauge = register_gauge!(
+        "vigilante_live_latency_last_ms",
+        "Latencia medida del último fragmento emitido en milisegundos"
+    )
+    .unwrap();
 }
 
 pub struct MetricsCollector;
@@ -58,6 +68,13 @@ impl MetricsCollector {
 
     pub fn increment_motion_events() {
         MOTION_EVENTS_TOTAL.inc();
+    }
+
+    pub fn record_live_latency(latency_ms: f64, ewma_ms: Option<f64>) {
+        LIVE_LATENCY_LAST_MS.set(latency_ms);
+        if let Some(ewma) = ewma_ms {
+            LIVE_LATENCY_EWMA_MS.set(ewma);
+        }
     }
 
     pub fn gather() -> Result<String, Box<dyn std::error::Error>> {

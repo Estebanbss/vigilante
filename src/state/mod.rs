@@ -37,6 +37,17 @@ pub struct StreamingState {
     pub mp4_init_complete: Arc<StdMutex<bool>>,
     pub mp4_init_scan_tail: Arc<StdMutex<Vec<u8>>>,
     pub mp4_init_warned_before_moov: Arc<StdMutex<bool>>,
+    pub live_latency_snapshot: Arc<StdMutex<LatencySnapshot>>,
+}
+
+/// Métricas acumuladas de latencia para el streaming en vivo
+#[derive(Debug, Clone, Default)]
+pub struct LatencySnapshot {
+    pub last_ms: Option<f64>,
+    pub ewma_ms: Option<f64>,
+    pub min_ms: Option<f64>,
+    pub max_ms: Option<f64>,
+    pub samples: u64,
 }
 
 /// Estado de logging

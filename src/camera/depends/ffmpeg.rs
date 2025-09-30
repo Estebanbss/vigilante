@@ -5,13 +5,16 @@
 
 use crate::camera::depends::motion::MotionDetector;
 use crate::error::{Result, VigilanteError};
+use crate::metrics::depends::collectors::MetricsCollector;
+use crate::state::LatencySnapshot;
 use crate::AppState;
 use bytes::Bytes;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_rtsp::RTSPLowerTrans;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 use tokio;
 use tokio::runtime::Handle;
 
@@ -21,6 +24,94 @@ pub struct CameraPipeline {
     pub mjpeg_tx: tokio::sync::broadcast::Sender<Bytes>,
     pub motion_detector: Arc<MotionDetector>,
     pub context: Arc<AppState>,
+}
+
+#[derive(Debug, Clone)]
+struct LatencyUpdate {
+    latency_ms: f64,
+    snapshot: LatencySnapshot,
+    should_log: bool,
+}
+
+#[derive(Debug, Default)]
+struct LatencyTracker {
+    origin_instant: Option<Instant>,
+    origin_pts: Option<gst::ClockTime>,
+    snapshot: LatencySnapshot,
+    samples_since_log: u32,
+}
+
+impl LatencyTracker {
+    fn update(&mut self, pts: gst::ClockTime, now: Instant) -> Option<LatencyUpdate> {
+    let pts_ns = pts.nseconds();
+
+        if self.origin_pts.is_none() || self.origin_instant.is_none() {
+            self.origin_pts = Some(pts);
+            self.origin_instant = Some(now);
+            self.snapshot.samples = 0;
+            self.snapshot.last_ms = Some(0.0);
+            self.snapshot.ewma_ms = Some(0.0);
+            self.snapshot.min_ms = Some(0.0);
+            self.snapshot.max_ms = Some(0.0);
+            return Some(LatencyUpdate {
+                latency_ms: 0.0,
+                snapshot: self.snapshot.clone(),
+                should_log: false,
+            });
+        }
+
+    let origin_pts_ns = self.origin_pts.unwrap().nseconds();
+        let origin_instant = self.origin_instant.unwrap();
+
+        let stream_elapsed_ms = if pts_ns >= origin_pts_ns {
+            (pts_ns - origin_pts_ns) as f64 / 1_000_000.0
+        } else {
+            0.0
+        };
+
+        let real_elapsed_ms = now
+            .duration_since(origin_instant)
+            .as_secs_f64()
+            * 1_000.0;
+        let mut latency_ms = real_elapsed_ms - stream_elapsed_ms;
+        if latency_ms.is_nan() || latency_ms.is_infinite() {
+            latency_ms = 0.0;
+        }
+        if latency_ms < 0.0 {
+            latency_ms = 0.0;
+        }
+
+        self.snapshot.samples = self.snapshot.samples.saturating_add(1);
+        self.snapshot.last_ms = Some(latency_ms);
+        self.snapshot.min_ms = Some(match self.snapshot.min_ms {
+            Some(current) => current.min(latency_ms),
+            None => latency_ms,
+        });
+        self.snapshot.max_ms = Some(match self.snapshot.max_ms {
+            Some(current) => current.max(latency_ms),
+            None => latency_ms,
+        });
+
+        let ewma = match self.snapshot.ewma_ms {
+            Some(current) => 0.65 * current + 0.35 * latency_ms,
+            None => latency_ms,
+        };
+        self.snapshot.ewma_ms = Some(ewma);
+
+        self.samples_since_log += 1;
+        let should_log = if self.samples_since_log >= 30 {
+            self.samples_since_log = 0;
+            true
+        } else {
+            false
+        };
+
+        Some(LatencyUpdate {
+            latency_ms,
+            snapshot: self.snapshot.clone(),
+            should_log,
+        })
+    }
 }
 impl CameraPipeline {
     pub fn new(context: Arc<AppState>, motion_detector: Arc<MotionDetector>) -> Self {
@@ -74,11 +165,14 @@ impl CameraPipeline {
             .build()
             .map_err(|e| VigilanteError::GStreamer(format!("Failed to create rtspsrc: {}", e)))?;
         source.set_property("location", self.context.camera_rtsp_url());
-    source.set_property("latency", 120u32);
+        source.set_property("latency", 60u32);
         source.set_property("protocols", RTSPLowerTrans::TCP);
         source.set_property("do-rtcp", true);
         if source.find_property("drop-on-late").is_some() {
             source.set_property("drop-on-late", &true);
+        }
+        if source.find_property("buffer-mode").is_some() {
+            source.set_property_from_str("buffer-mode", "none");
         }
 
         let rtph264depay = gst::ElementFactory::make("rtph264depay")
@@ -127,7 +221,8 @@ impl CameraPipeline {
 
         log::info!("📹 Grabación iniciada: {}", path.display());
 
-        let runtime_handle = Handle::current();
+    let runtime_handle = Handle::current();
+    let latency_tracker = Arc::new(StdMutex::new(LatencyTracker::default()));
 
         let queue_motion = gst::ElementFactory::make("queue")
             .build()
@@ -166,15 +261,15 @@ impl CameraPipeline {
         let queue_live = gst::ElementFactory::make("queue")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create queue_live".to_string()))?;
-    queue_live.set_property("max-size-time", 150_000_000u64);
-    queue_live.set_property("max-size-buffers", 3u32);
-    queue_live.set_property_from_str("leaky", "downstream");
+        queue_live.set_property("max-size-time", 80_000_000u64);
+        queue_live.set_property("max-size-buffers", 2u32);
+        queue_live.set_property_from_str("leaky", "downstream");
         let mp4mux = gst::ElementFactory::make("mp4mux")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create mp4mux".to_string()))?;
         mp4mux.set_property("streamable", &true);
         if mp4mux.find_property("fragment-duration").is_some() {
-            mp4mux.set_property("fragment-duration", &200u32);
+            mp4mux.set_property("fragment-duration", &120u32);
         } else {
             log::debug!("🔧 mp4mux missing fragment-duration property; skipping override");
         }
@@ -182,6 +277,11 @@ impl CameraPipeline {
             mp4mux.set_property("reserved-moov-update", &true);
         } else {
             log::debug!("🔧 mp4mux missing reserved-moov-update property; skipping override");
+        }
+        if mp4mux.find_property("presentation-time").is_some() {
+            mp4mux.set_property("presentation-time", &true);
+        } else {
+            log::debug!("🔧 mp4mux missing presentation-time property; skipping override");
         }
         if log::log_enabled!(log::Level::Debug) {
             for pspec in mp4mux.list_properties() {
@@ -195,8 +295,8 @@ impl CameraPipeline {
         let appsink_live = gst_app::AppSink::builder().build();
         appsink_live.set_property("emit-signals", &true);
         appsink_live.set_property("sync", &false);
-        appsink_live.set_max_buffers(10);
-        appsink_live.set_drop(false);
+    appsink_live.set_max_buffers(4);
+    appsink_live.set_drop(true);
 
         // Audio elements (PCMA)
         let rtppcmadepay = gst::ElementFactory::make("rtppcmadepay")
@@ -429,6 +529,8 @@ impl CameraPipeline {
         log::info!("🚶 Motion appsink callbacks configured");
 
         let context_weak = Arc::downgrade(&self.context);
+        let latency_tracker_for_live = Arc::clone(&latency_tracker);
+        let latency_snapshot_handle = Arc::clone(&self.context.streaming.live_latency_snapshot);
         let live_callbacks = gst_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
                 log::debug!("📹 Live callback called");
@@ -455,6 +557,43 @@ impl CameraPipeline {
                         return Ok(gst::FlowSuccess::Ok);
                     }
                 };
+
+                if let Some(pts) = buffer.pts() {
+                    let now_instant = Instant::now();
+                    if let Ok(mut tracker) = latency_tracker_for_live.lock() {
+                        if let Some(update) = tracker.update(pts, now_instant) {
+                            if let Ok(mut snapshot_guard) = latency_snapshot_handle.lock() {
+                                *snapshot_guard = update.snapshot.clone();
+                            }
+                            MetricsCollector::record_live_latency(
+                                update.latency_ms,
+                                update.snapshot.ewma_ms,
+                            );
+                            if update.should_log {
+                                let ewma_display = update
+                                    .snapshot
+                                    .ewma_ms
+                                    .unwrap_or(update.latency_ms);
+                                let min_display = update
+                                    .snapshot
+                                    .min_ms
+                                    .unwrap_or(update.latency_ms);
+                                let max_display = update
+                                    .snapshot
+                                    .max_ms
+                                    .unwrap_or(update.latency_ms);
+                                log::info!(
+                                    "⚡ Latencia live {:.1} ms (EWMA {:.1} ms, min {:.1} ms, max {:.1} ms, muestras {})",
+                                    update.latency_ms,
+                                    ewma_display,
+                                    min_display,
+                                    max_display,
+                                    update.snapshot.samples
+                                );
+                            }
+                        }
+                    }
+                }
 
                 let map = match buffer.map_readable() {
                     Ok(map) => map,
