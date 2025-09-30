@@ -342,7 +342,6 @@ pub async fn stream_mjpeg_handler(
 struct Mp4InitDetector {
     has_ftyp: bool,
     has_moov: bool,
-    has_moof: bool,
     tail: Vec<u8>,
 }
 
@@ -358,11 +357,8 @@ impl Mp4InitDetector {
         if !self.has_moov {
             self.has_moov = data.windows(4).any(|w| w == b"moov");
         }
-        if !self.has_moof {
-            self.has_moof = data.windows(4).any(|w| w == b"moof");
-        }
 
-        if !(self.has_ftyp && self.has_moov && self.has_moof) && !self.tail.is_empty() {
+        if !(self.has_ftyp && self.has_moov) && !self.tail.is_empty() {
             let mut combined = Vec::with_capacity(self.tail.len() + data.len());
             combined.extend_from_slice(&self.tail);
             combined.extend_from_slice(data);
@@ -371,9 +367,6 @@ impl Mp4InitDetector {
             }
             if !self.has_moov {
                 self.has_moov = combined.windows(4).any(|w| w == b"moov");
-            }
-            if !self.has_moof {
-                self.has_moof = combined.windows(4).any(|w| w == b"moof");
             }
         }
 
@@ -391,10 +384,6 @@ impl Mp4InitDetector {
 
     fn has_moov(&self) -> bool {
         self.has_moov
-    }
-
-    fn has_moof(&self) -> bool {
-        self.has_moof
     }
 
     fn is_complete(&self) -> bool {
