@@ -99,7 +99,7 @@ impl LatencyTracker {
         self.snapshot.ewma_ms = Some(ewma);
 
         self.samples_since_log += 1;
-        let should_log = if self.samples_since_log >= 30 {
+        let should_log = if self.samples_since_log >= 300 {
             self.samples_since_log = 0;
             true
         } else {
