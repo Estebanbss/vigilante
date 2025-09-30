@@ -35,6 +35,7 @@ pub struct StreamingState {
     pub last_audio_timestamp: Arc<StdMutex<Option<std::time::Instant>>>,
     pub mp4_init_segments: Arc<StdMutex<Vec<Bytes>>>,
     pub mp4_init_complete: Arc<StdMutex<bool>>,
+    pub mp4_init_scan_tail: Arc<StdMutex<Vec<u8>>>,
 }
 
 /// Estado de logging

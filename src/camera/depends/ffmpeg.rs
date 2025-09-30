@@ -52,6 +52,14 @@ impl CameraPipeline {
                 .lock()
                 .unwrap();
             *complete_guard = false;
+
+            let mut tail_guard = self
+                .context
+                .streaming
+                .mp4_init_scan_tail
+                .lock()
+                .unwrap();
+            tail_guard.clear();
         }
 
         let source = gst::ElementFactory::make("rtspsrc")
@@ -427,8 +435,36 @@ impl CameraPipeline {
 
                 {
                     let slice = data.as_ref();
-                    let has_ftyp = slice.windows(4).any(|w| w == b"ftyp");
-                    let has_moov = slice.windows(4).any(|w| w == b"moov");
+                    let mut has_ftyp = slice.windows(4).any(|w| w == b"ftyp");
+                    let mut has_moov = slice.windows(4).any(|w| w == b"moov");
+
+                    {
+                        let mut tail_guard = context
+                            .streaming
+                            .mp4_init_scan_tail
+                            .lock()
+                            .unwrap();
+
+                        if !has_moov || !has_ftyp {
+                            let mut combined = Vec::with_capacity(tail_guard.len() + slice.len());
+                            combined.extend_from_slice(&tail_guard);
+                            combined.extend_from_slice(slice);
+                            if !has_moov {
+                                has_moov = combined.windows(4).any(|w| w == b"moov");
+                            }
+                            if !has_ftyp {
+                                has_ftyp = combined.windows(4).any(|w| w == b"ftyp");
+                            }
+                        }
+
+                        tail_guard.clear();
+                        let tail_len = slice.len().min(3);
+                        if tail_len > 0 {
+                            tail_guard.extend_from_slice(
+                                &slice[slice.len().saturating_sub(tail_len)..]
+                            );
+                        }
+                    }
 
                     let mut segments_guard = context
                         .streaming
