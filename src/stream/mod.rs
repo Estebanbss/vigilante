@@ -148,6 +148,7 @@ pub async fn stream_mjpeg_handler(
     let mut receiver = state.streaming.mjpeg_tx.subscribe();
     let mut delivered_fragments: usize = 0;
     const WARMUP_FRAGMENT_COUNT: usize = 15;
+    const MAX_FRAGMENT_BUNDLE: usize = 8;
     const INIT_MAX_BUFFERED_FRAGMENTS: usize = 64;
     const INIT_WAIT_TIMEOUT: Duration = Duration::from_millis(1800);
     const INIT_RECV_TIMEOUT: Duration = Duration::from_millis(200);
@@ -239,15 +240,16 @@ pub async fn stream_mjpeg_handler(
 
         loop {
             match receiver.recv().await {
-                Ok(mut bytes) => {
+                Ok(first_bytes) => {
                     use tokio::sync::broadcast::error::TryRecvError;
 
+                    let mut bundle: Vec<bytes::Bytes> = vec![first_bytes];
+
                     if delivered_fragments >= WARMUP_FRAGMENT_COUNT {
-                        // Tras el warm-up, drenamos backlog para quedarnos con el fragmento más reciente.
                         loop {
                             match receiver.try_recv() {
                                 Ok(next_bytes) => {
-                                    bytes = next_bytes;
+                                    bundle.push(next_bytes);
                                 }
                                 Err(TryRecvError::Empty) => {
                                     break;
@@ -261,18 +263,30 @@ pub async fn stream_mjpeg_handler(
                                 }
                                 Err(TryRecvError::Closed) => {
                                     log::info!("📺 Broadcast channel closed while draining backlog");
-                                    return;
+                                    break;
                                 }
                             }
                         }
                     }
 
-                    log::debug!(
-                        "📺 MP4 fragment received in stream handler, size: {} bytes",
-                        bytes.len()
-                    );
-                    yield Ok::<_, Infallible>(bytes);
-                    delivered_fragments = delivered_fragments.saturating_add(1);
+                    if bundle.len() > MAX_FRAGMENT_BUNDLE {
+                        let dropped = bundle.len() - MAX_FRAGMENT_BUNDLE;
+                        log::debug!(
+                            "📺 Dropping {} oldest fragments from bundle to reduce latency (keeping {})",
+                            dropped,
+                            MAX_FRAGMENT_BUNDLE
+                        );
+                    }
+
+                    let start_index = bundle.len().saturating_sub(MAX_FRAGMENT_BUNDLE);
+                    for fragment in bundle.into_iter().skip(start_index) {
+                        log::debug!(
+                            "📺 MP4 fragment dispatched to client, size: {} bytes",
+                            fragment.len()
+                        );
+                        yield Ok::<_, Infallible>(fragment);
+                        delivered_fragments = delivered_fragments.saturating_add(1);
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     log::warn!(
@@ -359,6 +373,6 @@ impl Mp4InitDetector {
     }
 
     fn is_complete(&self) -> bool {
-        self.has_ftyp && self.has_moov
+        self.has_ftyp && self.has_moov && self.has_moof
     }
 }
