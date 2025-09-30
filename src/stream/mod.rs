@@ -17,7 +17,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::time::{timeout, Instant as TokioInstant};
+use tokio_stream::wrappers::ReceiverStream;
 
 /// Manager principal para streaming.
 pub struct StreamManager {
@@ -146,7 +148,6 @@ pub async fn stream_mjpeg_handler(
     };
 
     let mut receiver = state.streaming.mjpeg_tx.subscribe();
-    let mut delivered_fragments: usize = 0;
     const WARMUP_FRAGMENT_COUNT: usize = 15;
     const MAX_FRAGMENT_BUNDLE: usize = 8;
     const INIT_MAX_BUFFERED_FRAGMENTS: usize = 64;
@@ -154,9 +155,14 @@ pub async fn stream_mjpeg_handler(
     const INIT_RECV_TIMEOUT: Duration = Duration::from_millis(200);
     log::info!("📺 MP4 stream handler: subscribed to broadcast channel");
 
-    let stream = async_stream::stream! {
+    // Create a bounded channel for streaming data
+    let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, Infallible>>(32);
+
+    // Spawn a task to handle the streaming logic
+    tokio::spawn(async move {
         let mut init_detector = Mp4InitDetector::default();
         let mut handshake_segments: Vec<bytes::Bytes> = Vec::new();
+        let mut delivered_fragments: usize = 0;
 
         if !init_segments.is_empty() {
             let total_bytes = init_segments.iter().map(|seg| seg.len()).sum::<usize>();
@@ -204,7 +210,7 @@ pub async fn stream_mjpeg_handler(
                     }
                     Ok(Err(broadcast::error::RecvError::Closed)) => {
                         log::info!("📦 Broadcast channel closed while waiting for init fragments");
-                        break;
+                        return;
                     }
                     Err(_) => {
                         log::debug!("📦 Timeout while waiting for init fragment; retrying");
@@ -231,65 +237,72 @@ pub async fn stream_mjpeg_handler(
             log::warn!("📦 No MP4 fragments buffered for client handshake; playback may stall");
         }
 
+        // Send handshake segments
         for segment in handshake_segments {
-            yield Ok::<_, Infallible>(segment);
+            if tx.send_timeout(Ok(segment), Duration::from_millis(100)).await.is_err() {
+                log::info!("📺 Client disconnected during handshake");
+                return;
+            }
             delivered_fragments = delivered_fragments.saturating_add(1);
         }
 
         log::info!("📺 Starting continuous fragment streaming to client");
         loop {
-            log::info!("📺 Waiting for next fragment from broadcast channel");
+            log::debug!("📺 Waiting for next fragment from broadcast channel");
             match tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await {
                 Ok(recv_result) => match recv_result {
                     Ok(first_bytes) => {
-                    use tokio::sync::broadcast::error::TryRecvError;
+                        use tokio::sync::broadcast::error::TryRecvError;
 
-                    let mut bundle: Vec<bytes::Bytes> = vec![first_bytes];
+                        let mut bundle: Vec<bytes::Bytes> = vec![first_bytes];
 
-                    if delivered_fragments >= WARMUP_FRAGMENT_COUNT {
-                        loop {
-                            match receiver.try_recv() {
-                                Ok(next_bytes) => {
-                                    bundle.push(next_bytes);
-                                }
-                                Err(TryRecvError::Empty) => {
-                                    break;
-                                }
-                                Err(TryRecvError::Lagged(skipped)) => {
-                                    log::warn!(
-                                        "📺 Receiver lagged while draining backlog; skipped {} fragments",
-                                        skipped
-                                    );
-                                    continue;
-                                }
-                                Err(TryRecvError::Closed) => {
-                                    log::info!("📺 Broadcast channel closed while draining backlog");
-                                    break;
+                        if delivered_fragments >= WARMUP_FRAGMENT_COUNT {
+                            loop {
+                                match receiver.try_recv() {
+                                    Ok(next_bytes) => {
+                                        bundle.push(next_bytes);
+                                    }
+                                    Err(TryRecvError::Empty) => {
+                                        break;
+                                    }
+                                    Err(TryRecvError::Lagged(skipped)) => {
+                                        log::warn!(
+                                            "📺 Receiver lagged while draining backlog; skipped {} fragments",
+                                            skipped
+                                        );
+                                        continue;
+                                    }
+                                    Err(TryRecvError::Closed) => {
+                                        log::info!("📺 Broadcast channel closed while draining backlog");
+                                        break;
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    if bundle.len() > MAX_FRAGMENT_BUNDLE {
-                        let dropped = bundle.len() - MAX_FRAGMENT_BUNDLE;
-                        log::debug!(
-                            "📺 Dropping {} oldest fragments from bundle to reduce latency (keeping {})",
-                            dropped,
-                            MAX_FRAGMENT_BUNDLE
-                        );
-                    }
+                        if bundle.len() > MAX_FRAGMENT_BUNDLE {
+                            let dropped = bundle.len() - MAX_FRAGMENT_BUNDLE;
+                            log::debug!(
+                                "📺 Dropping {} oldest fragments from bundle to reduce latency (keeping {})",
+                                dropped,
+                                MAX_FRAGMENT_BUNDLE
+                            );
+                        }
 
-                    let start_index = bundle.len().saturating_sub(MAX_FRAGMENT_BUNDLE);
-                    let bundle_to_send = &bundle[start_index..];
-                    log::info!("📺 Sending bundle of {} fragments to client", bundle_to_send.len());
-                    for fragment in bundle_to_send {
-                        log::debug!(
-                            "📺 MP4 fragment dispatched to client, size: {} bytes",
-                            fragment.len()
-                        );
-                        yield Ok::<_, Infallible>(fragment.clone());
-                        delivered_fragments = delivered_fragments.saturating_add(1);
-                    }
+                        let start_index = bundle.len().saturating_sub(MAX_FRAGMENT_BUNDLE);
+                        let bundle_to_send = &bundle[start_index..];
+                        log::info!("📺 Sending bundle of {} fragments to client", bundle_to_send.len());
+                        for fragment in bundle_to_send {
+                            log::debug!(
+                                "📺 MP4 fragment dispatched to client, size: {} bytes",
+                                fragment.len()
+                            );
+                            if tx.send_timeout(Ok(fragment.clone()), Duration::from_millis(100)).await.is_err() {
+                                log::info!("📺 Client disconnected during streaming, sent {} fragments", delivered_fragments);
+                                return;
+                            }
+                            delivered_fragments = delivered_fragments.saturating_add(1);
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         log::warn!(
@@ -308,9 +321,11 @@ pub async fn stream_mjpeg_handler(
                 }
             }
         }
-    };
 
-    log::info!("📺 Stream ended, total fragments delivered: {}", delivered_fragments);
+        log::info!("📺 Stream ended, total fragments delivered: {}", delivered_fragments);
+    });
+
+    let stream = ReceiverStream::new(rx);
 
     let body = axum::body::Body::from_stream(stream);
 
