@@ -238,9 +238,10 @@ pub async fn stream_mjpeg_handler(
 
         log::info!("📺 Starting continuous fragment streaming to client");
         loop {
-            log::debug!("📺 Waiting for next fragment from broadcast channel");
-            match receiver.recv().await {
-                Ok(first_bytes) => {
+            log::info!("📺 Waiting for next fragment from broadcast channel");
+            match tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await {
+                Ok(recv_result) => match recv_result {
+                    Ok(first_bytes) => {
                     use tokio::sync::broadcast::error::TryRecvError;
 
                     let mut bundle: Vec<bytes::Bytes> = vec![first_bytes];
@@ -289,15 +290,20 @@ pub async fn stream_mjpeg_handler(
                         yield Ok::<_, Infallible>(fragment.clone());
                         delivered_fragments = delivered_fragments.saturating_add(1);
                     }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        log::warn!(
+                            "📺 Receiver lagged behind broadcast channel; skipped {} fragments",
+                            skipped
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        log::info!("📺 Broadcast channel closed, ending stream after {} fragments", delivered_fragments);
+                        break;
+                    }
                 }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    log::warn!(
-                        "📺 Receiver lagged behind broadcast channel; skipped {} fragments",
-                        skipped
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    log::info!("📺 Broadcast channel closed, ending stream after {} fragments", delivered_fragments);
+                Err(_) => {
+                    log::info!("📺 Timeout waiting for fragment, client likely disconnected after {} fragments", delivered_fragments);
                     break;
                 }
             }
