@@ -240,6 +240,7 @@ pub async fn stream_mjpeg_handler(
 
         log::info!("📺 Starting continuous fragment streaming to client");
         loop {
+            log::debug!("📺 Waiting for next fragment from broadcast channel");
             match receiver.recv().await {
                 Ok(first_bytes) => {
                     use tokio::sync::broadcast::error::TryRecvError;
@@ -280,17 +281,15 @@ pub async fn stream_mjpeg_handler(
                     }
 
                     let start_index = bundle.len().saturating_sub(MAX_FRAGMENT_BUNDLE);
-                    for fragment in bundle.into_iter().skip(start_index) {
+                    let bundle_to_send = &bundle[start_index..];
+                    log::info!("📺 Sending bundle of {} fragments to client", bundle_to_send.len());
+                    for fragment in bundle_to_send {
                         log::debug!(
                             "📺 MP4 fragment dispatched to client, size: {} bytes",
                             fragment.len()
                         );
-                        yield Ok::<_, Infallible>(fragment);
+                        yield Ok::<_, Infallible>(fragment.clone());
                         delivered_fragments = delivered_fragments.saturating_add(1);
-                    }
-
-                    if delivered_fragments % 100 == 0 {
-                        log::info!("📺 Delivered {} fragments to client so far", delivered_fragments);
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -300,12 +299,14 @@ pub async fn stream_mjpeg_handler(
                     );
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    log::info!("📺 Broadcast channel closed, ending stream");
+                    log::info!("📺 Broadcast channel closed, ending stream after {} fragments", delivered_fragments);
                     break;
                 }
             }
         }
     };
+
+    log::info!("📺 Stream ended, total fragments delivered: {}", delivered_fragments);
 
     let body = axum::body::Body::from_stream(stream);
 
