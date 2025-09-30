@@ -74,9 +74,12 @@ impl CameraPipeline {
             .build()
             .map_err(|e| VigilanteError::GStreamer(format!("Failed to create rtspsrc: {}", e)))?;
         source.set_property("location", self.context.camera_rtsp_url());
-        source.set_property("latency", 500u32);
+    source.set_property("latency", 120u32);
         source.set_property("protocols", RTSPLowerTrans::TCP);
         source.set_property("do-rtcp", true);
+        if source.find_property("drop-on-late").is_some() {
+            source.set_property("drop-on-late", &true);
+        }
 
         let rtph264depay = gst::ElementFactory::make("rtph264depay")
             .build()
@@ -163,12 +166,15 @@ impl CameraPipeline {
         let queue_live = gst::ElementFactory::make("queue")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create queue_live".to_string()))?;
+    queue_live.set_property("max-size-time", 150_000_000i64);
+    queue_live.set_property("max-size-buffers", 3i32);
+    queue_live.set_property_from_str("leaky", "downstream");
         let mp4mux = gst::ElementFactory::make("mp4mux")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create mp4mux".to_string()))?;
         mp4mux.set_property("streamable", &true);
         if mp4mux.find_property("fragment-duration").is_some() {
-            mp4mux.set_property("fragment-duration", &1000u32);
+            mp4mux.set_property("fragment-duration", &200u32);
         } else {
             log::debug!("🔧 mp4mux missing fragment-duration property; skipping override");
         }
