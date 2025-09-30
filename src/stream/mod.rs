@@ -145,7 +145,7 @@ pub async fn stream_mjpeg_handler(
 
 
     let mut receiver = state.streaming.mjpeg_tx.subscribe();
-    const MAX_FRAGMENT_BUNDLE: usize = 3;
+    const MAX_FRAGMENT_BUNDLE: usize = 10;
     const INIT_MAX_BUFFERED_FRAGMENTS: usize = 64;
     const INIT_WAIT_TIMEOUT: Duration = Duration::from_millis(1800);
     const INIT_RECV_TIMEOUT: Duration = Duration::from_millis(200);
@@ -288,7 +288,7 @@ pub async fn stream_mjpeg_handler(
                                 "📺 MP4 fragment dispatched to client, size: {} bytes",
                                 fragment.len()
                             );
-                            if tx.send_timeout(Ok(fragment), Duration::from_millis(200)).await.is_err() {
+                            if tx.send_timeout(Ok(fragment), Duration::from_millis(100)).await.is_err() {
                                 log::info!("📺 Client disconnected during streaming, sent {} fragments", delivered_fragments);
                                 return;
                             }
