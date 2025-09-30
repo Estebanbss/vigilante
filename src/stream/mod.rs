@@ -148,6 +148,7 @@ pub async fn stream_mjpeg_handler(
     };
 
     let mut receiver = state.streaming.mjpeg_tx.subscribe();
+    const MAX_FRAGMENT_BUNDLE: usize = 3;
     const INIT_MAX_BUFFERED_FRAGMENTS: usize = 64;
     const INIT_WAIT_TIMEOUT: Duration = Duration::from_millis(1800);
     const INIT_RECV_TIMEOUT: Duration = Duration::from_millis(200);
@@ -256,16 +257,46 @@ pub async fn stream_mjpeg_handler(
             log::debug!("📺 Waiting for next fragment from broadcast channel");
             match tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await {
                 Ok(recv_result) => match recv_result {
-                    Ok(bytes) => {
-                        log::debug!(
-                            "📺 MP4 fragment dispatched to client, size: {} bytes",
-                            bytes.len()
-                        );
-                        if tx.send_timeout(Ok(bytes), Duration::from_millis(500)).await.is_err() {
-                            log::info!("📺 Client disconnected during streaming, sent {} fragments", delivered_fragments);
-                            return;
+                    Ok(first_bytes) => {
+                        use tokio::sync::broadcast::error::TryRecvError;
+
+                        let mut bundle: Vec<bytes::Bytes> = vec![first_bytes];
+
+                        // Try to accumulate more fragments quickly
+                        for _ in 0..(MAX_FRAGMENT_BUNDLE - 1) {
+                            match receiver.try_recv() {
+                                Ok(next_bytes) => {
+                                    bundle.push(next_bytes);
+                                }
+                                Err(TryRecvError::Empty) => {
+                                    break;
+                                }
+                                Err(TryRecvError::Lagged(skipped)) => {
+                                    log::warn!(
+                                        "📺 Receiver lagged while accumulating bundle; skipped {} fragments",
+                                        skipped
+                                    );
+                                    break;
+                                }
+                                Err(TryRecvError::Closed) => {
+                                    log::info!("📺 Broadcast channel closed while accumulating bundle");
+                                    break;
+                                }
+                            }
                         }
-                        delivered_fragments = delivered_fragments.saturating_add(1);
+
+                        log::debug!("📺 Sending bundle of {} fragments to client", bundle.len());
+                        for fragment in bundle {
+                            log::debug!(
+                                "📺 MP4 fragment dispatched to client, size: {} bytes",
+                                fragment.len()
+                            );
+                            if tx.send_timeout(Ok(fragment), Duration::from_millis(200)).await.is_err() {
+                                log::info!("📺 Client disconnected during streaming, sent {} fragments", delivered_fragments);
+                                return;
+                            }
+                            delivered_fragments = delivered_fragments.saturating_add(1);
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         log::warn!(
