@@ -177,10 +177,9 @@ pub async fn stream_mjpeg_handler(
         if !init_detector.is_complete() {
             let deadline = TokioInstant::now() + INIT_WAIT_TIMEOUT;
             log::info!(
-                "📦 Waiting for MP4 init completion (ftyp: {}, moov: {}, moof: {}, buffered: {})",
+                "📦 Waiting for MP4 init completion (ftyp: {}, moov: {}, buffered: {})",
                 init_detector.has_ftyp(),
                 init_detector.has_moov(),
-                init_detector.has_moof(),
                 handshake_segments.len()
             );
 
@@ -220,10 +219,9 @@ pub async fn stream_mjpeg_handler(
                 );
             } else {
                 log::warn!(
-                    "📦 Proceeding without confirmed MP4 init (ftyp: {}, moov: {}, moof: {}, buffered: {})",
+                    "📦 Proceeding without confirmed MP4 init (ftyp: {}, moov: {}, buffered: {})",
                     init_detector.has_ftyp(),
                     init_detector.has_moov(),
-                    init_detector.has_moof(),
                     handshake_segments.len()
                 );
             }
@@ -379,6 +377,6 @@ impl Mp4InitDetector {
     }
 
     fn is_complete(&self) -> bool {
-        self.has_ftyp && self.has_moov && self.has_moof
+        self.has_ftyp && self.has_moov
     }
 }
