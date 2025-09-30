@@ -148,8 +148,6 @@ pub async fn stream_mjpeg_handler(
     };
 
     let mut receiver = state.streaming.mjpeg_tx.subscribe();
-    const WARMUP_FRAGMENT_COUNT: usize = 15;
-    const MAX_FRAGMENT_BUNDLE: usize = 8;
     const INIT_MAX_BUFFERED_FRAGMENTS: usize = 64;
     const INIT_WAIT_TIMEOUT: Duration = Duration::from_millis(1800);
     const INIT_RECV_TIMEOUT: Duration = Duration::from_millis(200);
@@ -170,7 +168,7 @@ pub async fn stream_mjpeg_handler(
                 "📺 Cached {} MP4 init fragments for new client (total {} bytes, complete: {})",
                 init_segments.len(),
                 total_bytes,
-                init_complete
+                init_detector.is_complete()
             );
             for segment in init_segments {
                 init_detector.ingest(segment.as_ref());
@@ -179,6 +177,8 @@ pub async fn stream_mjpeg_handler(
         } else {
             log::warn!("📺 Client connected before MP4 init fragments were available");
         }
+
+        log::info!("📦 Init detector status: ftyp={}, moov={}, moof={}, complete={}", init_detector.has_ftyp(), init_detector.has_moov(), init_detector.has_moof(), init_detector.is_complete());
 
         if !init_detector.is_complete() {
             let deadline = TokioInstant::now() + INIT_WAIT_TIMEOUT;
@@ -256,58 +256,16 @@ pub async fn stream_mjpeg_handler(
             log::debug!("📺 Waiting for next fragment from broadcast channel");
             match tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await {
                 Ok(recv_result) => match recv_result {
-                    Ok(first_bytes) => {
-                        use tokio::sync::broadcast::error::TryRecvError;
-
-                        let mut bundle: Vec<bytes::Bytes> = vec![first_bytes];
-
-                        if delivered_fragments >= WARMUP_FRAGMENT_COUNT {
-                            loop {
-                                match receiver.try_recv() {
-                                    Ok(next_bytes) => {
-                                        bundle.push(next_bytes);
-                                    }
-                                    Err(TryRecvError::Empty) => {
-                                        break;
-                                    }
-                                    Err(TryRecvError::Lagged(skipped)) => {
-                                        log::warn!(
-                                            "📺 Receiver lagged while draining backlog; skipped {} fragments",
-                                            skipped
-                                        );
-                                        continue;
-                                    }
-                                    Err(TryRecvError::Closed) => {
-                                        log::info!("📺 Broadcast channel closed while draining backlog");
-                                        break;
-                                    }
-                                }
-                            }
+                    Ok(bytes) => {
+                        log::debug!(
+                            "📺 MP4 fragment dispatched to client, size: {} bytes",
+                            bytes.len()
+                        );
+                        if tx.send_timeout(Ok(bytes), Duration::from_millis(500)).await.is_err() {
+                            log::info!("📺 Client disconnected during streaming, sent {} fragments", delivered_fragments);
+                            return;
                         }
-
-                        if bundle.len() > MAX_FRAGMENT_BUNDLE {
-                            let dropped = bundle.len() - MAX_FRAGMENT_BUNDLE;
-                            log::debug!(
-                                "📺 Dropping {} oldest fragments from bundle to reduce latency (keeping {})",
-                                dropped,
-                                MAX_FRAGMENT_BUNDLE
-                            );
-                        }
-
-                        let start_index = bundle.len().saturating_sub(MAX_FRAGMENT_BUNDLE);
-                        let bundle_to_send = &bundle[start_index..];
-                        log::info!("📺 Sending bundle of {} fragments to client", bundle_to_send.len());
-                        for fragment in bundle_to_send {
-                            log::debug!(
-                                "📺 MP4 fragment dispatched to client, size: {} bytes",
-                                fragment.len()
-                            );
-                            if tx.send_timeout(Ok(fragment.clone()), Duration::from_millis(100)).await.is_err() {
-                                log::info!("📺 Client disconnected during streaming, sent {} fragments", delivered_fragments);
-                                return;
-                            }
-                            delivered_fragments = delivered_fragments.saturating_add(1);
-                        }
+                        delivered_fragments = delivered_fragments.saturating_add(1);
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         log::warn!(
@@ -347,6 +305,7 @@ pub async fn stream_mjpeg_handler(
 struct Mp4InitDetector {
     has_ftyp: bool,
     has_moov: bool,
+    has_moof: bool,
     tail: Vec<u8>,
 }
 
@@ -362,6 +321,9 @@ impl Mp4InitDetector {
         if !self.has_moov {
             self.has_moov = data.windows(4).any(|w| w == b"moov");
         }
+        if !self.has_moof {
+            self.has_moof = data.windows(4).any(|w| w == b"moof");
+        }
 
         if !(self.has_ftyp && self.has_moov) && !self.tail.is_empty() {
             let mut combined = Vec::with_capacity(self.tail.len() + data.len());
@@ -372,6 +334,9 @@ impl Mp4InitDetector {
             }
             if !self.has_moov {
                 self.has_moov = combined.windows(4).any(|w| w == b"moov");
+            }
+            if !self.has_moof {
+                self.has_moof = combined.windows(4).any(|w| w == b"moof");
             }
         }
 
@@ -391,7 +356,11 @@ impl Mp4InitDetector {
         self.has_moov
     }
 
+    fn has_moof(&self) -> bool {
+        self.has_moof
+    }
+
     fn is_complete(&self) -> bool {
-        self.has_ftyp && self.has_moov
+        self.has_ftyp && self.has_moov && !self.has_moof
     }
 }
