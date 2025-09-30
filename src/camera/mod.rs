@@ -146,3 +146,67 @@ pub async fn start_camera_pipeline(
         }
     }
 }
+
+pub async fn restart_camera_pipeline(
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    log::info!("🔄 Reiniciando pipeline de cámara completamente...");
+
+    // Detener el pipeline actual si existe
+    {
+        let mut pipeline_running = state.gstreamer.pipeline_running.lock().unwrap();
+        if *pipeline_running {
+            log::info!("🔧 Deteniendo pipeline actual...");
+            *pipeline_running = false;
+        }
+    }
+
+    // Limpiar el pipeline anterior
+    {
+        let mut camera_pipeline_guard = state.camera_pipeline.lock().unwrap();
+        if let Some(ref pipeline_arc) = *camera_pipeline_guard {
+            // Intentar detener el pipeline de GStreamer
+            if let Some(ref gst_pipeline) = pipeline_arc.pipeline {
+                let _ = gst_pipeline.set_state(gst::State::Null);
+            }
+        }
+        *camera_pipeline_guard = None;
+    }
+
+    // Esperar un poco para que se liberen los recursos
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Crear motion detector
+    let motion_detector = Arc::new(MotionDetector::new(Arc::clone(&state)));
+
+    // Crear y configurar nuevo pipeline de cámara
+    let mut camera_pipeline_inner = CameraPipeline::new(Arc::clone(&state), Arc::clone(&motion_detector));
+
+    // Warm up the pipeline (crear elementos y enlazarlos)
+    match camera_pipeline_inner.warm_up().await {
+        Ok(_) => log::info!("🔧 Nuevo pipeline warmed up successfully"),
+        Err(e) => {
+            log::error!("❌ Failed to warm up new pipeline: {}", e);
+            return Err(Box::new(e));
+        }
+    }
+
+    // Envolver en Arc
+    let camera_pipeline = Arc::new(camera_pipeline_inner);
+    *state.camera_pipeline.lock().unwrap() = Some(Arc::clone(&camera_pipeline));
+
+    // Iniciar grabación (poner pipeline en estado PLAYING)
+    match camera_pipeline.start_recording().await {
+        Ok(_) => log::info!("🎬 Nuevo pipeline de grabación iniciado successfully"),
+        Err(e) => {
+            log::error!("❌ Failed to start new recording: {}", e);
+            return Err(e.into());
+        }
+    }
+
+    // Marcar como corriendo
+    *state.gstreamer.pipeline_running.lock().unwrap() = true;
+    log::info!("✅ Pipeline de cámara reiniciado completamente");
+
+    Ok(())
+}

@@ -23,6 +23,21 @@ impl StatusManager {
     pub async fn get_status(&self, state: &Arc<AppState>) -> SystemStatus {
         let mut status = SystemStatus::default();
         status.check(state).await;
+
+        // Intentar autoreparación automática si algún componente está fallando
+        let any_failing = !status.camera_works || !status.audio_works || !status.recordings_work;
+        if any_failing {
+            log::warn!("🔧 Detectados componentes fallando, iniciando autoreparación...");
+            let repaired = status.auto_repair(state).await;
+            if repaired {
+                log::info!("✅ Autoreparación completada, verificando status actualizado...");
+                // Verificar el status nuevamente después de la reparación
+                status.check(state).await;
+            } else {
+                log::error!("❌ Autoreparación fallida, status permanece degradado");
+            }
+        }
+
         status
     }
 }
