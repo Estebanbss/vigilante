@@ -167,8 +167,16 @@ impl CameraPipeline {
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create mp4mux".to_string()))?;
         mp4mux.set_property("streamable", &true);
-        mp4mux.set_property("fragment-duration", &1000u32);
-        mp4mux.set_property("reserved-moov-update", &true);
+        if mp4mux.find_property("fragment-duration").is_some() {
+            mp4mux.set_property("fragment-duration", &1000u32);
+        } else {
+            log::debug!("🔧 mp4mux missing fragment-duration property; skipping override");
+        }
+        if mp4mux.find_property("reserved-moov-update").is_some() {
+            mp4mux.set_property("reserved-moov-update", &true);
+        } else {
+            log::debug!("🔧 mp4mux missing reserved-moov-update property; skipping override");
+        }
         if log::log_enabled!(log::Level::Debug) {
             for pspec in mp4mux.list_properties() {
                 log::debug!(
