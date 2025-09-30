@@ -142,6 +142,8 @@ pub async fn stream_mjpeg_handler(
     };
 
     let mut receiver = state.streaming.mjpeg_tx.subscribe();
+    let mut delivered_fragments: usize = 0;
+    const WARMUP_FRAGMENT_COUNT: usize = 15;
     log::info!("📺 MP4 stream handler: subscribed to broadcast channel");
 
     let stream = async_stream::stream! {
@@ -169,25 +171,27 @@ pub async fn stream_mjpeg_handler(
                 Ok(mut bytes) => {
                     use tokio::sync::broadcast::error::TryRecvError;
 
-                    // Drain any backlog so we always send the fragment más reciente
-                    loop {
-                        match receiver.try_recv() {
-                            Ok(next_bytes) => {
-                                bytes = next_bytes;
-                            }
-                            Err(TryRecvError::Empty) => {
-                                break;
-                            }
-                            Err(TryRecvError::Lagged(skipped)) => {
-                                log::warn!(
-                                    "📺 Receiver lagged while draining backlog; skipped {} fragments",
-                                    skipped
-                                );
-                                continue;
-                            }
-                            Err(TryRecvError::Closed) => {
-                                log::info!("📺 Broadcast channel closed while draining backlog");
-                                return;
+                    if delivered_fragments >= WARMUP_FRAGMENT_COUNT {
+                        // Tras el warm-up, drenamos backlog para quedarnos con el fragmento más reciente.
+                        loop {
+                            match receiver.try_recv() {
+                                Ok(next_bytes) => {
+                                    bytes = next_bytes;
+                                }
+                                Err(TryRecvError::Empty) => {
+                                    break;
+                                }
+                                Err(TryRecvError::Lagged(skipped)) => {
+                                    log::warn!(
+                                        "📺 Receiver lagged while draining backlog; skipped {} fragments",
+                                        skipped
+                                    );
+                                    continue;
+                                }
+                                Err(TryRecvError::Closed) => {
+                                    log::info!("📺 Broadcast channel closed while draining backlog");
+                                    return;
+                                }
                             }
                         }
                     }
@@ -197,6 +201,7 @@ pub async fn stream_mjpeg_handler(
                         bytes.len()
                     );
                     yield Ok::<_, Infallible>(bytes);
+                    delivered_fragments = delivered_fragments.saturating_add(1);
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     log::warn!(
