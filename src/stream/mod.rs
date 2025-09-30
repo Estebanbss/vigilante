@@ -147,8 +147,8 @@ pub async fn stream_mjpeg_handler(
 
     let mut receiver = state.streaming.mjpeg_tx.subscribe();
     let mut delivered_fragments: usize = 0;
-    const WARMUP_FRAGMENT_COUNT: usize = 30;
-    const MAX_FRAGMENT_BUNDLE: usize = 1;
+    const WARMUP_FRAGMENT_COUNT: usize = 15;
+    const MAX_FRAGMENT_BUNDLE: usize = 8;
     const INIT_MAX_BUFFERED_FRAGMENTS: usize = 64;
     const INIT_WAIT_TIMEOUT: Duration = Duration::from_millis(1800);
     const INIT_RECV_TIMEOUT: Duration = Duration::from_millis(200);
@@ -238,6 +238,7 @@ pub async fn stream_mjpeg_handler(
             delivered_fragments = delivered_fragments.saturating_add(1);
         }
 
+        log::info!("📺 Starting continuous fragment streaming to client");
         loop {
             match receiver.recv().await {
                 Ok(first_bytes) => {
@@ -288,7 +289,7 @@ pub async fn stream_mjpeg_handler(
                         delivered_fragments = delivered_fragments.saturating_add(1);
                     }
 
-                    if delivered_fragments % 30 == 0 {
+                    if delivered_fragments % 100 == 0 {
                         log::info!("📺 Delivered {} fragments to client so far", delivered_fragments);
                     }
                 }
