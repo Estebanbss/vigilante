@@ -220,7 +220,9 @@ pub async fn stream_mjpeg_handler(
 
             if init_detector.is_complete() {
                 log::info!(
-                    "📦 MP4 init completed durante el warm-up del cliente (fragmentos almacenados: {})",
+                    "📦 MP4 init completed (ftyp: {}, moov: {}, buffered: {})",
+                    init_detector.has_ftyp(),
+                    init_detector.has_moov(),
                     handshake_segments.len()
                 );
             } else {
@@ -235,12 +237,15 @@ pub async fn stream_mjpeg_handler(
 
         if handshake_segments.is_empty() {
             log::warn!("📦 No MP4 fragments buffered for client handshake; playback may stall");
+        } else {
+            log::info!("📦 Sending {} handshake segments to client (total {} bytes)", handshake_segments.len(), handshake_segments.iter().map(|s| s.len()).sum::<usize>());
         }
 
         // Send handshake segments
-        for segment in handshake_segments {
-            if tx.send_timeout(Ok(segment), Duration::from_millis(100)).await.is_err() {
-                log::info!("📺 Client disconnected during handshake");
+        for (i, segment) in handshake_segments.iter().enumerate() {
+            log::debug!("📦 Sending handshake segment {} ({} bytes)", i + 1, segment.len());
+            if tx.send_timeout(Ok(segment.clone()), Duration::from_millis(100)).await.is_err() {
+                log::info!("📺 Client disconnected durante el handshake en el segmento {}", i + 1);
                 return;
             }
             delivered_fragments = delivered_fragments.saturating_add(1);
