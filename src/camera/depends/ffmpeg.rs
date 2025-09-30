@@ -425,7 +425,7 @@ impl CameraPipeline {
         let context_weak = Arc::downgrade(&self.context);
         let live_callbacks = gst_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
-                log::info!("📹 Live callback called");
+                log::debug!("📹 Live callback called");
                 let context = match context_weak.upgrade() {
                     Some(c) => c,
                     None => {
@@ -546,7 +546,7 @@ impl CameraPipeline {
                                 segments_guard.len()
                             );
                         } else if has_ftyp {
-                            log::info!(
+                            log::debug!(
                                 "📦 Fragmento ftyp cacheado ({} bytes)",
                                 slice.len()
                             );
@@ -554,7 +554,7 @@ impl CameraPipeline {
                     }
                 }
 
-                log::info!("📹 Live MP4 fragment received, size: {} bytes", data.len());
+                log::debug!("📹 Live MP4 fragment received, size: {} bytes", data.len());
 
                 match context.streaming.mjpeg_tx.send(data) {
                     Ok(_) => log::debug!("📹 Live frame sent to broadcast channel"),
