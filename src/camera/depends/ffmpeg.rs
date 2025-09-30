@@ -166,8 +166,8 @@ impl CameraPipeline {
         let queue_live = gst::ElementFactory::make("queue")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create queue_live".to_string()))?;
-    queue_live.set_property("max-size-time", 150_000_000i64);
-    queue_live.set_property("max-size-buffers", 3i32);
+    queue_live.set_property("max-size-time", 150_000_000u64);
+    queue_live.set_property("max-size-buffers", 3u32);
     queue_live.set_property_from_str("leaky", "downstream");
         let mp4mux = gst::ElementFactory::make("mp4mux")
             .build()
