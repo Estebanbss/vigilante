@@ -15,7 +15,7 @@ use axum::{
 };
 use std::convert::Infallible;
 use std::sync::Arc;
-use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use tokio::sync::broadcast;
 
 /// Manager principal para streaming.
 pub struct StreamManager {
@@ -141,7 +141,7 @@ pub async fn stream_mjpeg_handler(
         *complete_guard
     };
 
-    let mut broadcast_stream = BroadcastStream::new(state.streaming.mjpeg_tx.subscribe());
+    let mut receiver = state.streaming.mjpeg_tx.subscribe();
     log::info!("📺 MP4 stream handler: subscribed to broadcast channel");
 
     let stream = async_stream::stream! {
@@ -164,17 +164,49 @@ pub async fn stream_mjpeg_handler(
             log::warn!("📺 Client connected before MP4 init fragments were available");
         }
 
-        while let Some(result) = broadcast_stream.next().await {
-            match result {
-                Ok(bytes) => {
+        loop {
+            match receiver.recv().await {
+                Ok(mut bytes) => {
+                    use tokio::sync::broadcast::error::TryRecvError;
+
+                    // Drain any backlog so we always send the fragment más reciente
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(next_bytes) => {
+                                bytes = next_bytes;
+                            }
+                            Err(TryRecvError::Empty) => {
+                                break;
+                            }
+                            Err(TryRecvError::Lagged(skipped)) => {
+                                log::warn!(
+                                    "📺 Receiver lagged while draining backlog; skipped {} fragments",
+                                    skipped
+                                );
+                                continue;
+                            }
+                            Err(TryRecvError::Closed) => {
+                                log::info!("📺 Broadcast channel closed while draining backlog");
+                                return;
+                            }
+                        }
+                    }
+
                     log::debug!(
                         "📺 MP4 fragment received in stream handler, size: {} bytes",
                         bytes.len()
                     );
                     yield Ok::<_, Infallible>(bytes);
                 }
-                Err(e) => {
-                    log::warn!("📺 MP4 broadcast channel error: {:?}", e);
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    log::warn!(
+                        "📺 Receiver lagged behind broadcast channel; skipped {} fragments",
+                        skipped
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    log::info!("📺 Broadcast channel closed, ending stream");
+                    break;
                 }
             }
         }
