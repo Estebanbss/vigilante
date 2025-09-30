@@ -60,6 +60,14 @@ impl CameraPipeline {
                 .lock()
                 .unwrap();
             tail_guard.clear();
+
+            let mut warned_guard = self
+                .context
+                .streaming
+                .mp4_init_warned_before_moov
+                .lock()
+                .unwrap();
+            *warned_guard = false;
         }
 
         let source = gst::ElementFactory::make("rtspsrc")
@@ -159,6 +167,17 @@ impl CameraPipeline {
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create mp4mux".to_string()))?;
         mp4mux.set_property("streamable", &true);
+        mp4mux.set_property("fragment-duration", &1000u32);
+        mp4mux.set_property("reserved-moov-update", &true);
+        if log::log_enabled!(log::Level::Debug) {
+            for pspec in mp4mux.list_properties() {
+                log::debug!(
+                    "🔧 mp4mux property available: {} ({})",
+                    pspec.name(),
+                    pspec.value_type().name()
+                );
+            }
+        }
         let appsink_live = gst_app::AppSink::builder().build();
         appsink_live.set_property("emit-signals", &true);
         appsink_live.set_property("sync", &false);
@@ -437,6 +456,7 @@ impl CameraPipeline {
                     let slice = data.as_ref();
                     let mut has_ftyp = slice.windows(4).any(|w| w == b"ftyp");
                     let mut has_moov = slice.windows(4).any(|w| w == b"moov");
+                    let mut has_moof = slice.windows(4).any(|w| w == b"moof");
 
                     {
                         let mut tail_guard = context
@@ -445,7 +465,7 @@ impl CameraPipeline {
                             .lock()
                             .unwrap();
 
-                        if !has_moov || !has_ftyp {
+                        if !has_moov || !has_ftyp || !has_moof {
                             let mut combined = Vec::with_capacity(tail_guard.len() + slice.len());
                             combined.extend_from_slice(&tail_guard);
                             combined.extend_from_slice(slice);
@@ -454,6 +474,9 @@ impl CameraPipeline {
                             }
                             if !has_ftyp {
                                 has_ftyp = combined.windows(4).any(|w| w == b"ftyp");
+                            }
+                            if !has_moof {
+                                has_moof = combined.windows(4).any(|w| w == b"moof");
                             }
                         }
 
@@ -476,9 +499,29 @@ impl CameraPipeline {
                         .mp4_init_complete
                         .lock()
                         .unwrap();
+                    let mut warned_guard = context
+                        .streaming
+                        .mp4_init_warned_before_moov
+                        .lock()
+                        .unwrap();
 
                     if !*complete_guard {
                         segments_guard.push(data.clone());
+
+                        if segments_guard.len() <= 6 {
+                            let preview_len = slice.len().min(48);
+                            let mut hex_preview = String::new();
+                            for byte in &slice[..preview_len] {
+                                use std::fmt::Write;
+                                let _ = write!(&mut hex_preview, "{:02X} ", byte);
+                            }
+                            log::debug!(
+                                "📦 Init fragment {} preview ({} bytes): {}",
+                                segments_guard.len(),
+                                slice.len(),
+                                hex_preview.trim_end()
+                            );
+                        }
 
                         if has_moov {
                             *complete_guard = true;
@@ -487,6 +530,12 @@ impl CameraPipeline {
                                 "📦 Segmentos MP4 iniciales cacheados ({} fragmentos, {} bytes)",
                                 segments_guard.len(),
                                 total_size
+                            );
+                        } else if has_moof && !*warned_guard {
+                            *warned_guard = true;
+                            log::warn!(
+                                "📦 Fragmento moof detectado antes de moov ({} fragmentos acumulados)",
+                                segments_guard.len()
                             );
                         } else if has_ftyp {
                             log::info!(

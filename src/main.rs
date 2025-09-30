@@ -399,6 +399,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mp4_init_segments: Arc::new(StdMutex::new(Vec::new())),
         mp4_init_complete: Arc::new(StdMutex::new(false)),
     mp4_init_scan_tail: Arc::new(StdMutex::new(Vec::new())),
+    mp4_init_warned_before_moov: Arc::new(StdMutex::new(false)),
     });
 
     let logging_state = Arc::new(state::LoggingState {

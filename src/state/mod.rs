@@ -36,6 +36,7 @@ pub struct StreamingState {
     pub mp4_init_segments: Arc<StdMutex<Vec<Bytes>>>,
     pub mp4_init_complete: Arc<StdMutex<bool>>,
     pub mp4_init_scan_tail: Arc<StdMutex<Vec<u8>>>,
+    pub mp4_init_warned_before_moov: Arc<StdMutex<bool>>,
 }
 
 /// Estado de logging
