@@ -97,9 +97,9 @@ impl WebRTCManager {
             Box::pin(async {})
         }));
 
-        // Esperar hasta 5 segundos para que se complete la recolección
-        tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await
-            .map_err(|_| VigilanteError::WebRTC("ICE gathering timeout".to_string()))?;
+        // Esperar hasta 10 segundos para que se complete la recolección
+        tokio::time::timeout(tokio::time::Duration::from_secs(10), rx.recv()).await
+            .map_err(|_| VigilanteError::WebRTC("ICE gathering timeout after 10 seconds".to_string()))?;
 
         // Guardar la conexión
         {
