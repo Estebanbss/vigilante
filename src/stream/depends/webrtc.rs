@@ -57,7 +57,7 @@ impl WebRTCManager {
     pub async fn process_offer(&self, client_id: &str, offer: RTCSessionDescription) -> Result<RTCSessionDescription, VigilanteError> {
         log::info!("📡 Procesando offer WebRTC del cliente: {}", client_id);
 
-        // Crear configuración con TURN servers de Metered
+        // Crear configuración con TURN servers de Metered (solo TCP para evitar bloqueo UDP de Cloudflare)
         let mut config = RTCConfiguration::default();
         config.ice_servers = vec![
             webrtc::ice_transport::ice_server::RTCIceServer {
@@ -67,27 +67,15 @@ impl WebRTCManager {
                 ..Default::default()
             },
             webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec!["turn:standard.relay.metered.ca:80".to_string()],
-                username: "574f9c4d65b7f555ba53016bfd08ad26033e".to_string(),
-                credential: "574f9c4d65b7f555ba53016bfd08ad26033e".to_string(),
-                ..Default::default()
-            },
-            webrtc::ice_transport::ice_server::RTCIceServer {
                 urls: vec!["turn:standard.relay.metered.ca:80?transport=tcp".to_string()],
                 username: "574f9c4d65b7f555ba53016bfd08ad26033e".to_string(),
-                credential: "574f9c4d65b7f555ba53016bfd08ad26033e".to_string(),
-                ..Default::default()
-            },
-            webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec!["turn:standard.relay.metered.ca:443".to_string()],
-                username: "574f9c4d65b7f555ba53016bfd08ad26033e".to_string(),
-                credential: "574f9c4d65b7f555ba53016bfd08ad26033e".to_string(),
+                credential: "oLP2mV6OWqCnf0Zk".to_string(),
                 ..Default::default()
             },
             webrtc::ice_transport::ice_server::RTCIceServer {
                 urls: vec!["turns:standard.relay.metered.ca:443?transport=tcp".to_string()],
                 username: "574f9c4d65b7f555ba53016bfd08ad26033e".to_string(),
-                credential: "574f9c4d65b7f555ba53016bfd08ad26033e".to_string(),
+                credential: "oLP2mV6OWqCnf0Zk".to_string(),
                 ..Default::default()
             },
         ];
