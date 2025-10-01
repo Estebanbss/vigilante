@@ -57,8 +57,16 @@ impl WebRTCManager {
     pub async fn process_offer(&self, client_id: &str, offer: RTCSessionDescription) -> Result<RTCSessionDescription, VigilanteError> {
         log::info!("📡 Procesando offer WebRTC del cliente: {}", client_id);
 
+        // Crear configuración con STUN servers
+        let mut config = RTCConfiguration::default();
+        config.ice_servers = vec![
+            webrtc::ice_transport::ice_server::RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_string()],
+                ..Default::default()
+            },
+        ];
+
         // Crear peer connection
-        let config = RTCConfiguration::default();
         let peer_connection = Arc::new(self.api.new_peer_connection(config).await?);
 
         // Establecer la offer del cliente como descripción remota
