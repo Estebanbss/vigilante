@@ -81,10 +81,16 @@ impl WebRTCManager {
         ];
 
         // Crear peer connection
-        let peer_connection = Arc::new(self.api.new_peer_connection(config).await?);
+        let peer_connection = self.api.new_peer_connection(config).await.map_err(|e| {
+            log::error!("❌ Error creando peer connection: {:?}", e);
+            VigilanteError::WebRTC(format!("Failed to create peer connection: {:?}", e))
+        })?;
 
         // Establecer la offer del cliente como descripción remota
-        peer_connection.set_remote_description(offer).await?;
+        peer_connection.set_remote_description(offer).await.map_err(|e| {
+            log::error!("❌ Error estableciendo descripción remota: {:?}", e);
+            VigilanteError::WebRTC(format!("Failed to set remote description: {:?}", e))
+        })?;
 
         // Crear tracks de video y audio para esta conexión
         let video_track = self.create_video_track().await?;
@@ -95,8 +101,14 @@ impl WebRTCManager {
         peer_connection.add_track(Arc::new(audio_track)).await?;
 
         // Crear answer
-        let answer = peer_connection.create_answer(None).await?;
-        peer_connection.set_local_description(answer.clone()).await?;
+        let answer = peer_connection.create_answer(None).await.map_err(|e| {
+            log::error!("❌ Error creando answer: {:?}", e);
+            VigilanteError::WebRTC(format!("Failed to create answer: {:?}", e))
+        })?;
+        peer_connection.set_local_description(answer.clone()).await.map_err(|e| {
+            log::error!("❌ Error estableciendo descripción local: {:?}", e);
+            VigilanteError::WebRTC(format!("Failed to set local description: {:?}", e))
+        })?;
 
         // Esperar a que se complete la recolección de candidatos ICE
         use webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState;
