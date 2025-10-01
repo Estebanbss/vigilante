@@ -53,13 +53,16 @@ impl WebRTCManager {
         })
     }
 
-    /// Crear una nueva conexión WebRTC y retornar la offer
-    pub async fn create_offer(&self, client_id: &str) -> Result<RTCSessionDescription, VigilanteError> {
-        log::info!("🎥 Creando nueva conexión WebRTC para cliente: {}", client_id);
+    /// Procesar offer del cliente y retornar answer
+    pub async fn process_offer(&self, client_id: &str, offer: RTCSessionDescription) -> Result<RTCSessionDescription, VigilanteError> {
+        log::info!("📡 Procesando offer WebRTC del cliente: {}", client_id);
 
         // Crear peer connection
         let config = RTCConfiguration::default();
         let peer_connection = Arc::new(self.api.new_peer_connection(config).await?);
+
+        // Establecer la offer del cliente como descripción remota
+        peer_connection.set_remote_description(offer).await?;
 
         // Crear tracks de video y audio para esta conexión
         let video_track = self.create_video_track().await?;
@@ -69,9 +72,9 @@ impl WebRTCManager {
         peer_connection.add_track(Arc::new(video_track)).await?;
         peer_connection.add_track(Arc::new(audio_track)).await?;
 
-        // Crear offer
-        let offer = peer_connection.create_offer(None).await?;
-        peer_connection.set_local_description(offer.clone()).await?;
+        // Crear answer
+        let answer = peer_connection.create_answer(None).await?;
+        peer_connection.set_local_description(answer.clone()).await?;
 
         // Guardar la conexión
         {
@@ -79,8 +82,8 @@ impl WebRTCManager {
             connections.insert(client_id.to_string(), peer_connection.clone());
         }
 
-        log::info!("✅ Offer WebRTC creada para cliente: {}", client_id);
-        Ok(offer)
+        log::info!("✅ Answer WebRTC creada para cliente: {}", client_id);
+        Ok(answer)
     }
 
     /// Procesar answer del cliente y completar la conexión

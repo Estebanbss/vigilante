@@ -203,14 +203,14 @@ fn audio_to_mpeg_ts(audio_data: &[u8]) -> Vec<bytes::Bytes> {
 /// Endpoint para iniciar conexión WebRTC - recibe offer del cliente
 pub async fn webrtc_offer(
     State(state): State<Arc<AppState>>,
-    Json(_offer): Json<RTCSessionDescription>,
+    Json(offer): Json<RTCSessionDescription>,
 ) -> impl IntoResponse {
     log::info!("📡 Recibida offer WebRTC del cliente");
 
     // Generar ID único para el cliente
     let client_id = uuid::Uuid::new_v4().to_string();
 
-    match state.stream.get_webrtc_manager().create_offer(&client_id).await {
+    match state.stream.get_webrtc_manager().process_offer(&client_id, offer).await {
         Ok(answer) => {
             log::info!("✅ Answer WebRTC creada para cliente: {}", client_id);
             Json(serde_json::json!({
