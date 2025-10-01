@@ -100,6 +100,12 @@ impl From<gstreamer::StateChangeError> for VigilanteError {
     }
 }
 
+impl From<reqwest::Error> for VigilanteError {
+    fn from(err: reqwest::Error) -> Self {
+        VigilanteError::Http(format!("HTTP error: {}", err))
+    }
+}
+
 impl axum::response::IntoResponse for VigilanteError {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match &self {
