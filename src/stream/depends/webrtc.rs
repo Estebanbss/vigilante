@@ -81,10 +81,10 @@ impl WebRTCManager {
         ];
 
         // Crear peer connection
-        let peer_connection = self.api.new_peer_connection(config).await.map_err(|e| {
+        let peer_connection = Arc::new(self.api.new_peer_connection(config).await.map_err(|e| {
             log::error!("❌ Error creando peer connection: {:?}", e);
             VigilanteError::WebRTC(format!("Failed to create peer connection: {:?}", e))
-        })?;
+        })?);
 
         // Establecer la offer del cliente como descripción remota
         peer_connection.set_remote_description(offer).await.map_err(|e| {
