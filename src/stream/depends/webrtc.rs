@@ -57,11 +57,19 @@ impl WebRTCManager {
     pub async fn process_offer(&self, client_id: &str, offer: RTCSessionDescription) -> Result<RTCSessionDescription, VigilanteError> {
         log::info!("📡 Procesando offer WebRTC del cliente: {}", client_id);
 
-        // Crear configuración con STUN servers
+        // Crear configuración con TURN servers
         let mut config = RTCConfiguration::default();
         config.ice_servers = vec![
             webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_string()],
+                urls: vec!["turn:openrelay.metered.ca:80".to_string()],
+                username: "openrelayproject".to_string(),
+                credential: "openrelayproject".to_string(),
+                ..Default::default()
+            },
+            webrtc::ice_transport::ice_server::RTCIceServer {
+                urls: vec!["turn:openrelay.metered.ca:443".to_string()],
+                username: "openrelayproject".to_string(),
+                credential: "openrelayproject".to_string(),
                 ..Default::default()
             },
         ];
