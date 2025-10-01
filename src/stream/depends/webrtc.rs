@@ -66,7 +66,7 @@ impl WebRTCManager {
             },
             webrtc::ice_transport::ice_server::RTCIceServer {
                 urls: vec!["turn:standard.relay.metered.ca:80".to_string()],
-                username: "574f9c4d65b7f555ba53016bfd08ad26033e".to_string(),
+                username: "b83d9c3723596859deb1d16c".to_string(),
                 credential: "oLP2mV6OWqCnf0Zk".to_string(),
                 ..Default::default()
             },
