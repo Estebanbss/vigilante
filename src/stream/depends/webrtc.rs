@@ -8,6 +8,7 @@ use crate::state::StreamingState;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
+use serde_json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -57,22 +58,28 @@ impl WebRTCManager {
     pub async fn process_offer(&self, client_id: &str, offer: RTCSessionDescription) -> Result<RTCSessionDescription, VigilanteError> {
         log::info!("📡 Procesando offer WebRTC del cliente: {}", client_id);
 
-        // Crear configuración con TURN servers públicos (ya que Metered no funciona para server-side)
+        // Fetch TURN credentials from Metered API
+        let client = reqwest::Client::new();
+        let response = client
+            .get("https://vigilante_stream.metered.live/api/v1/turn/credentials?apiKey=574f9c4d65b7f555ba53016bfd08ad26033e")
+            .send()
+            .await
+            .map_err(|e| {
+                log::error!("❌ Error fetching TURN credentials: {:?}", e);
+                VigilanteError::WebRTC(format!("Failed to fetch TURN credentials: {:?}", e))
+            })?;
+        let ice_servers: Vec<serde_json::Value> = response.json().await.map_err(|e| {
+            log::error!("❌ Error parsing TURN credentials: {:?}", e);
+            VigilanteError::WebRTC(format!("Failed to parse TURN credentials: {:?}", e))
+        })?;
+        log::info!("📡 Fetched {} ICE servers from Metered", ice_servers.len());
+
+        // Crear configuración con los ICE servers fetched
         let mut config = RTCConfiguration::default();
-        config.ice_servers = vec![
-            webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_string()],
-                username: "".to_string(),
-                credential: "".to_string(),
-                ..Default::default()
-            },
-            webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec!["turn:turn.anyfirewall.com:443?transport=tcp".to_string()],
-                username: "webrtc".to_string(),
-                credential: "webrtc".to_string(),
-                ..Default::default()
-            },
-        ];
+        config.ice_servers = ice_servers
+            .into_iter()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect();
 
         // Crear peer connection
         let peer_connection = Arc::new(self.api.new_peer_connection(config).await.map_err(|e| {
