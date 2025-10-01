@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use webrtc::api::APIBuilder;
-use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -79,30 +78,18 @@ impl WebRTCManager {
 
         // Crear configuración con los ICE servers fetched
         let mut config = RTCConfiguration::default();
-        for ice_server_value in ice_servers {
-            if let Some(urls) = ice_server_value.get("urls") {
-                // Handle object format: {"urls": "...", "username": "...", "credential": "..."}
-                if let Some(urls_str) = urls.as_str() {
-                    let username = ice_server_value.get("username").and_then(|u| u.as_str());
-                    let credential = ice_server_value.get("credential").and_then(|c| c.as_str());
-
-                    let ice_server = RTCIceServer {
-                        urls: vec![urls_str.to_string()],
-                        username: username.unwrap_or_default().to_string(),
-                        credential: credential.unwrap_or_default().to_string(),
-                        ..Default::default()
-                    };
-                    config.ice_servers.push(ice_server);
+        config.ice_servers = ice_servers
+            .into_iter()
+            .filter_map(|v| {
+                match serde_json::from_value(v) {
+                    Ok(ice_server) => Some(ice_server),
+                    Err(e) => {
+                        log::warn!("Failed to parse ICE server: {:?}, skipping", e);
+                        None
+                    }
                 }
-            } else if let Some(url_str) = ice_server_value.as_str() {
-                // Handle string format: "stun:server:port" or "turn:server:port"
-                let ice_server = RTCIceServer {
-                    urls: vec![url_str.to_string()],
-                    ..Default::default()
-                };
-                config.ice_servers.push(ice_server);
-            }
-        }
+            })
+            .collect();
 
         // Crear peer connection
         let peer_connection = Arc::new(self.api.new_peer_connection(config).await.map_err(|e| {
