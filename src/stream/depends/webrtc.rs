@@ -81,12 +81,39 @@ impl WebRTCManager {
         config.ice_servers = ice_servers
             .into_iter()
             .filter_map(|v| {
-                // First try to deserialize as RTCIceServer (object format)
+                // Try to deserialize as RTCIceServer (object format)
                 match serde_json::from_value::<webrtc::ice_transport::ice_server::RTCIceServer>(v.clone()) {
                     Ok(ice_server) => Some(ice_server),
                     Err(_) => {
-                        // If that fails, check if it's a string (URL format)
-                        if let Some(url_str) = v.as_str() {
+                        // If that fails, try to parse as JSON object manually
+                        if let Some(obj) = v.as_object() {
+                            if let Some(urls) = obj.get("urls") {
+                                if let Some(url_str) = urls.as_str() {
+                                    let username = obj.get("username")
+                                        .and_then(|u| u.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let credential = obj.get("credential")
+                                        .and_then(|c| c.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+
+                                    Some(webrtc::ice_transport::ice_server::RTCIceServer {
+                                        urls: vec![url_str.to_string()],
+                                        username,
+                                        credential,
+                                        ..Default::default()
+                                    })
+                                } else {
+                                    log::warn!("Failed to parse ICE server: urls is not a string in {:?}", obj);
+                                    None
+                                }
+                            } else {
+                                log::warn!("Failed to parse ICE server: missing urls field in {:?}", obj);
+                                None
+                            }
+                        } else if let Some(url_str) = v.as_str() {
+                            // Handle string format
                             Some(webrtc::ice_transport::ice_server::RTCIceServer {
                                 urls: vec![url_str.to_string()],
                                 username: String::new(),
