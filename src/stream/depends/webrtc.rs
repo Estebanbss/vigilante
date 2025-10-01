@@ -81,23 +81,40 @@ impl WebRTCManager {
         config.ice_servers = ice_servers
             .into_iter()
             .filter_map(|v| {
-                // First try to deserialize as RTCIceServer (object format)
-                match serde_json::from_value::<webrtc::ice_transport::ice_server::RTCIceServer>(v.clone()) {
-                    Ok(ice_server) => Some(ice_server),
-                    Err(_) => {
-                        // If that fails, check if it's a string (URL format)
-                        if let Some(url_str) = v.as_str() {
-                            Some(webrtc::ice_transport::ice_server::RTCIceServer {
-                                urls: vec![url_str.to_string()],
-                                username: String::new(),
-                                credential: String::new(),
-                                ..Default::default()
-                            })
+                // Try to parse as object with urls, username, credential
+                if let Some(obj) = v.as_object() {
+                    let urls = if let Some(urls_val) = obj.get("urls") {
+                        if let Some(url_str) = urls_val.as_str() {
+                            vec![url_str.to_string()]
+                        } else if let Some(url_array) = urls_val.as_array() {
+                            url_array.iter().filter_map(|u| u.as_str().map(|s| s.to_string())).collect()
                         } else {
-                            log::warn!("Failed to parse ICE server: unsupported format {:?}", v);
-                            None
+                            return None;
                         }
-                    }
+                    } else {
+                        return None;
+                    };
+                    
+                    let username = obj.get("username").and_then(|u| u.as_str()).unwrap_or("").to_string();
+                    let credential = obj.get("credential").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                    
+                    Some(webrtc::ice_transport::ice_server::RTCIceServer {
+                        urls,
+                        username,
+                        credential,
+                        ..Default::default()
+                    })
+                } else if let Some(url_str) = v.as_str() {
+                    // Fallback for simple string format
+                    Some(webrtc::ice_transport::ice_server::RTCIceServer {
+                        urls: vec![url_str.to_string()],
+                        username: String::new(),
+                        credential: String::new(),
+                        ..Default::default()
+                    })
+                } else {
+                    log::warn!("Failed to parse ICE server: unsupported format {:?}", v);
+                    None
                 }
             })
             .collect();
