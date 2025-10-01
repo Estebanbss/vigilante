@@ -81,40 +81,64 @@ impl WebRTCManager {
         config.ice_servers = ice_servers
             .into_iter()
             .filter_map(|v| {
-                // Try to parse as object with urls, username, credential
-                if let Some(obj) = v.as_object() {
-                    let urls = if let Some(urls_val) = obj.get("urls") {
-                        if let Some(url_str) = urls_val.as_str() {
-                            vec![url_str.to_string()]
-                        } else if let Some(url_array) = urls_val.as_array() {
-                            url_array.iter().filter_map(|u| u.as_str().map(|s| s.to_string())).collect()
+                // Try to deserialize as RTCIceServer (object format)
+                match serde_json::from_value::<webrtc::ice_transport::ice_server::RTCIceServer>(v.clone()) {
+                    Ok(ice_server) => Some(ice_server),
+                    Err(_) => {
+                        // If that fails, try to parse as JSON object manually
+                        if let Some(obj) = v.as_object() {
+                            if let Some(urls) = obj.get("urls") {
+                                if let Some(url_str) = urls.as_str() {
+                                    let username = obj.get("username")
+                                        .and_then(|u| u.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let credential = obj.get("credential")
+                                        .and_then(|c| c.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+
+                                    // Only include servers with credentials (TURN servers)
+                                    if !username.is_empty() && !credential.is_empty() {
+                                        Some(webrtc::ice_transport::ice_server::RTCIceServer {
+                                            urls: vec![url_str.to_string()],
+                                            username,
+                                            credential,
+                                            ..Default::default()
+                                        })
+                                    } else if url_str.starts_with("stun:") {
+                                        // Include STUN servers (no credentials needed)
+                                        Some(webrtc::ice_transport::ice_server::RTCIceServer {
+                                            urls: vec![url_str.to_string()],
+                                            username: String::new(),
+                                            credential: String::new(),
+                                            ..Default::default()
+                                        })
+                                    } else {
+                                        log::warn!("Skipping ICE server without credentials: {}", url_str);
+                                        None
+                                    }
+                                } else {
+                                    log::warn!("Failed to parse ICE server: urls is not a string in {:?}", obj);
+                                    None
+                                }
+                            } else {
+                                log::warn!("Failed to parse ICE server: missing urls field in {:?}", obj);
+                                None
+                            }
+                        } else if let Some(url_str) = v.as_str() {
+                            // Handle string format
+                            Some(webrtc::ice_transport::ice_server::RTCIceServer {
+                                urls: vec![url_str.to_string()],
+                                username: String::new(),
+                                credential: String::new(),
+                                ..Default::default()
+                            })
                         } else {
-                            return None;
+                            log::warn!("Failed to parse ICE server: unsupported format {:?}", v);
+                            None
                         }
-                    } else {
-                        return None;
-                    };
-                    
-                    let username = obj.get("username").and_then(|u| u.as_str()).unwrap_or("").to_string();
-                    let credential = obj.get("credential").and_then(|c| c.as_str()).unwrap_or("").to_string();
-                    
-                    Some(webrtc::ice_transport::ice_server::RTCIceServer {
-                        urls,
-                        username,
-                        credential,
-                        ..Default::default()
-                    })
-                } else if let Some(url_str) = v.as_str() {
-                    // Fallback for simple string format
-                    Some(webrtc::ice_transport::ice_server::RTCIceServer {
-                        urls: vec![url_str.to_string()],
-                        username: String::new(),
-                        credential: String::new(),
-                        ..Default::default()
-                    })
-                } else {
-                    log::warn!("Failed to parse ICE server: unsupported format {:?}", v);
-                    None
+                    }
                 }
             })
             .collect();
