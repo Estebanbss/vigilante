@@ -215,7 +215,7 @@ pub async fn webrtc_offer(
             log::info!("✅ Answer WebRTC creada para cliente: {}", client_id);
             Json(serde_json::json!({
                 "client_id": client_id,
-                "answer": answer
+                "sdp": answer.sdp
             }))
         }
         Err(e) => {

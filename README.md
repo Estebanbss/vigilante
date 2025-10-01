@@ -5,7 +5,7 @@ Un sistema de vigilancia completo en Rust que proporciona grabación continua, s
 ## Características
 
 - **Grabación Continua**: Captura video desde streams RTSP usando GStreamer con segmentación automática
-- **Streaming en Vivo**: MJPEG para visualización en tiempo real
+- **Streaming en Vivo**: WebRTC (ultra baja latencia) y MJPEG para visualización en tiempo real
 - **Control PTZ**: Integración completa con cámaras ONVIF para movimiento remoto
 - **API REST**: Endpoints completos para gestión de grabaciones y control del sistema
 - **Almacenamiento Organizado**: Estructura de archivos por fecha con metadatos
@@ -102,6 +102,10 @@ Todos los endpoints requieren autenticación mediante el header `Authorization: 
 #### Cámara y Streaming
 - `GET /stream/mjpeg` - Stream MJPEG en vivo
 - `GET /stream/audio` - Stream de audio MP3
+- `GET /stream/av` - Stream combinado audio+video (MPEG-TS)
+- `POST /api/webrtc/offer` - Iniciar conexión WebRTC (SDP offer)
+- `POST /api/webrtc/answer/{client_id}` - Responder a conexión WebRTC (SDP answer)
+- `POST /api/webrtc/close/{client_id}` - Cerrar conexión WebRTC
 
 #### Control PTZ
 - `POST /api/ptz/pan_left` - Mover cámara a la izquierda
@@ -128,6 +132,7 @@ Todos los endpoints requieren autenticación mediante el header `Authorization: 
 
 ### Tecnologías Utilizadas
 - **HTTP REST API**: Endpoints GET/POST/DELETE para gestión del sistema
+- **WebRTC**: Streaming peer-to-peer de ultra baja latencia (< 500ms)
 - **WebSocket (WS)**: Conexión en tiempo real para frames MJPEG y comandos
 - **Server-Sent Events (SSE)**: Streaming de eventos de grabaciones y logs
 - **MJPEG Streaming**: Video en vivo comprimido
@@ -137,8 +142,12 @@ Todos los endpoints requieren autenticación mediante el header `Authorization: 
 
 #### Ver stream en vivo
 ```bash
+# MJPEG (compatible con navegadores)
 curl -H "Authorization: Bearer mi_token_seguro" \
      http://localhost:8080/stream/mjpeg
+
+# WebRTC (ultra baja latencia) - Abrir test_webrtc_av.html en navegador
+# El token se carga automáticamente desde el archivo .env
 ```
 
 #### Streaming con token en query
@@ -148,6 +157,10 @@ curl "http://localhost:8080/stream/mjpeg?token=mi_token_seguro"
 
 # Audio
 curl "http://localhost:8080/stream/audio?token=mi_token_seguro"
+
+# Audio + Video combinado
+curl "http://localhost:8080/stream/av?token=mi_token_seguro"
+```
 ```
 
 #### Mover cámara
@@ -316,6 +329,30 @@ El proyecto incluye configuración de GitHub Actions para:
 - Ejecución de tests
 - Verificación de formato y linting
 - Build de release
+
+## Pruebas WebRTC
+
+Para probar la funcionalidad de streaming WebRTC con ultra baja latencia:
+
+1. **Ejecuta el servidor:**
+   ```bash
+   cargo run --release
+   ```
+
+2. **Abre el cliente de prueba:**
+   - Abre `test_webrtc_av.html` en tu navegador
+   - El token se carga automáticamente desde `.env`
+   - Haz click en "Connect WebRTC"
+   - El video debería aparecer con latencia < 500ms
+
+3. **Verifica la conexión:**
+   - Estado de conexión en tiempo real
+   - Medición de latencia automática
+   - Audio y video sincronizados
+
+### Archivo de Prueba
+- `test_webrtc_av.html` - Cliente WebRTC completo con medición de latencia
+- `README_WebRTC.md` - Documentación detallada del sistema WebRTC
 
 ## Contribución
 
