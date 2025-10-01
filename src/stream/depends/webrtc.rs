@@ -57,30 +57,40 @@ impl WebRTCManager {
     pub async fn process_offer(&self, client_id: &str, offer: RTCSessionDescription) -> Result<RTCSessionDescription, VigilanteError> {
         log::info!("📡 Procesando offer WebRTC del cliente: {}", client_id);
 
-        // Fetch TURN credentials
-        let client = reqwest::Client::new();
-        let response = client
-            .get("https://vigilante_stream.metered.live/api/v1/turn/credentials?apiKey=574f9c4d65b7f555ba53016bfd08ad26033e")
-            .send()
-            .await?;
-        let ice_servers_data: Vec<serde_json::Value> = response.json().await?;
-
-        let mut ice_servers = vec![];
-        for server in ice_servers_data {
-            let urls = server["urls"].as_str().unwrap_or("").to_string();
-            let username = server["username"].as_str().map(|s| s.to_string());
-            let credential = server["credential"].as_str().map(|s| s.to_string());
-            ice_servers.push(webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec![urls],
-                username: username.unwrap_or_else(|| "".to_string()),
-                credential: credential.unwrap_or_else(|| "".to_string()),
-                ..Default::default()
-            });
-        }
-
-        // Crear configuración con TURN servers
+        // Crear configuración con TURN servers de Metered
         let mut config = RTCConfiguration::default();
-        config.ice_servers = ice_servers;
+        config.ice_servers = vec![
+            webrtc::ice_transport::ice_server::RTCIceServer {
+                urls: vec!["stun:stun.relay.metered.ca:80".to_string()],
+                username: "".to_string(),
+                credential: "".to_string(),
+                ..Default::default()
+            },
+            webrtc::ice_transport::ice_server::RTCIceServer {
+                urls: vec!["turn:standard.relay.metered.ca:80".to_string()],
+                username: "b83d9c3723596859deb1d16c".to_string(),
+                credential: "oLP2mV6OWqCnf0Zk".to_string(),
+                ..Default::default()
+            },
+            webrtc::ice_transport::ice_server::RTCIceServer {
+                urls: vec!["turn:standard.relay.metered.ca:80?transport=tcp".to_string()],
+                username: "b83d9c3723596859deb1d16c".to_string(),
+                credential: "oLP2mV6OWqCnf0Zk".to_string(),
+                ..Default::default()
+            },
+            webrtc::ice_transport::ice_server::RTCIceServer {
+                urls: vec!["turn:standard.relay.metered.ca:443".to_string()],
+                username: "b83d9c3723596859deb1d16c".to_string(),
+                credential: "oLP2mV6OWqCnf0Zk".to_string(),
+                ..Default::default()
+            },
+            webrtc::ice_transport::ice_server::RTCIceServer {
+                urls: vec!["turns:standard.relay.metered.ca:443?transport=tcp".to_string()],
+                username: "b83d9c3723596859deb1d16c".to_string(),
+                credential: "oLP2mV6OWqCnf0Zk".to_string(),
+                ..Default::default()
+            },
+        ];
 
         // Crear peer connection
         let peer_connection = Arc::new(self.api.new_peer_connection(config).await?);
