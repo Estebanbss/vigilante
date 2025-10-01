@@ -61,9 +61,9 @@ impl WebRTCManager {
         let mut config = RTCConfiguration::default();
         config.ice_servers = vec![
             webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec!["turn:turn.metered.ca:80".to_string()],
-                username: "openrelayproject".to_string(),
-                credential: "openrelayproject".to_string(),
+                urls: vec!["turn:turn.anyfirewall.com:443".to_string()],
+                username: "webrtc".to_string(),
+                credential: "webrtc".to_string(),
                 ..Default::default()
             },
         ];
