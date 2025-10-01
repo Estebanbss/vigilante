@@ -57,25 +57,19 @@ impl WebRTCManager {
     pub async fn process_offer(&self, client_id: &str, offer: RTCSessionDescription) -> Result<RTCSessionDescription, VigilanteError> {
         log::info!("📡 Procesando offer WebRTC del cliente: {}", client_id);
 
-        // Crear configuración con TURN servers de Metered (solo TCP para evitar bloqueo UDP de Cloudflare)
+        // Crear configuración con TURN servers públicos (ya que Metered no funciona para server-side)
         let mut config = RTCConfiguration::default();
         config.ice_servers = vec![
             webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec!["stun:stun.relay.metered.ca:80".to_string()],
+                urls: vec!["stun:stun.l.google.com:19302".to_string()],
                 username: "".to_string(),
                 credential: "".to_string(),
                 ..Default::default()
             },
             webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec!["turn:standard.relay.metered.ca:80?transport=tcp".to_string()],
-                username: "b83d9c3723596859deb1d16c".to_string(),
-                credential: "oLP2mV6OWqCnf0Zk".to_string(),
-                ..Default::default()
-            },
-            webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec!["turns:standard.relay.metered.ca:443?transport=tcp".to_string()],
-                username: "b83d9c3723596859deb1d16c".to_string(),
-                credential: "oLP2mV6OWqCnf0Zk".to_string(),
+                urls: vec!["turn:turn.anyfirewall.com:443?transport=tcp".to_string()],
+                username: "webrtc".to_string(),
+                credential: "webrtc".to_string(),
                 ..Default::default()
             },
         ];
