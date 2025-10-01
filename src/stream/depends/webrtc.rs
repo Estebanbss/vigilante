@@ -98,12 +98,26 @@ impl WebRTCManager {
                                         .unwrap_or("")
                                         .to_string();
 
-                                    Some(webrtc::ice_transport::ice_server::RTCIceServer {
-                                        urls: vec![url_str.to_string()],
-                                        username,
-                                        credential,
-                                        ..Default::default()
-                                    })
+                                    // Only include servers with credentials (TURN servers)
+                                    if !username.is_empty() && !credential.is_empty() {
+                                        Some(webrtc::ice_transport::ice_server::RTCIceServer {
+                                            urls: vec![url_str.to_string()],
+                                            username,
+                                            credential,
+                                            ..Default::default()
+                                        })
+                                    } else if url_str.starts_with("stun:") {
+                                        // Include STUN servers (no credentials needed)
+                                        Some(webrtc::ice_transport::ice_server::RTCIceServer {
+                                            urls: vec![url_str.to_string()],
+                                            username: String::new(),
+                                            credential: String::new(),
+                                            ..Default::default()
+                                        })
+                                    } else {
+                                        log::warn!("Skipping ICE server without credentials: {}", url_str);
+                                        None
+                                    }
                                 } else {
                                     log::warn!("Failed to parse ICE server: urls is not a string in {:?}", obj);
                                     None
