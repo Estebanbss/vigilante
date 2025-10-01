@@ -3,19 +3,19 @@
 //! Gestiona la transmisión de audio en tiempo real.
 
 use crate::error::VigilanteError;
-use crate::AppState;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+#[derive(Debug)]
 pub struct AudioStreamer {
-    context: Arc<AppState>,
+    streaming_state: Arc<crate::state::StreamingState>,
     audio_rx: broadcast::Receiver<bytes::Bytes>,
 }
 
 impl AudioStreamer {
-    pub fn new(context: Arc<AppState>) -> Self {
-        let audio_rx = context.streaming.audio_mp3_tx.subscribe();
-        Self { context, audio_rx }
+    pub fn new(streaming_state: Arc<crate::state::StreamingState>) -> Self {
+        let audio_rx = streaming_state.audio_mp3_tx.subscribe();
+        Self { streaming_state, audio_rx }
     }
 
     pub async fn start_stream(&self) -> Result<(), VigilanteError> {
@@ -37,6 +37,6 @@ impl AudioStreamer {
     }
 
     pub fn is_audio_available(&self) -> bool {
-        *self.context.streaming.audio_available.lock().unwrap()
+        *self.streaming_state.audio_available.lock().unwrap()
     }
 }

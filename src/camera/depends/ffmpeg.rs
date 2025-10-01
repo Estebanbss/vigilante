@@ -21,7 +21,6 @@ use tokio::runtime::Handle;
 #[derive(Debug)]
 pub struct CameraPipeline {
     pub pipeline: Option<gst::Pipeline>,
-    pub mjpeg_tx: tokio::sync::broadcast::Sender<Bytes>,
     pub motion_detector: Arc<MotionDetector>,
     pub context: Arc<AppState>,
 }
@@ -115,10 +114,8 @@ impl LatencyTracker {
 }
 impl CameraPipeline {
     pub fn new(context: Arc<AppState>, motion_detector: Arc<MotionDetector>) -> Self {
-        let mjpeg_tx = context.streaming.mjpeg_tx.clone();
         Self {
             pipeline: None,
-            mjpeg_tx,
             motion_detector,
             context,
         }
@@ -700,14 +697,6 @@ impl CameraPipeline {
                 }
 
                 log::debug!("📹 Live MP4 fragment received, size: {} bytes", data.len());
-
-                match context.streaming.mjpeg_tx.send(data) {
-                    Ok(_) => log::debug!("📹 Live frame sent to broadcast channel"),
-                    Err(e) => log::warn!(
-                        "📹 Failed to send live frame to broadcast channel: {:?}",
-                        e
-                    ),
-                }
 
                 Ok(gst::FlowSuccess::Ok)
             })

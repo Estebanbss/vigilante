@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+     <head>
+          <title>WebRTC Audio + Video Test</title>
+          <style>
+               body {
+                    font-family: Arial, sans-serif;
+                    padding: 20px;
+               }
+               video {
+                    border: 1px solid #ccc;
+                    margin: 10px;
+               }
+               button {
+                    padding: 10px 20px;
+                    margin: 5px;
+               }
+               #status {
+                    margin: 10px 0;
+                    padding: 10px;
+                    background: #f0f0f0;
+               }
+          </style>
+     </head>
+     <body>
+          <h1>🎥 WebRTC Audio + Video Test</h1>
+
+          <div id="status">Status: Disconnected</div>
+
+          <video id="video" autoplay muted></video>
+          <br />
+
+          <button onclick="connect()">🔗 Connect WebRTC</button>
+          <button onclick="disconnect()">❌ Disconnect</button>
+
+          <script>
+               let peerConnection;
+               let audioStream;
+               let videoStream;
+               const video = document.getElementById("video");
+               const status = document.getElementById("status");
+
+               async function connect() {
+                    try {
+                         status.textContent = "Status: Connecting...";
+
+                         // Crear peer connection
+                         peerConnection = new RTCPeerConnection();
+
+                         // Manejar tracks entrantes
+                         peerConnection.ontrack = (event) => {
+                              if (event.track.kind === "video") {
+                                   videoStream = event.streams[0];
+                                   video.srcObject = videoStream;
+                                   status.textContent =
+                                        "Status: Connected (Video + Audio)";
+                              }
+                         };
+
+                         // Crear offer
+                         const offer = await peerConnection.createOffer();
+                         await peerConnection.setLocalDescription(offer);
+
+                         // Enviar offer al servidor
+                         const response = await fetch("/api/webrtc/offer", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                   sdp: offer.sdp,
+                                   type: offer.type,
+                              }),
+                         });
+
+                         if (!response.ok) {
+                              throw new Error(`HTTP ${response.status}`);
+                         }
+
+                         const answer = await response.json();
+
+                         // Establecer respuesta del servidor
+                         await peerConnection.setRemoteDescription({
+                              type: "answer",
+                              sdp: answer.sdp,
+                         });
+
+                         status.textContent =
+                              "Status: Connected - Waiting for streams...";
+                    } catch (error) {
+                         status.textContent = `Status: Error - ${error.message}`;
+                         console.error("WebRTC error:", error);
+                    }
+               }
+
+               function disconnect() {
+                    if (peerConnection) {
+                         peerConnection.close();
+                         peerConnection = null;
+                    }
+                    video.srcObject = null;
+                    status.textContent = "Status: Disconnected";
+               }
+
+               // Cleanup on page unload
+               window.addEventListener("beforeunload", disconnect);
+          </script>
+     </body>
+</html>

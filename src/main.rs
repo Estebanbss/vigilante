@@ -137,12 +137,12 @@ use storage::{
     delete_recording, recordings_by_day, recordings_summary_ws, refresh_recording_snapshot,
     storage_info, storage_overview, storage_stream_sse, stream_live_recording, system_storage_info,
 };
-use stream::{stream_audio_handler, stream_mjpeg_handler};
+ use stream::{stream_audio_handler, stream_combined_av, webrtc_offer, webrtc_answer, webrtc_close};
 use vigilante::status::get_system_status;
 
 // Dependencias de GStreamer
 use gstreamer as gst;
-use log::{info, warn};
+use log::{error, info, warn};
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -366,8 +366,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let (mjpeg_tx, _mjpeg_rx) = broadcast::channel::<Bytes>(16);
-    let (mjpeg_low_tx, _mjpeg_low_rx) = broadcast::channel::<Bytes>(16);
     let (audio_mp3_tx, _audio_rx) = broadcast::channel::<Bytes>(100);
     let (log_tx, _log_rx) = broadcast::channel::<String>(100);
     let notifications = Arc::new(NotificationManager::new());
@@ -391,8 +389,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let streaming_state = Arc::new(state::StreamingState {
-        mjpeg_tx,
-        mjpeg_low_tx,
         audio_mp3_tx,
         audio_available: Arc::new(StdMutex::new(false)),
         last_audio_timestamp: Arc::new(StdMutex::new(None)),
@@ -429,18 +425,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(AppState {
         camera: camera_config,
         storage: storage_config,
-        streaming: streaming_state,
+        streaming: streaming_state.clone(),
         logging: logging_state,
         system: system_state,
         auth: auth_state,
         gstreamer: gstreamer_state,
         camera_pipeline: Arc::new(StdMutex::new(None)),
+        stream: Arc::new(stream::StreamManager::new(streaming_state)?),
     });
 
     // Construir snapshot inicial antes de atender solicitudes
     if let Err(e) = refresh_recording_snapshot(&state).await {
         warn!("Failed to build initial recording snapshot: {}", e);
         // No es crítico, continuar con snapshot vacío
+    }
+
+    // Inicializar streaming WebRTC
+    if let Err(e) = state.stream.start_streaming(&camera_rtsp_url).await {
+        error!("Failed to initialize WebRTC streaming: {}", e);
+        // Continuar, WebRTC fallará pero el resto funcionará
     }
 
     // Refrescar caché de grabaciones de forma periódica
@@ -482,8 +485,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Router PROTEGIDO con autenticación flexible (header o query token)
     let app = Router::new()
         .route("/metrics", get(metrics_handler))
-        .route("/api/live/mjpeg", get(stream_mjpeg_handler))
-        .route("/api/live/audio", get(stream_audio_handler))
+        .route("/api/webrtc/offer", post(webrtc_offer))
+        .route("/api/webrtc/answer/:client_id", post(webrtc_answer))
+        .route("/api/webrtc/close/:client_id", post(webrtc_close))
+        .route("/api/stream/audio", get(stream_audio_handler))
+        .route("/api/stream/av", get(stream_combined_av))
         .route("/api/logs/stream", get(stream_logs_sse))
         .route("/api/logs/entries/:date", get(get_log_entries_handler))
         .route("/api/recordings/summary", get(recordings_summary_ws))

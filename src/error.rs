@@ -20,6 +20,8 @@ pub enum VigilanteError {
     Ptz(String),
     /// Errores de GStreamer
     GStreamer(String),
+    /// Errores de WebRTC
+    WebRTC(String),
     /// Errores de I/O
     Io(std::io::Error),
     /// Errores de parsing
@@ -39,6 +41,7 @@ impl fmt::Display for VigilanteError {
             VigilanteError::Auth(msg) => write!(f, "Auth error: {}", msg),
             VigilanteError::Ptz(msg) => write!(f, "PTZ error: {}", msg),
             VigilanteError::GStreamer(msg) => write!(f, "GStreamer error: {}", msg),
+            VigilanteError::WebRTC(msg) => write!(f, "WebRTC error: {}", msg),
             VigilanteError::Io(err) => write!(f, "IO error: {}", err),
             VigilanteError::Parse(msg) => write!(f, "Parse error: {}", msg),
             VigilanteError::Http(msg) => write!(f, "HTTP error: {}", msg),
@@ -79,6 +82,24 @@ impl From<String> for VigilanteError {
     }
 }
 
+impl From<gstreamer::glib::BoolError> for VigilanteError {
+    fn from(err: gstreamer::glib::BoolError) -> Self {
+        VigilanteError::GStreamer(format!("GStreamer BoolError: {}", err))
+    }
+}
+
+impl From<webrtc::Error> for VigilanteError {
+    fn from(err: webrtc::Error) -> Self {
+        VigilanteError::WebRTC(format!("WebRTC error: {}", err))
+    }
+}
+
+impl From<gstreamer::StateChangeError> for VigilanteError {
+    fn from(err: gstreamer::StateChangeError) -> Self {
+        VigilanteError::GStreamer(format!("GStreamer StateChangeError: {:?}", err))
+    }
+}
+
 impl axum::response::IntoResponse for VigilanteError {
     fn into_response(self) -> axum::response::Response {
         let (status, message) = match &self {
@@ -89,7 +110,8 @@ impl axum::response::IntoResponse for VigilanteError {
             ),
             VigilanteError::Ptz(_)
             | VigilanteError::GStreamer(_)
-            | VigilanteError::Streaming(_) => {
+            | VigilanteError::Streaming(_)
+            | VigilanteError::WebRTC(_) => {
                 (axum::http::StatusCode::BAD_REQUEST, self.to_string())
             }
             VigilanteError::Parse(_) | VigilanteError::Http(_) | VigilanteError::Other(_) => {

@@ -142,6 +142,7 @@ pub struct AppState {
     pub auth: state::AuthState,
     pub gstreamer: Arc<state::GStreamerState>,
     pub camera_pipeline: Arc<StdMutex<Option<Arc<crate::camera::depends::ffmpeg::CameraPipeline>>>>,
+    pub stream: Arc<stream::StreamManager>,
 }
 
 impl AppState {

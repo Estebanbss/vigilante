@@ -5,42 +5,42 @@
 pub mod depends;
 
 pub use depends::audio::AudioStreamer;
-pub use depends::websocket::WebSocketHandler;
+pub use depends::webrtc::WebRTCManager;
 
 use crate::error::VigilanteError;
+use crate::AppState;
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
+    Json,
 };
-use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::broadcast;
-use tokio::sync::mpsc;
-use tokio::time::{timeout, Instant as TokioInstant};
-use tokio_stream::wrappers::ReceiverStream;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 /// Manager principal para streaming.
+#[derive(Debug)]
 pub struct StreamManager {
     audio_streamer: AudioStreamer,
-    websocket_handler: WebSocketHandler,
+    webrtc_manager: WebRTCManager,
 }
 
 impl StreamManager {
-    pub fn new(context: Arc<crate::AppState>) -> Self {
-        Self {
-            audio_streamer: AudioStreamer::new(context.clone()),
-            websocket_handler: WebSocketHandler::new(context),
-        }
+    pub fn new(streaming_state: Arc<crate::state::StreamingState>) -> Result<Self, VigilanteError> {
+        Ok(Self {
+            audio_streamer: AudioStreamer::new(streaming_state.clone()),
+            webrtc_manager: WebRTCManager::new(streaming_state)?,
+        })
     }
 
-    pub async fn start_streaming(&self) -> Result<(), VigilanteError> {
+    pub async fn start_streaming(&self, rtsp_url: &str) -> Result<(), VigilanteError> {
         // Start audio streaming
         self.audio_streamer.start_stream().await?;
 
-        // WebSocket handling is done per connection in handlers
-        log::info!("Stream manager initialized successfully");
+        // Initialize WebRTC RTP pipeline
+        self.webrtc_manager.initialize_rtp_pipeline(rtsp_url).await?;
+
+        log::info!("🎥 Streaming manager initialized with WebRTC support");
         Ok(())
     }
 
@@ -48,15 +48,15 @@ impl StreamManager {
         &self.audio_streamer
     }
 
-    pub fn get_websocket_handler(&self) -> &WebSocketHandler {
-        &self.websocket_handler
+    pub fn get_webrtc_manager(&self) -> &WebRTCManager {
+        &self.webrtc_manager
     }
 
     pub async fn get_stream_status(&self) -> serde_json::Value {
         serde_json::json!({
             "audio_available": self.audio_streamer.is_audio_available(),
-            "video_streaming": true, // MJPEG is always available if camera is connected
-            "websocket_enabled": true
+            "video_streaming": true, // WebRTC is always available if camera is connected
+            "webrtc_enabled": true
         })
     }
 }
@@ -92,303 +92,187 @@ pub async fn stream_audio_handler(State(state): State<Arc<crate::AppState>>) -> 
         .unwrap()
 }
 
-#[axum::debug_handler]
-pub async fn stream_mjpeg_handler(
-    method: axum::http::Method,
+// ===== ENDPOINT COMBINADO AUDIO+VIDEO PARA TESTING =====
+
+/// Endpoint para stream combinado de audio + video (MPEG-TS para ffplay)
+pub async fn stream_combined_av(
     State(state): State<Arc<crate::AppState>>,
 ) -> impl IntoResponse {
-    // For HEAD requests, just return headers without streaming
-    if method == axum::http::Method::HEAD {
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "video/mp4")
-            .header(header::CACHE_CONTROL, "no-cache")
-            .header(header::CONNECTION, "close")
-            .body(axum::body::Body::empty())
-            .unwrap();
-    }
+    use axum::body::Body;
 
-    // Check if pipeline is running, start it if not
-    let pipeline_running = *state.gstreamer.pipeline_running.lock().unwrap();
-    if !pipeline_running {
-        log::info!(
-            "📺 MP4 stream requested but pipeline not running, starting recording automatically"
-        );
-        let camera_pipeline = {
-            let guard = state.camera_pipeline.lock().unwrap();
-            guard.as_ref().cloned()
-        };
-        if let Some(camera_pipeline) = camera_pipeline {
-            if let Err(e) = camera_pipeline.start_recording().await {
-                log::error!("📺 Failed to start recording: {:?}", e);
-                return Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .header(header::CONTENT_TYPE, "text/plain")
-                    .body(axum::body::Body::from("Failed to start camera pipeline"))
-                    .unwrap();
+    // Usar el WebRTC manager para obtener datos de audio y video
+    // Por ahora devolver audio, pero preparado para multiplexar A+V
+    let mut audio_rx = state.streaming.audio_mp3_tx.subscribe();
+
+    // TODO: Obtener datos RTP de video del pipeline WebRTC y multiplexar
+    let stream = async_stream::stream! {
+        // MPEG-TS header básico
+        let ts_header = create_mpeg_ts_header();
+        yield Ok::<_, std::io::Error>(ts_header);
+
+        loop {
+            match audio_rx.recv().await {
+                Ok(chunk) => {
+                    if !chunk.is_empty() {
+                        // Convertir audio MP3 a packets MPEG-TS
+                        let ts_packets = audio_to_mpeg_ts(&chunk);
+                        for packet in ts_packets {
+                            yield Ok(packet);
+                        }
+                    }
+                }
+                Err(_) => break,
             }
-            log::info!("📺 Pipeline started successfully for streaming");
-        } else {
-            log::error!("📺 Camera pipeline not initialized");
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header(header::CONTENT_TYPE, "text/plain")
-                .body(axum::body::Body::from("Camera pipeline not initialized"))
-                .unwrap();
         }
-    }
-
-    let init_segments = {
-        let segments_guard = state.streaming.mp4_init_segments.lock().unwrap();
-        segments_guard.clone()
     };
 
-
-    let mut receiver = state.streaming.mjpeg_tx.subscribe();
-    const MAX_FRAGMENT_BUNDLE: usize = 5;
-    const INIT_MAX_BUFFERED_FRAGMENTS: usize = 64;
-    const INIT_WAIT_TIMEOUT: Duration = Duration::from_millis(1800);
-    const INIT_RECV_TIMEOUT: Duration = Duration::from_millis(200);
-    log::info!("📺 MP4 stream handler: subscribed to broadcast channel");
-
-    // Create a bounded channel for streaming data
-    let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, Infallible>>(32);
-
-    // Spawn a task to handle the streaming logic
-    tokio::spawn(async move {
-        let mut init_detector = Mp4InitDetector::default();
-        let mut handshake_segments: Vec<bytes::Bytes> = Vec::new();
-        let mut delivered_fragments: usize = 0;
-
-        if !init_segments.is_empty() {
-            let total_bytes = init_segments.iter().map(|seg| seg.len()).sum::<usize>();
-            log::debug!(
-                "📺 Cached {} MP4 init fragments for new client (total {} bytes, complete: {})",
-                init_segments.len(),
-                total_bytes,
-                init_detector.is_complete()
-            );
-            for segment in init_segments {
-                init_detector.ingest(segment.as_ref());
-                handshake_segments.push(segment);
-            }
-        } else {
-            log::warn!("📺 Client connected before MP4 init fragments were available");
-        }
-
-        log::info!("📦 Init detector status: ftyp={}, moov={}, moof={}, complete={}", init_detector.has_ftyp(), init_detector.has_moov(), init_detector.has_moof(), init_detector.is_complete());
-
-        if !init_detector.is_complete() {
-            let deadline = TokioInstant::now() + INIT_WAIT_TIMEOUT;
-            log::info!(
-                "📦 Waiting for MP4 init completion (ftyp: {}, moov: {}, buffered: {})",
-                init_detector.has_ftyp(),
-                init_detector.has_moov(),
-                handshake_segments.len()
-            );
-
-            while !init_detector.is_complete()
-                && TokioInstant::now() < deadline
-                && handshake_segments.len() < INIT_MAX_BUFFERED_FRAGMENTS
-            {
-                match timeout(INIT_RECV_TIMEOUT, receiver.recv()).await {
-                    Ok(Ok(bytes)) => {
-                        init_detector.ingest(bytes.as_ref());
-                        log::debug!(
-                            "📦 Buffered live fragment during init wait (size {} bytes)",
-                            bytes.len()
-                        );
-                        handshake_segments.push(bytes);
-                    }
-                    Ok(Err(broadcast::error::RecvError::Lagged(skipped))) => {
-                        log::warn!(
-                            "📦 Receiver lagged while waiting for init fragments; skipped {}",
-                            skipped
-                        );
-                    }
-                    Ok(Err(broadcast::error::RecvError::Closed)) => {
-                        log::info!("📦 Broadcast channel closed while waiting for init fragments");
-                        return;
-                    }
-                    Err(_) => {
-                        log::debug!("📦 Timeout while waiting for init fragment; retrying");
-                    }
-                }
-            }
-
-            if init_detector.is_complete() {
-                log::info!(
-                    "📦 MP4 init completed (ftyp: {}, moov: {}, buffered: {})",
-                    init_detector.has_ftyp(),
-                    init_detector.has_moov(),
-                    handshake_segments.len()
-                );
-            } else {
-                log::warn!(
-                    "📦 Proceeding without confirmed MP4 init (ftyp: {}, moov: {}, buffered: {})",
-                    init_detector.has_ftyp(),
-                    init_detector.has_moov(),
-                    handshake_segments.len()
-                );
-            }
-        }
-
-        if handshake_segments.is_empty() {
-            log::warn!("📦 No MP4 fragments buffered for client handshake; playback may stall");
-        } else {
-            log::info!("📦 Sending {} handshake segments to client (total {} bytes)", handshake_segments.len(), handshake_segments.iter().map(|s| s.len()).sum::<usize>());
-        }
-
-        // Send handshake segments
-        for (i, segment) in handshake_segments.iter().enumerate() {
-            log::debug!("📦 Sending handshake segment {} ({} bytes)", i + 1, segment.len());
-            if tx.send_timeout(Ok(segment.clone()), Duration::from_millis(20)).await.is_err() {
-                log::info!("📺 Client disconnected durante el handshake en el segmento {}", i + 1);
-                return;
-            }
-            delivered_fragments = delivered_fragments.saturating_add(1);
-        }
-
-        log::info!("📺 Starting continuous fragment streaming to client");
-        loop {
-            log::debug!("📺 Waiting for next fragment from broadcast channel");
-            match tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await {
-                Ok(recv_result) => match recv_result {
-                    Ok(first_bytes) => {
-                        use tokio::sync::broadcast::error::TryRecvError;
-
-                        let mut bundle: Vec<bytes::Bytes> = vec![first_bytes];
-
-                        // Try to accumulate more fragments quickly
-                        for _ in 0..(MAX_FRAGMENT_BUNDLE - 1) {
-                            match receiver.try_recv() {
-                                Ok(next_bytes) => {
-                                    bundle.push(next_bytes);
-                                }
-                                Err(TryRecvError::Empty) => {
-                                    break;
-                                }
-                                Err(TryRecvError::Lagged(skipped)) => {
-                                    log::warn!(
-                                        "📺 Receiver lagged while accumulating bundle; skipped {} fragments",
-                                        skipped
-                                    );
-                                    break;
-                                }
-                                Err(TryRecvError::Closed) => {
-                                    log::info!("📺 Broadcast channel closed while accumulating bundle");
-                                    break;
-                                }
-                            }
-                        }
-
-                        log::debug!("📺 Sending bundle of {} fragments to client", bundle.len());
-                        for fragment in bundle {
-                            log::debug!(
-                                "📺 MP4 fragment dispatched to client, size: {} bytes",
-                                fragment.len()
-                            );
-                            if tx.send_timeout(Ok(fragment), Duration::from_millis(20)).await.is_err() {
-                                log::info!("📺 Client disconnected during streaming, sent {} fragments", delivered_fragments);
-                                return;
-                            }
-                            delivered_fragments = delivered_fragments.saturating_add(1);
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        log::warn!(
-                            "📺 Receiver lagged behind broadcast channel; skipped {} fragments",
-                            skipped
-                        );
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        log::info!("📺 Broadcast channel closed, ending stream after {} fragments", delivered_fragments);
-                        break;
-                    }
-                }
-                Err(_) => {
-                    log::info!("📺 Timeout waiting for fragment, client likely disconnected after {} fragments", delivered_fragments);
-                    break;
-                }
-            }
-        }
-
-        log::info!("📺 Stream ended, total fragments delivered: {}", delivered_fragments);
-    });
-
-    let stream = ReceiverStream::new(rx);
-
-    let body = axum::body::Body::from_stream(stream);
+    let body = Body::from_stream(stream);
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "video/mp4")
+        .header(header::CONTENT_TYPE, "video/MP2T") // MPEG-TS
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::CONNECTION, "close")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(body)
         .unwrap()
 }
 
-#[derive(Default, Debug)]
-struct Mp4InitDetector {
-    has_ftyp: bool,
-    has_moov: bool,
-    has_moof: bool,
-    tail: Vec<u8>,
+fn create_mpeg_ts_header() -> bytes::Bytes {
+    // PAT (Program Association Table) - indica qué programas están disponibles
+    let pat = vec![
+        0x47, 0x40, 0x00, 0x10, // Header TS
+        0x00, // Pointer field
+        0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00, // PAT header
+        0x00, 0x01, 0xF0, 0x01, // Program 1 -> PMT PID 0x1001
+        0x2E, 0x59, 0x6F, 0xFF, 0xFF  // CRC
+    ];
+
+    // PMT (Program Map Table) - describe los streams del programa
+    let pmt = vec![
+        0x47, 0x50, 0x01, 0x10, // Header TS (PID 0x1001)
+        0x00, // Pointer field
+        0x02, 0xB0, 0x17, 0x00, 0x01, 0xC1, 0x00, 0x00, // PMT header
+        0xE1, 0x00, 0xF0, 0x00, // PCR PID
+        0x1B, 0xE1, 0x00, 0xF0, 0x00, // H.264 video
+        0x0F, 0xE1, 0x01, 0xF0, 0x00, // MP3 audio
+        0xFF, 0xFF, 0xFF, 0xFF  // CRC placeholder
+    ];
+
+    let mut combined = Vec::new();
+    combined.extend_from_slice(&pat);
+    combined.extend_from_slice(&pmt);
+    bytes::Bytes::from(combined)
 }
 
-impl Mp4InitDetector {
-    fn ingest(&mut self, data: &[u8]) {
-        if data.is_empty() {
-            return;
-        }
+fn audio_to_mpeg_ts(audio_data: &[u8]) -> Vec<bytes::Bytes> {
+    let mut packets = Vec::new();
 
-        if !self.has_ftyp {
-            self.has_ftyp = data.windows(4).any(|w| w == b"ftyp");
-        }
-        if !self.has_moov {
-            self.has_moov = data.windows(4).any(|w| w == b"moov");
-        }
-        if !self.has_moof {
-            self.has_moof = data.windows(4).any(|w| w == b"moof");
-        }
+    // Dividir audio en chunks de ~184 bytes (tamaño payload TS)
+    for chunk in audio_data.chunks(184) {
+        let mut packet = vec![0u8; 188]; // MPEG-TS packet size
 
-        if !(self.has_ftyp && self.has_moov) && !self.tail.is_empty() {
-            let mut combined = Vec::with_capacity(self.tail.len() + data.len());
-            combined.extend_from_slice(&self.tail);
-            combined.extend_from_slice(data);
-            if !self.has_ftyp {
-                self.has_ftyp = combined.windows(4).any(|w| w == b"ftyp");
-            }
-            if !self.has_moov {
-                self.has_moov = combined.windows(4).any(|w| w == b"moov");
-            }
-            if !self.has_moof {
-                self.has_moof = combined.windows(4).any(|w| w == b"moof");
+        // TS header
+        packet[0] = 0x47; // Sync byte
+        packet[1] = 0x41; // PID 0x101 (audio)
+        packet[2] = 0x01;
+        packet[3] = 0x10; // Payload start indicator
+
+        // Adaptation field (si es necesario)
+        if chunk.len() < 184 {
+            packet[3] |= 0x20; // Adaptation field present
+            packet[4] = (183 - chunk.len()) as u8; // Adaptation field length
+            // Rellenar con stuffing bytes
+            for i in 5..(5 + packet[4] as usize) {
+                packet[i] = 0xFF;
             }
         }
 
-        self.tail.clear();
-        let tail_len = data.len().min(3);
-        if tail_len > 0 {
-            self.tail
-                .extend_from_slice(&data[data.len().saturating_sub(tail_len)..]);
+        // Copiar datos de audio
+        let data_start = if chunk.len() < 184 { 5 + packet[4] as usize } else { 4 };
+        packet[data_start..data_start + chunk.len()].copy_from_slice(chunk);
+
+        packets.push(bytes::Bytes::from(packet));
+    }
+
+    packets
+}
+
+// ===== ENDPOINTS WEBRTC =====
+
+/// Endpoint para iniciar conexión WebRTC - recibe offer del cliente
+pub async fn webrtc_offer(
+    State(state): State<Arc<AppState>>,
+    Json(_offer): Json<RTCSessionDescription>,
+) -> impl IntoResponse {
+    log::info!("📡 Recibida offer WebRTC del cliente");
+
+    // Generar ID único para el cliente
+    let client_id = uuid::Uuid::new_v4().to_string();
+
+    match state.stream.get_webrtc_manager().create_offer(&client_id).await {
+        Ok(answer) => {
+            log::info!("✅ Answer WebRTC creada para cliente: {}", client_id);
+            Json(serde_json::json!({
+                "client_id": client_id,
+                "answer": answer
+            }))
+        }
+        Err(e) => {
+            log::error!("❌ Error creando answer WebRTC: {:?}", e);
+            Json(serde_json::json!({
+                "error": "Failed to create WebRTC answer",
+                "details": e.to_string()
+            }))
         }
     }
+}
 
-    fn has_ftyp(&self) -> bool {
-        self.has_ftyp
+/// Endpoint para completar conexión WebRTC - recibe answer del cliente
+pub async fn webrtc_answer(
+    State(state): State<Arc<AppState>>,
+    Path(client_id): Path<String>,
+    Json(answer): Json<RTCSessionDescription>,
+) -> impl IntoResponse {
+    log::info!("📡 Recibida answer WebRTC para cliente: {}", client_id);
+
+    match state.stream.get_webrtc_manager().process_answer(&client_id, answer).await {
+        Ok(_) => {
+            log::info!("✅ Conexión WebRTC completada para cliente: {}", client_id);
+            Json(serde_json::json!({
+                "status": "connected"
+            }))
+        }
+        Err(e) => {
+            log::error!("❌ Error procesando answer WebRTC: {:?}", e);
+            Json(serde_json::json!({
+                "error": "Failed to process WebRTC answer",
+                "details": e.to_string()
+            }))
+        }
     }
+}
 
-    fn has_moov(&self) -> bool {
-        self.has_moov
-    }
+/// Endpoint para cerrar conexión WebRTC
+pub async fn webrtc_close(
+    State(state): State<Arc<AppState>>,
+    Path(client_id): Path<String>,
+) -> impl IntoResponse {
+    log::info!("🔌 Cerrando conexión WebRTC para cliente: {}", client_id);
 
-    fn has_moof(&self) -> bool {
-        self.has_moof
-    }
-
-    fn is_complete(&self) -> bool {
-        self.has_ftyp && self.has_moov && !self.has_moof
+    match state.stream.get_webrtc_manager().close_connection(&client_id).await {
+        Ok(_) => {
+            log::info!("✅ Conexión WebRTC cerrada para cliente: {}", client_id);
+            Json(serde_json::json!({
+                "status": "disconnected"
+            }))
+        }
+        Err(e) => {
+            log::error!("❌ Error cerrando conexión WebRTC: {:?}", e);
+            Json(serde_json::json!({
+                "error": "Failed to close WebRTC connection",
+                "details": e.to_string()
+            }))
+        }
     }
 }

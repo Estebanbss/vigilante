@@ -48,7 +48,11 @@ gstreamer-pbutils = "0.22"
 gstreamer-webrtc = "0.22"
 gstreamer-sdp = "0.22"
 gstreamer-rtsp = "0.22"
+gstreamer-app-sys = "0.22"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
+
+# WebRTC
+webrtc = "0.9"
 
 [dev-dependencies]
 rstest = "0.26.1"
