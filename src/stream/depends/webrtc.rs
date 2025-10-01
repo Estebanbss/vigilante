@@ -85,17 +85,17 @@ impl WebRTCManager {
         peer_connection.set_local_description(answer.clone()).await?;
 
         // Esperar a que se complete la recolección de candidatos ICE
-        use webrtc::ice_transport::ice_gathering_state::RTCIceGatheringState;
+        use webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState;
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let tx = Arc::new(tx);
         peer_connection.on_ice_gathering_state_change(Box::new(move |state| {
             log::info!("ICE gathering state changed to: {:?}", state);
-            if state == RTCIceGatheringState::Complete {
+            if state == RTCIceGathererState::Complete {
                 // Gathering complete
                 let _ = tx.try_send(());
             }
             Box::pin(async {})
-        })).await;
+        }));
 
         // Esperar hasta 5 segundos para que se complete la recolección
         tokio::time::timeout(tokio::time::Duration::from_secs(5), rx.recv()).await
