@@ -59,9 +59,11 @@ impl WebRTCManager {
         log::info!("📡 Procesando offer WebRTC del cliente: {}", client_id);
 
         // Fetch TURN credentials from Metered API
+        let turn_api_key = std::env::var("TURN_API_KEY").unwrap_or_else(|_| "574f9c4d65b7f555ba53016bfd08ad26033e".to_string());
+        let turn_api_url = std::env::var("TURN_API_URL").unwrap_or_else(|_| "https://metered.live/api/v1/turn/credentials".to_string());
         let client = reqwest::Client::new();
         let response = client
-            .get("https://vigilante_stream.metered.live/api/v1/turn/credentials?apiKey=574f9c4d65b7f555ba53016bfd08ad26033e")
+            .get(format!("{}?apiKey={}", turn_api_url, turn_api_key))
             .send()
             .await
             .map_err(|e| {
