@@ -38,7 +38,9 @@ impl StreamManager {
         self.audio_streamer.start_stream().await?;
 
         // Initialize WebRTC RTP pipeline
-        self.webrtc_manager.initialize_rtp_pipeline(rtsp_url).await?;
+        self.webrtc_manager
+            .initialize_rtp_pipeline(rtsp_url)
+            .await?;
 
         log::info!("🎥 Streaming manager initialized with WebRTC support");
         Ok(())
@@ -95,9 +97,7 @@ pub async fn stream_audio_handler(State(state): State<Arc<crate::AppState>>) -> 
 // ===== ENDPOINT COMBINADO AUDIO+VIDEO PARA TESTING =====
 
 /// Endpoint para stream combinado de audio + video (MPEG-TS para ffplay)
-pub async fn stream_combined_av(
-    State(state): State<Arc<crate::AppState>>,
-) -> impl IntoResponse {
+pub async fn stream_combined_av(State(state): State<Arc<crate::AppState>>) -> impl IntoResponse {
     use axum::body::Body;
 
     // Usar el WebRTC manager para obtener datos de audio y video
@@ -145,7 +145,7 @@ fn create_mpeg_ts_header() -> bytes::Bytes {
         0x00, // Pointer field
         0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00, // PAT header
         0x00, 0x01, 0xF0, 0x01, // Program 1 -> PMT PID 0x1001
-        0x2E, 0x59, 0x6F, 0xFF, 0xFF  // CRC
+        0x2E, 0x59, 0x6F, 0xFF, 0xFF, // CRC
     ];
 
     // PMT (Program Map Table) - describe los streams del programa
@@ -156,7 +156,7 @@ fn create_mpeg_ts_header() -> bytes::Bytes {
         0xE1, 0x00, 0xF0, 0x00, // PCR PID
         0x1B, 0xE1, 0x00, 0xF0, 0x00, // H.264 video
         0x0F, 0xE1, 0x01, 0xF0, 0x00, // MP3 audio
-        0xFF, 0xFF, 0xFF, 0xFF  // CRC placeholder
+        0xFF, 0xFF, 0xFF, 0xFF, // CRC placeholder
     ];
 
     let mut combined = Vec::new();
@@ -182,14 +182,18 @@ fn audio_to_mpeg_ts(audio_data: &[u8]) -> Vec<bytes::Bytes> {
         if chunk.len() < 184 {
             packet[3] |= 0x20; // Adaptation field present
             packet[4] = (183 - chunk.len()) as u8; // Adaptation field length
-            // Rellenar con stuffing bytes
+                                                   // Rellenar con stuffing bytes
             for i in 5..(5 + packet[4] as usize) {
                 packet[i] = 0xFF;
             }
         }
 
         // Copiar datos de audio
-        let data_start = if chunk.len() < 184 { 5 + packet[4] as usize } else { 4 };
+        let data_start = if chunk.len() < 184 {
+            5 + packet[4] as usize
+        } else {
+            4
+        };
         packet[data_start..data_start + chunk.len()].copy_from_slice(chunk);
 
         packets.push(bytes::Bytes::from(packet));
@@ -210,7 +214,12 @@ pub async fn webrtc_offer(
     // Generar ID único para el cliente
     let client_id = uuid::Uuid::new_v4().to_string();
 
-    match state.stream.get_webrtc_manager().process_offer(&client_id, offer).await {
+    match state
+        .stream
+        .get_webrtc_manager()
+        .process_offer(&client_id, offer)
+        .await
+    {
         Ok(answer) => {
             log::info!("✅ Answer WebRTC creada para cliente: {}", client_id);
             Json(serde_json::json!({
@@ -236,7 +245,12 @@ pub async fn webrtc_answer(
 ) -> impl IntoResponse {
     log::info!("📡 Recibida answer WebRTC para cliente: {}", client_id);
 
-    match state.stream.get_webrtc_manager().process_answer(&client_id, answer).await {
+    match state
+        .stream
+        .get_webrtc_manager()
+        .process_answer(&client_id, answer)
+        .await
+    {
         Ok(_) => {
             log::info!("✅ Conexión WebRTC completada para cliente: {}", client_id);
             Json(serde_json::json!({
@@ -260,7 +274,12 @@ pub async fn webrtc_close(
 ) -> impl IntoResponse {
     log::info!("🔌 Cerrando conexión WebRTC para cliente: {}", client_id);
 
-    match state.stream.get_webrtc_manager().close_connection(&client_id).await {
+    match state
+        .stream
+        .get_webrtc_manager()
+        .close_connection(&client_id)
+        .await
+    {
         Ok(_) => {
             log::info!("✅ Conexión WebRTC cerrada para cliente: {}", client_id);
             Json(serde_json::json!({

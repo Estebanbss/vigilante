@@ -15,7 +15,10 @@ pub struct AudioStreamer {
 impl AudioStreamer {
     pub fn new(streaming_state: Arc<crate::state::StreamingState>) -> Self {
         let audio_rx = streaming_state.audio_mp3_tx.subscribe();
-        Self { streaming_state, audio_rx }
+        Self {
+            streaming_state,
+            audio_rx,
+        }
     }
 
     pub async fn start_stream(&self) -> Result<(), VigilanteError> {

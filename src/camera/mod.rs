@@ -49,7 +49,8 @@ pub async fn start_camera_pipeline(
     let motion_detector = Arc::new(MotionDetector::new(Arc::clone(&state)));
 
     // Create and setup camera pipeline using the new logic
-    let mut camera_pipeline_inner = CameraPipeline::new(Arc::clone(&state), Arc::clone(&motion_detector));
+    let mut camera_pipeline_inner =
+        CameraPipeline::new(Arc::clone(&state), Arc::clone(&motion_detector));
 
     // Warm up the pipeline (create elements and link them)
     match camera_pipeline_inner.warm_up().await {
@@ -154,7 +155,8 @@ pub async fn restart_camera_pipeline(
     let motion_detector = Arc::new(MotionDetector::new(Arc::clone(&state)));
 
     // Crear y configurar nuevo pipeline de cámara
-    let mut camera_pipeline_inner = CameraPipeline::new(Arc::clone(&state), Arc::clone(&motion_detector));
+    let mut camera_pipeline_inner =
+        CameraPipeline::new(Arc::clone(&state), Arc::clone(&motion_detector));
 
     // Warm up the pipeline (crear elementos y enlazarlos)
     match camera_pipeline_inner.warm_up().await {

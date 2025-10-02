@@ -117,9 +117,7 @@ impl axum::response::IntoResponse for VigilanteError {
             VigilanteError::Ptz(_)
             | VigilanteError::GStreamer(_)
             | VigilanteError::Streaming(_)
-            | VigilanteError::WebRTC(_) => {
-                (axum::http::StatusCode::BAD_REQUEST, self.to_string())
-            }
+            | VigilanteError::WebRTC(_) => (axum::http::StatusCode::BAD_REQUEST, self.to_string()),
             VigilanteError::Parse(_) | VigilanteError::Http(_) | VigilanteError::Other(_) => {
                 (axum::http::StatusCode::BAD_REQUEST, self.to_string())
             }

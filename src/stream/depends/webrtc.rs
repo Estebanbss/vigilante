@@ -12,8 +12,8 @@ use serde_json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use webrtc::api::APIBuilder;
 use webrtc::api::setting_engine::SettingEngine;
+use webrtc::api::APIBuilder;
 use webrtc::ice::network_type::NetworkType;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -47,7 +47,11 @@ impl WebRTCManager {
         // Force IPv4 only to avoid IPv6 resolution issues
         let mut setting_engine = SettingEngine::default();
         setting_engine.set_network_types(vec![NetworkType::Udp4, NetworkType::Tcp4]);
-        let api = Arc::new(APIBuilder::new().with_setting_engine(setting_engine).build());
+        let api = Arc::new(
+            APIBuilder::new()
+                .with_setting_engine(setting_engine)
+                .build(),
+        );
 
         Ok(Self {
             api,
@@ -60,12 +64,18 @@ impl WebRTCManager {
     }
 
     /// Procesar offer del cliente y retornar answer
-    pub async fn process_offer(&self, client_id: &str, offer: RTCSessionDescription) -> Result<RTCSessionDescription, VigilanteError> {
+    pub async fn process_offer(
+        &self,
+        client_id: &str,
+        offer: RTCSessionDescription,
+    ) -> Result<RTCSessionDescription, VigilanteError> {
         log::info!("📡 Procesando offer WebRTC del cliente: {}", client_id);
 
-                // Fetch TURN credentials from Metered API
-        let turn_api_key = std::env::var("TURN_API_KEY").unwrap_or_else(|_| "574f9c4d65b7f555ba53016bfd08ad26033e".to_string());
-        let turn_api_url = std::env::var("TURN_API_URL").unwrap_or_else(|_| "https://metered.live/api/v1/turn/credentials".to_string());
+        // Fetch TURN credentials from Metered API
+        let turn_api_key = std::env::var("TURN_API_KEY")
+            .unwrap_or_else(|_| "574f9c4d65b7f555ba53016bfd08ad26033e".to_string());
+        let turn_api_url = std::env::var("TURN_API_URL")
+            .unwrap_or_else(|_| "https://metered.live/api/v1/turn/credentials".to_string());
         let client = reqwest::Client::new();
         let response = client
             .get(format!("{}?apiKey={}", turn_api_url, turn_api_key))
@@ -79,7 +89,10 @@ impl WebRTCManager {
             log::error!("❌ Error parsing TURN credentials: {:?}", e);
             VigilanteError::WebRTC(format!("Failed to parse TURN credentials: {:?}", e))
         })?;
-        log::info!("📡 Fetched {} ICE servers from Metered", ice_servers_json.len());
+        log::info!(
+            "📡 Fetched {} ICE servers from Metered",
+            ice_servers_json.len()
+        );
 
         // Crear configuración con los ICE servers fetched
         let mut config = RTCConfiguration::default();
@@ -87,41 +100,55 @@ impl WebRTCManager {
             .into_iter()
             .filter_map(|v| {
                 // Try to deserialize as RTCIceServer (object format)
-                match serde_json::from_value::<webrtc::ice_transport::ice_server::RTCIceServer>(v.clone()) {
+                match serde_json::from_value::<webrtc::ice_transport::ice_server::RTCIceServer>(
+                    v.clone(),
+                ) {
                     Ok(ice_server) => Some(ice_server),
                     Err(_) => {
                         // If that fails, try to parse as JSON object manually
                         if let Some(obj) = v.as_object() {
                             if let Some(urls) = obj.get("urls") {
                                 if let Some(url_str) = urls.as_str() {
-                                    let _username = obj.get("username")
+                                    let username = obj
+                                        .get("username")
                                         .and_then(|u| u.as_str())
                                         .unwrap_or("")
                                         .to_string();
-                                    let _credential = obj.get("credential")
+                                    let credential = obj
+                                        .get("credential")
                                         .and_then(|c| c.as_str())
                                         .unwrap_or("")
                                         .to_string();
 
-                                    // Include only STUN servers for testing
-                                    if url_str.starts_with("stun:") {
-                                        // Include STUN servers (no credentials needed)
+                                    if url_str.starts_with("stun:")
+                                        || url_str.starts_with("turn:")
+                                        || url_str.starts_with("turns:")
+                                    {
                                         Some(webrtc::ice_transport::ice_server::RTCIceServer {
                                             urls: vec![url_str.to_string()],
-                                            username: String::new(),
-                                            credential: String::new(),
+                                            username,
+                                            credential,
                                             ..Default::default()
                                         })
                                     } else {
-                                        log::warn!("Skipping ICE server: {}", url_str);
+                                        log::warn!(
+                                            "Skipping ICE server: unsupported scheme in {}",
+                                            url_str
+                                        );
                                         None
                                     }
                                 } else {
-                                    log::warn!("Failed to parse ICE server: urls is not a string in {:?}", obj);
+                                    log::warn!(
+                                        "Failed to parse ICE server: urls is not a string in {:?}",
+                                        obj
+                                    );
                                     None
                                 }
                             } else {
-                                log::warn!("Failed to parse ICE server: missing urls field in {:?}", obj);
+                                log::warn!(
+                                    "Failed to parse ICE server: missing urls field in {:?}",
+                                    obj
+                                );
                                 None
                             }
                         } else if let Some(url_str) = v.as_str() {
@@ -141,19 +168,27 @@ impl WebRTCManager {
             })
             .collect();
 
-        log::info!("📡 Configured {} ICE servers: {:?}", config.ice_servers.len(), config.ice_servers);
+        log::info!(
+            "📡 Configured {} ICE servers: {:?}",
+            config.ice_servers.len(),
+            config.ice_servers
+        );
 
         // Crear peer connection
-        let peer_connection = Arc::new(self.api.new_peer_connection(config).await.map_err(|e| {
-            log::error!("❌ Error creando peer connection: {:?}", e);
-            VigilanteError::WebRTC(format!("Failed to create peer connection: {:?}", e))
-        })?);
+        let peer_connection =
+            Arc::new(self.api.new_peer_connection(config).await.map_err(|e| {
+                log::error!("❌ Error creando peer connection: {:?}", e);
+                VigilanteError::WebRTC(format!("Failed to create peer connection: {:?}", e))
+            })?);
 
         // Establecer la offer del cliente como descripción remota
-        peer_connection.set_remote_description(offer).await.map_err(|e| {
-            log::error!("❌ Error estableciendo descripción remota: {:?}", e);
-            VigilanteError::WebRTC(format!("Failed to set remote description: {:?}", e))
-        })?;
+        peer_connection
+            .set_remote_description(offer)
+            .await
+            .map_err(|e| {
+                log::error!("❌ Error estableciendo descripción remota: {:?}", e);
+                VigilanteError::WebRTC(format!("Failed to set remote description: {:?}", e))
+            })?;
 
         // Crear tracks de video y audio para esta conexión
         let video_track = self.create_video_track().await?;
@@ -168,10 +203,13 @@ impl WebRTCManager {
             log::error!("❌ Error creando answer: {:?}", e);
             VigilanteError::WebRTC(format!("Failed to create answer: {:?}", e))
         })?;
-        peer_connection.set_local_description(answer.clone()).await.map_err(|e| {
-            log::error!("❌ Error estableciendo descripción local: {:?}", e);
-            VigilanteError::WebRTC(format!("Failed to set local description: {:?}", e))
-        })?;
+        peer_connection
+            .set_local_description(answer.clone())
+            .await
+            .map_err(|e| {
+                log::error!("❌ Error estableciendo descripción local: {:?}", e);
+                VigilanteError::WebRTC(format!("Failed to set local description: {:?}", e))
+            })?;
 
         // Esperar a que se complete la recolección de candidatos ICE
         use webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState;
@@ -187,8 +225,11 @@ impl WebRTCManager {
         }));
 
         // Esperar hasta 10 segundos para que se complete la recolección
-        tokio::time::timeout(tokio::time::Duration::from_secs(10), rx.recv()).await
-            .map_err(|_| VigilanteError::WebRTC("ICE gathering timeout after 10 seconds".to_string()))?;
+        tokio::time::timeout(tokio::time::Duration::from_secs(10), rx.recv())
+            .await
+            .map_err(|_| {
+                VigilanteError::WebRTC("ICE gathering timeout after 10 seconds".to_string())
+            })?;
 
         // Guardar la conexión
         {
@@ -242,7 +283,9 @@ impl WebRTCManager {
                 mime_type: "video/H264".to_string(),
                 clock_rate: 90000,
                 channels: 0,
-                sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f".to_string(),
+                sdp_fmtp_line:
+                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"
+                        .to_string(),
                 rtcp_feedback: vec![],
             },
             "video".to_string(),
@@ -271,7 +314,10 @@ impl WebRTCManager {
 
     /// Inicializar pipeline RTP para WebRTC
     pub async fn initialize_rtp_pipeline(&self, rtsp_url: &str) -> Result<(), VigilanteError> {
-        log::info!("🎥 Inicializando pipeline RTP para WebRTC (audio + video) desde: {}", rtsp_url);
+        log::info!(
+            "🎥 Inicializando pipeline RTP para WebRTC (audio + video) desde: {}",
+            rtsp_url
+        );
 
         // Crear pipeline RTP para audio y video
         let pipeline = gst::Pipeline::new();
@@ -319,8 +365,14 @@ impl WebRTCManager {
         // Agregar elementos al pipeline
         pipeline.add_many(&[
             &rtspsrc,
-            &rtph264depay, &h264parse, &rtph264pay, &video_appsink,
-            &rtpopusdepay, &opusparse, &rtpopuspay, &audio_appsink,
+            &rtph264depay,
+            &h264parse,
+            &rtph264pay,
+            &video_appsink,
+            &rtpopusdepay,
+            &opusparse,
+            &rtpopuspay,
+            &audio_appsink,
         ])?;
 
         // Conectar pipelines de video y audio
@@ -344,7 +396,8 @@ impl WebRTCManager {
             if media_type.starts_with("application/x-rtp") {
                 if let Ok(payload) = structure.get::<i32>("payload") {
                     match payload {
-                        96 => { // H.264 video
+                        96 => {
+                            // H.264 video
                             if let Some(video_appsink) = video_appsink_weak.upgrade() {
                                 let sink_pad = video_appsink.static_pad("sink").unwrap();
                                 if !sink_pad.is_linked() {
@@ -352,8 +405,9 @@ impl WebRTCManager {
                                     log::info!("🎥 Conectado stream de video RTP");
                                 }
                             }
-                        },
-                        97 => { // Opus audio
+                        }
+                        97 => {
+                            // Opus audio
                             if let Some(audio_appsink) = audio_appsink_weak.upgrade() {
                                 let sink_pad = audio_appsink.static_pad("sink").unwrap();
                                 if !sink_pad.is_linked() {
@@ -361,7 +415,7 @@ impl WebRTCManager {
                                     log::info!("🎵 Conectado stream de audio RTP");
                                 }
                             }
-                        },
+                        }
                         _ => log::warn!("⚠️ Payload RTP desconocido: {}", payload),
                     }
                 }

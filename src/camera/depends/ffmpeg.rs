@@ -42,7 +42,7 @@ struct LatencyTracker {
 
 impl LatencyTracker {
     fn update(&mut self, pts: gst::ClockTime, now: Instant) -> Option<LatencyUpdate> {
-    let pts_ns = pts.nseconds();
+        let pts_ns = pts.nseconds();
 
         if self.origin_pts.is_none() || self.origin_instant.is_none() {
             self.origin_pts = Some(pts);
@@ -59,7 +59,7 @@ impl LatencyTracker {
             });
         }
 
-    let origin_pts_ns = self.origin_pts.unwrap().nseconds();
+        let origin_pts_ns = self.origin_pts.unwrap().nseconds();
         let origin_instant = self.origin_instant.unwrap();
 
         let stream_elapsed_ms = if pts_ns >= origin_pts_ns {
@@ -68,10 +68,7 @@ impl LatencyTracker {
             0.0
         };
 
-        let real_elapsed_ms = now
-            .duration_since(origin_instant)
-            .as_secs_f64()
-            * 1_000.0;
+        let real_elapsed_ms = now.duration_since(origin_instant).as_secs_f64() * 1_000.0;
         let mut latency_ms = real_elapsed_ms - stream_elapsed_ms;
         if latency_ms.is_nan() || latency_ms.is_infinite() {
             latency_ms = 0.0;
@@ -125,28 +122,13 @@ impl CameraPipeline {
         let pipeline = gst::Pipeline::new();
 
         {
-            let mut segments_guard = self
-                .context
-                .streaming
-                .mp4_init_segments
-                .lock()
-                .unwrap();
+            let mut segments_guard = self.context.streaming.mp4_init_segments.lock().unwrap();
             segments_guard.clear();
 
-            let mut complete_guard = self
-                .context
-                .streaming
-                .mp4_init_complete
-                .lock()
-                .unwrap();
+            let mut complete_guard = self.context.streaming.mp4_init_complete.lock().unwrap();
             *complete_guard = false;
 
-            let mut tail_guard = self
-                .context
-                .streaming
-                .mp4_init_scan_tail
-                .lock()
-                .unwrap();
+            let mut tail_guard = self.context.streaming.mp4_init_scan_tail.lock().unwrap();
             tail_guard.clear();
 
             let mut warned_guard = self
@@ -218,8 +200,8 @@ impl CameraPipeline {
 
         log::info!("📹 Grabación iniciada: {}", path.display());
 
-    let runtime_handle = Handle::current();
-    let latency_tracker = Arc::new(StdMutex::new(LatencyTracker::default()));
+        let runtime_handle = Handle::current();
+        let latency_tracker = Arc::new(StdMutex::new(LatencyTracker::default()));
 
         let queue_motion = gst::ElementFactory::make("queue")
             .build()
@@ -292,8 +274,8 @@ impl CameraPipeline {
         let appsink_live = gst_app::AppSink::builder().build();
         appsink_live.set_property("emit-signals", &true);
         appsink_live.set_property("sync", &false);
-    appsink_live.set_max_buffers(4);
-    appsink_live.set_drop(true);
+        appsink_live.set_max_buffers(4);
+        appsink_live.set_drop(true);
 
         // Audio elements (PCMA)
         let rtppcmadepay = gst::ElementFactory::make("rtppcmadepay")
@@ -359,14 +341,15 @@ impl CameraPipeline {
             VigilanteError::GStreamer("Failed to set pipeline to Ready".to_string())
         })?;
 
-        let mp4mux_audio_pad = mp4mux
-            .request_pad_simple("audio_%u")
-            .ok_or_else(|| {
-                VigilanteError::GStreamer(
-                    "Failed to request initial mp4mux audio pad (audio_%u)".to_string(),
-                )
-            })?;
-        log::info!("🔧 Reserved mp4mux audio pad for live branch: {}", mp4mux_audio_pad.name());
+        let mp4mux_audio_pad = mp4mux.request_pad_simple("audio_%u").ok_or_else(|| {
+            VigilanteError::GStreamer(
+                "Failed to request initial mp4mux audio pad (audio_%u)".to_string(),
+            )
+        })?;
+        log::info!(
+            "🔧 Reserved mp4mux audio pad for live branch: {}",
+            mp4mux_audio_pad.name()
+        );
         let mp4mux_audio_pad_weak = mp4mux_audio_pad.downgrade();
 
         let rtph264depay_clone = rtph264depay.clone();
@@ -480,9 +463,8 @@ impl CameraPipeline {
         ])
         .map_err(|_| VigilanteError::GStreamer("Failed to link motion branch".to_string()))?;
 
-        gst::Element::link_many([&mp4mux, appsink_live.upcast_ref()]).map_err(|_| {
-            VigilanteError::GStreamer("Failed to link live branch".to_string())
-        })?;
+        gst::Element::link_many([&mp4mux, appsink_live.upcast_ref()])
+            .map_err(|_| VigilanteError::GStreamer("Failed to link live branch".to_string()))?;
 
         let detector_for_motion = Arc::clone(&self.motion_detector);
         let motion_handle = runtime_handle.clone();
@@ -704,8 +686,6 @@ impl CameraPipeline {
         appsink_live.set_callbacks(live_callbacks);
         log::info!("📺 Live appsink callbacks configured");
 
-
-
         let tee_src_pad_rec = tee.request_pad_simple("src_%u").unwrap();
         let queue_rec_sink_pad = queue_rec.static_pad("sink").unwrap();
         tee_src_pad_rec.link(&queue_rec_sink_pad).unwrap();
@@ -722,20 +702,17 @@ impl CameraPipeline {
         log::info!("🔧 Linked tee to live queue");
 
         let queue_live_src_pad = queue_live.static_pad("src").unwrap();
-        let mp4mux_video_pad = mp4mux
-            .request_pad_simple("video_%u")
-            .ok_or_else(|| {
-                log::error!("🔧 Failed to request mp4mux video pad (video_%u)");
-                VigilanteError::GStreamer(
-                    "Failed to request mp4mux video pad (video_%u)".to_string(),
-                )
-            })?;
-        queue_live_src_pad
-            .link(&mp4mux_video_pad)
-            .map_err(|err| {
-                log::error!("🔧 Failed to link live queue to mp4mux video pad: {:?}", err);
-                VigilanteError::GStreamer("Failed to link live queue to mp4mux".to_string())
-            })?;
+        let mp4mux_video_pad = mp4mux.request_pad_simple("video_%u").ok_or_else(|| {
+            log::error!("🔧 Failed to request mp4mux video pad (video_%u)");
+            VigilanteError::GStreamer("Failed to request mp4mux video pad (video_%u)".to_string())
+        })?;
+        queue_live_src_pad.link(&mp4mux_video_pad).map_err(|err| {
+            log::error!(
+                "🔧 Failed to link live queue to mp4mux video pad: {:?}",
+                err
+            );
+            VigilanteError::GStreamer("Failed to link live queue to mp4mux".to_string())
+        })?;
         log::info!("🔧 Linked live queue to mp4mux video pad");
 
         let appsink_live_sink_pad = appsink_live
@@ -772,7 +749,10 @@ impl CameraPipeline {
     }
 
     pub async fn start_recording(&self) -> Result<()> {
-        log::info!("🔧 Start recording called, pipeline: {:?}", self.pipeline.is_some());
+        log::info!(
+            "🔧 Start recording called, pipeline: {:?}",
+            self.pipeline.is_some()
+        );
         if let Some(ref pipeline) = self.pipeline {
             log::info!("🔧 Pipeline exists, setting state to Playing");
             pipeline

@@ -137,7 +137,7 @@ use storage::{
     delete_recording, recordings_by_day, recordings_summary_ws, refresh_recording_snapshot,
     storage_info, storage_overview, storage_stream_sse, stream_live_recording, system_storage_info,
 };
- use stream::{stream_audio_handler, stream_combined_av, webrtc_offer, webrtc_answer, webrtc_close};
+use stream::{stream_audio_handler, stream_combined_av, webrtc_answer, webrtc_close, webrtc_offer};
 use vigilante::status::get_system_status;
 
 // Dependencias de GStreamer
@@ -394,9 +394,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_audio_timestamp: Arc::new(StdMutex::new(None)),
         mp4_init_segments: Arc::new(StdMutex::new(Vec::new())),
         mp4_init_complete: Arc::new(StdMutex::new(false)),
-    mp4_init_scan_tail: Arc::new(StdMutex::new(Vec::new())),
-    mp4_init_warned_before_moov: Arc::new(StdMutex::new(false)),
-    live_latency_snapshot: Arc::new(StdMutex::new(state::LatencySnapshot::default())),
+        mp4_init_scan_tail: Arc::new(StdMutex::new(Vec::new())),
+        mp4_init_warned_before_moov: Arc::new(StdMutex::new(false)),
+        live_latency_snapshot: Arc::new(StdMutex::new(state::LatencySnapshot::default())),
     });
 
     let logging_state = Arc::new(state::LoggingState {
