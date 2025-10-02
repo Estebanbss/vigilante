@@ -626,25 +626,19 @@ impl WebRTCManager {
                                 log::info!("🎥 Conectado stream de video RTP ({})", encoding_name);
                             }
 
-                            if let Some(depay_src_pad) = rtph264depay.static_pad("src") {
-                                let upstream_event = gst_video::UpstreamForceKeyUnitEvent::builder()
-                                    .all_headers(true)
-                                    .running_time(ClockTime::NONE)
-                                    .count(0)
-                                    .build();
+                            let upstream_event = gst_video::UpstreamForceKeyUnitEvent::builder()
+                                .all_headers(true)
+                                .running_time(ClockTime::NONE)
+                                .count(0)
+                                .build();
 
-                                if !depay_src_pad.push_event(upstream_event) {
-                                    log::warn!(
-                                        "⚠️ No se pudo solicitar keyframe upstream al RTSP src"
-                                    );
-                                } else {
-                                    log::info!(
-                                        "📩 Solicitud de keyframe enviada upstream al RTSP src"
-                                    );
-                                }
-                            } else {
+                            if !sink_pad.send_event(upstream_event) {
                                 log::warn!(
-                                    "⚠️ No se pudo obtener pad src de rtph264depay para solicitar keyframe"
+                                    "⚠️ No se pudo solicitar keyframe upstream al RTSP src"
+                                );
+                            } else {
+                                log::info!(
+                                    "📩 Solicitud de keyframe enviada upstream al RTSP src"
                                 );
                             }
 
@@ -659,7 +653,7 @@ impl WebRTCManager {
                                             .count(0)
                                             .build();
 
-                                    if !pay_src_pad.push_event(downstream_event) {
+                                    if !pay_src_pad.send_event(downstream_event) {
                                         log::warn!(
                                             "⚠️ No se pudo propagar keyframe downstream en el pipeline"
                                         );
