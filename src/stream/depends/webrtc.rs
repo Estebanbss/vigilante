@@ -653,9 +653,9 @@ impl WebRTCManager {
         let video_appsink = video_appsink.dynamic_cast::<gst_app::AppSink>().unwrap();
         let audio_appsink = audio_appsink.dynamic_cast::<gst_app::AppSink>().unwrap();
 
-        // Canales separados para video y audio
-        let (video_tx, mut video_rx) = tokio::sync::mpsc::channel(100);
-        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel(100);
+        // Canales separados para video y audio (unbounded para uso desde callbacks sync)
+        let (video_tx, mut video_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Configurar callback para video
         let video_tx_clone = video_tx.clone();
@@ -667,10 +667,9 @@ impl WebRTCManager {
                     let data = buffer.map_readable().unwrap();
                     let rtp_data = bytes::Bytes::copy_from_slice(&data);
 
-                    let tx_clone = video_tx_clone.clone();
-                    tokio::spawn(async move {
-                        let _ = tx_clone.send(rtp_data).await;
-                    });
+                    if let Err(e) = video_tx_clone.send(rtp_data) {
+                        log::warn!("⚠️ No se pudo encolar RTP de video: {}", e);
+                    }
                     Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
@@ -686,10 +685,9 @@ impl WebRTCManager {
                     let data = buffer.map_readable().unwrap();
                     let rtp_data = bytes::Bytes::copy_from_slice(&data);
 
-                    let tx_clone = audio_tx_clone.clone();
-                    tokio::spawn(async move {
-                        let _ = tx_clone.send(rtp_data).await;
-                    });
+                    if let Err(e) = audio_tx_clone.send(rtp_data) {
+                        log::warn!("⚠️ No se pudo encolar RTP de audio: {}", e);
+                    }
                     Ok(gst::FlowSuccess::Ok)
                 })
                 .build(),
