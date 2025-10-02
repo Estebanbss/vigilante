@@ -577,9 +577,9 @@ impl WebRTCManager {
         opusparse.link(&rtpopuspay)?;
         rtpopuspay.link(&audio_appsink)?;
 
-    // Conectar rtspsrc dinámicamente a ambos pipelines
-    let rtph264depay_weak = rtph264depay.downgrade();
-    let rtpopusdepay_weak = rtpopusdepay.downgrade();
+        // Conectar rtspsrc dinámicamente a ambos pipelines
+        let rtph264depay_weak = rtph264depay.downgrade();
+        let rtpopusdepay_weak = rtpopusdepay.downgrade();
 
         rtspsrc.connect_pad_added(move |_, src_pad| {
             let Some(caps) = src_pad.current_caps() else {
