@@ -12,14 +12,19 @@ use serde_json;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use webrtc::api::interceptor_registry::register_default_interceptors;
+use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::ice::network_type::NetworkType;
 use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters;
+use webrtc::rtp_transceiver::rtp_codec::{RTCRtpCodecCapability, RTPCodecType};
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::TrackLocalWriter;
 
@@ -45,13 +50,48 @@ impl std::fmt::Debug for WebRTCManager {
 
 impl WebRTCManager {
     pub fn new(streaming_state: Arc<StreamingState>) -> Result<Self, VigilanteError> {
-        // Crear API básica sin configuración avanzada de codecs por ahora
+        // Crear API con codecs e interceptores explícitos
         // Force IPv4 only to avoid IPv6 resolution issues
         let mut setting_engine = SettingEngine::default();
         setting_engine.set_network_types(vec![NetworkType::Udp4, NetworkType::Tcp4]);
+
+        let mut media_engine = MediaEngine::default();
+        let mut h264_params = RTCRtpCodecParameters::default();
+        h264_params.capability = RTCRtpCodecCapability {
+            mime_type: "video/H264".to_string(),
+            clock_rate: 90000,
+            channels: 0,
+            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"
+                .to_string(),
+            rtcp_feedback: vec![],
+        };
+        h264_params.payload_type = 102;
+        media_engine
+            .register_codec(h264_params, RTPCodecType::Video)
+            .map_err(|e| VigilanteError::WebRTC(format!("Error registrando codec H264: {e}")))?;
+
+        let mut opus_params = RTCRtpCodecParameters::default();
+        opus_params.capability = RTCRtpCodecCapability {
+            mime_type: "audio/opus".to_string(),
+            clock_rate: 48000,
+            channels: 2,
+            sdp_fmtp_line: String::new(),
+            rtcp_feedback: vec![],
+        };
+        opus_params.payload_type = 111;
+        media_engine
+            .register_codec(opus_params, RTPCodecType::Audio)
+            .map_err(|e| VigilanteError::WebRTC(format!("Error registrando codec Opus: {e}")))?;
+
+        let mut registry = Registry::new();
+        registry = register_default_interceptors(registry, &mut media_engine)
+            .map_err(|e| VigilanteError::WebRTC(format!("Error registrando interceptores: {e}")))?;
+
         let api = Arc::new(
             APIBuilder::new()
                 .with_setting_engine(setting_engine)
+                .with_media_engine(media_engine)
+                .with_interceptor_registry(registry)
                 .build(),
         );
 
