@@ -89,24 +89,17 @@ impl WebRTCManager {
                         if let Some(obj) = v.as_object() {
                             if let Some(urls) = obj.get("urls") {
                                 if let Some(url_str) = urls.as_str() {
-                                    let username = obj.get("username")
+                                    let _username = obj.get("username")
                                         .and_then(|u| u.as_str())
                                         .unwrap_or("")
                                         .to_string();
-                                    let credential = obj.get("credential")
+                                    let _credential = obj.get("credential")
                                         .and_then(|c| c.as_str())
                                         .unwrap_or("")
                                         .to_string();
 
-                                    // Include TURN servers with TCP transport or STUN
-                                    if url_str.contains("transport=tcp") && !username.is_empty() && !credential.is_empty() {
-                                        Some(webrtc::ice_transport::ice_server::RTCIceServer {
-                                            urls: vec![url_str.to_string()],
-                                            username,
-                                            credential,
-                                            ..Default::default()
-                                        })
-                                    } else if url_str.starts_with("stun:") {
+                                    // Include only STUN servers for testing
+                                    if url_str.starts_with("stun:") {
                                         // Include STUN servers (no credentials needed)
                                         Some(webrtc::ice_transport::ice_server::RTCIceServer {
                                             urls: vec![url_str.to_string()],
