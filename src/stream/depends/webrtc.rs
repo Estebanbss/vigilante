@@ -582,35 +582,69 @@ impl WebRTCManager {
         let audio_appsink_weak = audio_appsink.downgrade();
 
         rtspsrc.connect_pad_added(move |_, src_pad| {
-            let caps = src_pad.current_caps().unwrap();
-            let structure = caps.structure(0).unwrap();
-            let media_type = structure.name();
+            let Some(caps) = src_pad.current_caps() else {
+                log::warn!("⚠️ Pad añadido sin caps actuales, ignorando");
+                return;
+            };
 
-            if media_type.starts_with("application/x-rtp") {
-                if let Ok(payload) = structure.get::<i32>("payload") {
-                    match payload {
-                        96 => {
-                            // H.264 video
-                            if let Some(video_appsink) = video_appsink_weak.upgrade() {
-                                let sink_pad = video_appsink.static_pad("sink").unwrap();
-                                if !sink_pad.is_linked() {
-                                    src_pad.link(&sink_pad).unwrap();
-                                    log::info!("🎥 Conectado stream de video RTP");
-                                }
+            let Some(structure) = caps.structure(0) else {
+                log::warn!("⚠️ Pad añadido sin estructura en caps, ignorando");
+                return;
+            };
+
+            let media_type = structure.name().to_string();
+            let encoding_name = structure
+                .get::<String>("encoding-name")
+                .unwrap_or_else(|_| String::new());
+            let payload = structure.get::<i32>("payload").unwrap_or(-1);
+
+            log::info!(
+                "📡 Pad añadido: media_type={}, encoding={}, payload={}",
+                media_type,
+                encoding_name,
+                payload
+            );
+
+            if !media_type.starts_with("application/x-rtp") {
+                log::debug!("🔎 Ignorando pad con media_type no RTP: {}", media_type);
+                return;
+            }
+
+            let encoding_upper = encoding_name.to_uppercase();
+
+            match encoding_upper.as_str() {
+                "H264" | "H265" => {
+                    if let Some(video_appsink) = video_appsink_weak.upgrade() {
+                        if let Some(sink_pad) = video_appsink.static_pad("sink") {
+                            if !sink_pad.is_linked() {
+                                src_pad.link(&sink_pad).unwrap();
+                                log::info!("🎥 Conectado stream de video RTP ({})", encoding_name);
                             }
                         }
-                        97 => {
-                            // Opus audio
-                            if let Some(audio_appsink) = audio_appsink_weak.upgrade() {
-                                let sink_pad = audio_appsink.static_pad("sink").unwrap();
-                                if !sink_pad.is_linked() {
-                                    src_pad.link(&sink_pad).unwrap();
-                                    log::info!("🎵 Conectado stream de audio RTP");
-                                }
-                            }
-                        }
-                        _ => log::warn!("⚠️ Payload RTP desconocido: {}", payload),
                     }
+                }
+                "OPUS" => {
+                    if let Some(audio_appsink) = audio_appsink_weak.upgrade() {
+                        if let Some(sink_pad) = audio_appsink.static_pad("sink") {
+                            if !sink_pad.is_linked() {
+                                src_pad.link(&sink_pad).unwrap();
+                                log::info!("🎵 Conectado stream de audio RTP ({})", encoding_name);
+                            }
+                        }
+                    }
+                }
+                "PCMA" | "PCMU" => {
+                    log::warn!(
+                        "🎵 Stream RTP con encoding {} detectado, pero aún no se convierte a Opus",
+                        encoding_name
+                    );
+                }
+                other => {
+                    log::warn!(
+                        "⚠️ Encoding RTP desconocido: {} (payload {})",
+                        other,
+                        payload
+                    );
                 }
             }
         });
