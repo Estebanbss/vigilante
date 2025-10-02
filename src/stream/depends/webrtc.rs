@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use webrtc::api::APIBuilder;
+use webrtc::api::setting_engine::SettingEngine;
+use webrtc::ice::network_type::NetworkType;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -42,7 +44,10 @@ impl std::fmt::Debug for WebRTCManager {
 impl WebRTCManager {
     pub fn new(streaming_state: Arc<StreamingState>) -> Result<Self, VigilanteError> {
         // Crear API básica sin configuración avanzada de codecs por ahora
-        let api = Arc::new(APIBuilder::new().build());
+        // Force IPv4 only to avoid IPv6 resolution issues
+        let mut setting_engine = SettingEngine::default();
+        setting_engine.set_network_types(vec![NetworkType::Udp4, NetworkType::Tcp4]);
+        let api = Arc::new(APIBuilder::new().with_setting_engine(setting_engine).build());
 
         Ok(Self {
             api,
