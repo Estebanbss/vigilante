@@ -9,7 +9,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use serde_json;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use webrtc::api::setting_engine::SettingEngine;
@@ -134,22 +134,28 @@ impl WebRTCManager {
                                     }
                                 }
 
-                                parsed_urls.retain(|url| {
-                                    if url.starts_with("stun:")
-                                        || url.starts_with("turn:")
-                                        || url.starts_with("turns:")
-                                    {
-                                        true
-                                    } else {
-                                        log::warn!(
-                                            "Skipping ICE server url: unsupported scheme in {}",
-                                            url
-                                        );
-                                        false
+                                let mut sanitized_urls: BTreeSet<String> = BTreeSet::new();
+                                for url in parsed_urls {
+                                    match Self::sanitize_ice_url(&url) {
+                                        Some(clean_url) => {
+                                            if clean_url != url {
+                                                log::info!(
+                                                    "Sanitized ICE server url '{}' -> '{}'",
+                                                    url, clean_url
+                                                );
+                                            }
+                                            sanitized_urls.insert(clean_url);
+                                        }
+                                        None => {
+                                            log::warn!(
+                                                "Skipping ICE server url: unsupported format {}",
+                                                url
+                                            );
+                                        }
                                     }
-                                });
+                                }
 
-                                if parsed_urls.is_empty() {
+                                if sanitized_urls.is_empty() {
                                     log::warn!(
                                         "Failed to parse ICE server: no supported urls in {:?}",
                                         obj
@@ -168,7 +174,7 @@ impl WebRTCManager {
                                         .to_string();
 
                                     Some(RTCIceServer {
-                                        urls: parsed_urls,
+                                        urls: sanitized_urls.into_iter().collect(),
                                         username,
                                         credential,
                                         ..Default::default()
@@ -183,23 +189,12 @@ impl WebRTCManager {
                             }
                         } else if let Some(url_str) = v.as_str() {
                             // Handle string format
-                            if url_str.starts_with("stun:")
-                                || url_str.starts_with("turn:")
-                                || url_str.starts_with("turns:")
-                            {
-                                Some(RTCIceServer {
-                                    urls: vec![url_str.to_string()],
-                                    username: String::new(),
-                                    credential: String::new(),
-                                    ..Default::default()
-                                })
-                            } else {
-                                log::warn!(
-                                    "Skipping ICE server: unsupported scheme in {}",
-                                    url_str
-                                );
-                                None
-                            }
+                            Self::sanitize_ice_url(url_str).map(|clean| RTCIceServer {
+                                urls: vec![clean],
+                                username: String::new(),
+                                credential: String::new(),
+                                ..Default::default()
+                            })
                         } else {
                             log::warn!("Failed to parse ICE server: unsupported format {:?}", v);
                             None
@@ -310,6 +305,32 @@ impl WebRTCManager {
 
         log::info!("✅ Answer WebRTC creada para cliente: {}", client_id);
         Ok(answer)
+    }
+
+    fn sanitize_ice_url(raw_url: &str) -> Option<String> {
+        let trimmed = raw_url.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let supported_scheme = trimmed.starts_with("stun:")
+            || trimmed.starts_with("turn:")
+            || trimmed.starts_with("turns:");
+
+        if !supported_scheme {
+            return None;
+        }
+
+        let clean = trimmed
+            .split('?')
+            .next()
+            .unwrap_or(trimmed)
+            .trim_end_matches('&');
+        if clean.is_empty() {
+            return None;
+        }
+
+        Some(clean.to_string())
     }
 
     /// Procesar answer del cliente y completar la conexión
