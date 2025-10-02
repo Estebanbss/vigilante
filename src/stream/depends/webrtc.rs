@@ -7,7 +7,9 @@ use crate::error::VigilanteError;
 use crate::state::StreamingState;
 use gstreamer as gst;
 use gstreamer::prelude::*;
+use gstreamer::ClockTime;
 use gstreamer_app as gst_app;
+use gstreamer_video as gst_video;
 use serde_json;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -621,6 +623,32 @@ impl WebRTCManager {
                             if !sink_pad.is_linked() {
                                 src_pad.link(&sink_pad).unwrap();
                                 log::info!("🎥 Conectado stream de video RTP ({})", encoding_name);
+
+                                let upstream_event = gst_video::UpstreamForceKeyUnitEvent::builder()
+                                        .running_time(ClockTime::NONE)
+                                        .all_headers(true)
+                                        .build();
+                                if !src_pad.send_event(upstream_event) {
+                                    log::warn!(
+                                        "⚠️ No se pudo solicitar keyframe upstream al RTSP src"
+                                    );
+                                } else {
+                                    log::info!(
+                                        "📩 Solicitud de keyframe enviada upstream al RTSP src"
+                                    );
+                                }
+
+                                let downstream_event = gst_video::DownstreamForceKeyUnitEvent::builder()
+                                        .all_headers(true)
+                                        .timestamp(ClockTime::NONE)
+                                        .stream_time(ClockTime::NONE)
+                                        .running_time(ClockTime::NONE)
+                                        .build();
+                                if !sink_pad.send_event(downstream_event) {
+                                    log::warn!(
+                                        "⚠️ No se pudo propagar keyframe downstream en el pipeline"
+                                    );
+                                }
                             }
                         }
                     }
