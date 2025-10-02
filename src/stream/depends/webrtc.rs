@@ -632,7 +632,7 @@ impl WebRTCManager {
                                 .count(0)
                                 .build();
 
-                            if !sink_pad.send_event(upstream_event) {
+                            if !rtph264depay.send_event(upstream_event) {
                                 log::warn!(
                                     "⚠️ No se pudo solicitar keyframe upstream al RTSP src"
                                 );
@@ -643,24 +643,18 @@ impl WebRTCManager {
                             }
 
                             if let Some(rtph264pay) = rtph264pay_weak.upgrade() {
-                                if let Some(pay_src_pad) = rtph264pay.static_pad("src") {
-                                    let downstream_event =
-                                        gst_video::DownstreamForceKeyUnitEvent::builder()
-                                            .all_headers(true)
-                                            .timestamp(ClockTime::NONE)
-                                            .stream_time(ClockTime::NONE)
-                                            .running_time(ClockTime::NONE)
-                                            .count(0)
-                                            .build();
+                                let downstream_event =
+                                    gst_video::DownstreamForceKeyUnitEvent::builder()
+                                        .all_headers(true)
+                                        .timestamp(ClockTime::NONE)
+                                        .stream_time(ClockTime::NONE)
+                                        .running_time(ClockTime::NONE)
+                                        .count(0)
+                                        .build();
 
-                                    if !pay_src_pad.send_event(downstream_event) {
-                                        log::warn!(
-                                            "⚠️ No se pudo propagar keyframe downstream en el pipeline"
-                                        );
-                                    }
-                                } else {
+                                if !rtph264pay.send_event(downstream_event) {
                                     log::warn!(
-                                        "⚠️ No se pudo obtener pad src de rtph264pay para propagar keyframe"
+                                        "⚠️ No se pudo propagar keyframe downstream en el pipeline"
                                     );
                                 }
                             } else {
