@@ -583,6 +583,7 @@ impl WebRTCManager {
 
         // Conectar rtspsrc dinámicamente a ambos pipelines
         let rtph264depay_weak = rtph264depay.downgrade();
+        let rtph264pay_weak = rtph264pay.downgrade();
         let rtpopusdepay_weak = rtpopusdepay.downgrade();
 
         rtspsrc.connect_pad_added(move |_, src_pad| {
@@ -623,12 +624,16 @@ impl WebRTCManager {
                             if !sink_pad.is_linked() {
                                 src_pad.link(&sink_pad).unwrap();
                                 log::info!("🎥 Conectado stream de video RTP ({})", encoding_name);
+                            }
 
+                            if let Some(depay_src_pad) = rtph264depay.static_pad("src") {
                                 let upstream_event = gst_video::UpstreamForceKeyUnitEvent::builder()
-                                    .running_time(ClockTime::NONE)
                                     .all_headers(true)
+                                    .running_time(ClockTime::NONE)
+                                    .count(0)
                                     .build();
-                                if !sink_pad.send_event(upstream_event) {
+
+                                if !depay_src_pad.push_event(upstream_event) {
                                     log::warn!(
                                         "⚠️ No se pudo solicitar keyframe upstream al RTSP src"
                                     );
@@ -637,19 +642,35 @@ impl WebRTCManager {
                                         "📩 Solicitud de keyframe enviada upstream al RTSP src"
                                     );
                                 }
+                            } else {
+                                log::warn!(
+                                    "⚠️ No se pudo obtener pad src de rtph264depay para solicitar keyframe"
+                                );
+                            }
 
-                                let downstream_event =
-                                    gst_video::DownstreamForceKeyUnitEvent::builder()
-                                        .all_headers(true)
-                                        .timestamp(ClockTime::NONE)
-                                        .stream_time(ClockTime::NONE)
-                                        .running_time(ClockTime::NONE)
-                                        .build();
-                                if !src_pad.send_event(downstream_event) {
+                            if let Some(rtph264pay) = rtph264pay_weak.upgrade() {
+                                if let Some(pay_src_pad) = rtph264pay.static_pad("src") {
+                                    let downstream_event =
+                                        gst_video::DownstreamForceKeyUnitEvent::builder()
+                                            .all_headers(true)
+                                            .timestamp(ClockTime::NONE)
+                                            .stream_time(ClockTime::NONE)
+                                            .running_time(ClockTime::NONE)
+                                            .count(0)
+                                            .build();
+
+                                    if !pay_src_pad.push_event(downstream_event) {
+                                        log::warn!(
+                                            "⚠️ No se pudo propagar keyframe downstream en el pipeline"
+                                        );
+                                    }
+                                } else {
                                     log::warn!(
-                                        "⚠️ No se pudo propagar keyframe downstream en el pipeline"
+                                        "⚠️ No se pudo obtener pad src de rtph264pay para propagar keyframe"
                                     );
                                 }
+                            } else {
+                                log::warn!("⚠️ No fue posible acceder a rtph264pay para propagar keyframe");
                             }
                         }
                     }
