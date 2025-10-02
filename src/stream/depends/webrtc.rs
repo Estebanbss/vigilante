@@ -58,22 +58,90 @@ impl WebRTCManager {
     pub async fn process_offer(&self, client_id: &str, offer: RTCSessionDescription) -> Result<RTCSessionDescription, VigilanteError> {
         log::info!("📡 Procesando offer WebRTC del cliente: {}", client_id);
 
-        // Usar servidores ICE públicos fijos (sin fetch de Metered)
+        // Fetch TURN credentials from Metered API
+        let turn_api_key = std::env::var("TURN_API_KEY").unwrap_or_else(|_| "574f9c4d65b7f555ba53016bfd08ad26033e".to_string());
+        let turn_api_url = std::env::var("TURN_API_URL").unwrap_or_else(|_| "https://metered.live/api/v1/turn/credentials".to_string());
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{}?apiKey={}", turn_api_url, turn_api_key))
+            .send()
+            .await
+            .map_err(|e| {
+                log::error!("❌ Error fetching TURN credentials: {:?}", e);
+                VigilanteError::WebRTC(format!("Failed to fetch TURN credentials: {:?}", e))
+            })?;
+        let ice_servers: Vec<serde_json::Value> = response.json().await.map_err(|e| {
+            log::error!("❌ Error parsing TURN credentials: {:?}", e);
+            VigilanteError::WebRTC(format!("Failed to parse TURN credentials: {:?}", e))
+        })?;
+        log::info!("📡 Fetched {} ICE servers from Metered", ice_servers.len());
+
+        // Crear configuración con los ICE servers fetched
         let mut config = RTCConfiguration::default();
-        config.ice_servers = vec![
-            webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".to_string()],
-                username: "".to_string(),
-                credential: "".to_string(),
-                credential_type: webrtc::ice_transport::ice_credential_type::RTCIceCredentialType::Password,
-            },
-            webrtc::ice_transport::ice_server::RTCIceServer {
-                urls: vec!["turn:turn.bistri.com:80".to_string()],
-                username: "".to_string(),
-                credential: "".to_string(),
-                credential_type: webrtc::ice_transport::ice_credential_type::RTCIceCredentialType::Password,
-            },
-        ];
+        config.ice_servers = ice_servers
+            .into_iter()
+            .filter_map(|v| {
+                // Try to deserialize as RTCIceServer (object format)
+                match serde_json::from_value::<webrtc::ice_transport::ice_server::RTCIceServer>(v.clone()) {
+                    Ok(ice_server) => Some(ice_server),
+                    Err(_) => {
+                        // If that fails, try to parse as JSON object manually
+                        if let Some(obj) = v.as_object() {
+                            if let Some(urls) = obj.get("urls") {
+                                if let Some(url_str) = urls.as_str() {
+                                    let username = obj.get("username")
+                                        .and_then(|u| u.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let credential = obj.get("credential")
+                                        .and_then(|c| c.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+
+                                    // Only include servers with credentials (TURN servers)
+                                    if !username.is_empty() && !credential.is_empty() {
+                                        Some(webrtc::ice_transport::ice_server::RTCIceServer {
+                                            urls: vec![url_str.to_string()],
+                                            username,
+                                            credential,
+                                            ..Default::default()
+                                        })
+                                    } else if url_str.starts_with("stun:") {
+                                        // Include STUN servers (no credentials needed)
+                                        Some(webrtc::ice_transport::ice_server::RTCIceServer {
+                                            urls: vec![url_str.to_string()],
+                                            username: String::new(),
+                                            credential: String::new(),
+                                            ..Default::default()
+                                        })
+                                    } else {
+                                        log::warn!("Skipping ICE server without credentials: {}", url_str);
+                                        None
+                                    }
+                                } else {
+                                    log::warn!("Failed to parse ICE server: urls is not a string in {:?}", obj);
+                                    None
+                                }
+                            } else {
+                                log::warn!("Failed to parse ICE server: missing urls field in {:?}", obj);
+                                None
+                            }
+                        } else if let Some(url_str) = v.as_str() {
+                            // Handle string format
+                            Some(webrtc::ice_transport::ice_server::RTCIceServer {
+                                urls: vec![url_str.to_string()],
+                                username: String::new(),
+                                credential: String::new(),
+                                ..Default::default()
+                            })
+                        } else {
+                            log::warn!("Failed to parse ICE server: unsupported format {:?}", v);
+                            None
+                        }
+                    }
+                }
+            })
+            .collect();
 
         // Crear peer connection
         let peer_connection = Arc::new(self.api.new_peer_connection(config).await.map_err(|e| {
