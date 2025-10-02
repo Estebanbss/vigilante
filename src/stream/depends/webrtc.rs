@@ -532,7 +532,7 @@ impl WebRTCManager {
         let rtph264pay = gst::ElementFactory::make("rtph264pay")
             .name("rtph264pay")
             .property("config-interval", 1i32)
-            .property("pt", 103i32)
+            .property("pt", 103u32)
             .build()?;
         let video_appsink = gst::ElementFactory::make("appsink")
             .name("video_appsink")
@@ -549,7 +549,7 @@ impl WebRTCManager {
             .build()?;
         let rtpopuspay = gst::ElementFactory::make("rtpopuspay")
             .name("rtpopuspay")
-            .property("pt", 111i32)
+            .property("pt", 111u32)
             .build()?;
         let audio_appsink = gst::ElementFactory::make("appsink")
             .name("audio_appsink")
