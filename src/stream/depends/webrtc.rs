@@ -622,10 +622,32 @@ impl WebRTCManager {
             match encoding_upper.as_str() {
                 "H264" | "H265" => {
                     if let Some(rtph264depay) = rtph264depay_weak.upgrade() {
-                        if let Some(sink_pad) = rtph264depay.static_pad("sink") {
-                            if !sink_pad.is_linked() {
-                                src_pad.link(&sink_pad).unwrap();
-                                log::info!("🎥 Conectado stream de video RTP ({})", encoding_name);
+                        match rtph264depay.static_pad("sink") {
+                            Some(sink_pad) => {
+                                if !sink_pad.is_linked() {
+                                    match src_pad.link(&sink_pad) {
+                                        Ok(_) => log::info!(
+                                            "🎥 Conectado stream de video RTP ({})",
+                                            encoding_name
+                                        ),
+                                        Err(err) => log::error!(
+                                            "❌ Error enlazando pad de video al depay: {:?}",
+                                            err
+                                        ),
+                                    }
+                                } else {
+                                    log::debug!(
+                                        "🔁 Pad ya enlazado para video RTP ({}), reutilizando",
+                                        encoding_name
+                                    );
+                                }
+                            }
+                            None => {
+                                log::error!(
+                                    "❌ rtph264depay sin pad 'sink' al intentar enlazar stream {}",
+                                    encoding_name
+                                );
+                                return;
                             }
                         }
 
@@ -634,10 +656,22 @@ impl WebRTCManager {
                         let encoding_for_log = encoding_name.clone();
                         let runtime = tokio_handle.clone();
 
+                        log::debug!(
+                            "🕒 Programando solicitud ForceKeyUnit para stream {} tras 200ms",
+                            encoding_for_log
+                        );
                         runtime.spawn(async move {
                             tokio::time::sleep(Duration::from_millis(200)).await;
 
+                            log::debug!(
+                                "🚀 Ejecutando callback ForceKeyUnit programado para stream {}",
+                                encoding_for_log
+                            );
                             if let Some(rtph264depay) = request_depay.upgrade() {
+                                log::debug!(
+                                    "🔍 rtph264depay vigente para stream {}, buscando pad sink",
+                                    encoding_for_log
+                                );
                                 let upstream_event = gst_video::UpstreamForceKeyUnitEvent::builder()
                                     .all_headers(true)
                                     .running_time(ClockTime::NONE)
@@ -646,6 +680,10 @@ impl WebRTCManager {
 
                                 match rtph264depay.static_pad("sink") {
                                     Some(sink_pad) => {
+                                        log::debug!(
+                                            "➡️ Enviando evento upstream ForceKeyUnit por pad {}",
+                                            sink_pad.name()
+                                        );
                                         if !sink_pad.send_event(upstream_event) {
                                             log::warn!(
                                                 "⚠️ No se pudo solicitar keyframe upstream al RTSP src (stream {})",
@@ -673,6 +711,10 @@ impl WebRTCManager {
                             }
 
                             if let Some(rtph264pay) = request_pay.upgrade() {
+                                log::debug!(
+                                    "🔍 rtph264pay vigente para stream {}, buscando pad src",
+                                    encoding_for_log
+                                );
                                 let downstream_event =
                                     gst_video::DownstreamForceKeyUnitEvent::builder()
                                         .all_headers(true)
@@ -684,6 +726,10 @@ impl WebRTCManager {
 
                                 match rtph264pay.static_pad("src") {
                                     Some(src_pad) => {
+                                        log::debug!(
+                                            "⬇️ Enviando evento downstream ForceKeyUnit por pad {}",
+                                            src_pad.name()
+                                        );
                                         if !src_pad.send_event(downstream_event) {
                                             log::warn!(
                                                 "⚠️ No se pudo propagar keyframe downstream en el pipeline (stream {})",
@@ -710,6 +756,11 @@ impl WebRTCManager {
                                 );
                             }
                         });
+                    } else {
+                        log::error!(
+                            "❌ No fue posible obtener referencia fuerte de rtph264depay para stream {}",
+                            encoding_name
+                        );
                     }
                 }
                 "OPUS" => {
