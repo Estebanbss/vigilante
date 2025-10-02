@@ -9,7 +9,7 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use serde_json;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use webrtc::api::setting_engine::SettingEngine;
@@ -103,7 +103,7 @@ impl WebRTCManager {
             .filter_map(|v| {
                 // Try to deserialize as RTCIceServer (object format)
                 match serde_json::from_value::<RTCIceServer>(v.clone()) {
-                    Ok(ice_server) => Some(ice_server),
+                    Ok(ice_server) => Self::sanitize_ice_server(ice_server),
                     Err(_) => {
                         // If that fails, try to parse as JSON object manually
                         if let Some(obj) = v.as_object() {
@@ -173,7 +173,7 @@ impl WebRTCManager {
                                         .unwrap_or("")
                                         .to_string();
 
-                                    Some(RTCIceServer {
+                                    Self::sanitize_ice_server(RTCIceServer {
                                         urls: sanitized_urls.into_iter().collect(),
                                         username,
                                         credential,
@@ -189,11 +189,13 @@ impl WebRTCManager {
                             }
                         } else if let Some(url_str) = v.as_str() {
                             // Handle string format
-                            Self::sanitize_ice_url(url_str).map(|clean| RTCIceServer {
-                                urls: vec![clean],
-                                username: String::new(),
-                                credential: String::new(),
-                                ..Default::default()
+                            Self::sanitize_ice_url(url_str).and_then(|clean| {
+                                Self::sanitize_ice_server(RTCIceServer {
+                                    urls: vec![clean],
+                                    username: String::new(),
+                                    credential: String::new(),
+                                    ..Default::default()
+                                })
                             })
                         } else {
                             log::warn!("Failed to parse ICE server: unsupported format {:?}", v);
@@ -203,6 +205,17 @@ impl WebRTCManager {
                 }
             })
             .collect();
+
+        // Eliminar duplicados exactos de servidor (urls + credenciales)
+        let mut seen_servers: HashSet<(Vec<String>, String, String)> = HashSet::new();
+        ice_servers.retain(|server| {
+            let key = (
+                server.urls.clone(),
+                server.username.clone(),
+                server.credential.clone(),
+            );
+            seen_servers.insert(key)
+        });
 
         ice_servers.retain(|server| {
             let has_turn = server
@@ -331,6 +344,32 @@ impl WebRTCManager {
         }
 
         Some(clean.to_string())
+    }
+
+    fn sanitize_ice_server(mut server: RTCIceServer) -> Option<RTCIceServer> {
+        let mut sanitized_urls: BTreeSet<String> = BTreeSet::new();
+
+        for url in server.urls.into_iter() {
+            match Self::sanitize_ice_url(&url) {
+                Some(clean) => {
+                    if clean != url {
+                        log::info!("Sanitized ICE server url '{}' -> '{}'", url, clean);
+                    }
+                    sanitized_urls.insert(clean);
+                }
+                None => {
+                    log::warn!("Skipping ICE server url: unsupported format {}", url);
+                }
+            }
+        }
+
+        if sanitized_urls.is_empty() {
+            log::warn!("Skipping ICE server: no usable urls after sanitization");
+            return None;
+        }
+
+        server.urls = sanitized_urls.into_iter().collect();
+        Some(server)
     }
 
     /// Procesar answer del cliente y completar la conexión
