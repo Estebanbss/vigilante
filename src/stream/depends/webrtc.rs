@@ -256,13 +256,13 @@ impl WebRTCManager {
                 VigilanteError::WebRTC(format!("Failed to set remote description: {:?}", e))
             })?;
 
-        // Crear tracks de video y audio para esta conexión
-        let video_track = self.create_video_track().await?;
-        let audio_track = self.create_audio_track().await?;
+        // Obtener tracks de video y audio compartidos por el pipeline RTP
+        let video_track = self.ensure_video_track().await?;
+        let audio_track = self.ensure_audio_track().await?;
 
         // Agregar tracks a la conexión
-        peer_connection.add_track(Arc::new(video_track)).await?;
-        peer_connection.add_track(Arc::new(audio_track)).await?;
+        peer_connection.add_track(video_track.clone()).await?;
+        peer_connection.add_track(audio_track.clone()).await?;
 
         // Crear answer
         let answer = peer_connection.create_answer(None).await.map_err(|e| {
@@ -402,6 +402,28 @@ impl WebRTCManager {
         );
 
         Ok(audio_track)
+    }
+
+    async fn ensure_video_track(&self) -> Result<Arc<TrackLocalStaticRTP>, VigilanteError> {
+        let mut video_guard = self.video_track.write().await;
+        if let Some(track) = video_guard.as_ref() {
+            return Ok(track.clone());
+        }
+
+        let track = Arc::new(self.create_video_track().await?);
+        *video_guard = Some(track.clone());
+        Ok(track)
+    }
+
+    async fn ensure_audio_track(&self) -> Result<Arc<TrackLocalStaticRTP>, VigilanteError> {
+        let mut audio_guard = self.audio_track.write().await;
+        if let Some(track) = audio_guard.as_ref() {
+            return Ok(track.clone());
+        }
+
+        let track = Arc::new(self.create_audio_track().await?);
+        *audio_guard = Some(track.clone());
+        Ok(track)
     }
 
     /// Inicializar pipeline RTP para WebRTC
@@ -560,15 +582,13 @@ impl WebRTCManager {
                 .build(),
         );
 
-        // Crear y almacenar tracks
-        let video_track = Arc::new(self.create_video_track().await?);
-        let audio_track = Arc::new(self.create_audio_track().await?);
+        // Obtener tracks compartidos (se crean si aún no existen)
+        let _video_track = self.ensure_video_track().await?;
+        let _audio_track = self.ensure_audio_track().await?;
 
         {
-            let mut vt = self.video_track.write().await;
-            *vt = Some(video_track);
-            let mut at = self.audio_track.write().await;
-            *at = Some(audio_track);
+            let mut pipeline_guard = self.rtp_pipeline.write().await;
+            *pipeline_guard = Some(pipeline.clone());
         }
 
         // Iniciar pipeline
