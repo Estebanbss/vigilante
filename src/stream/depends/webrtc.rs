@@ -577,9 +577,9 @@ impl WebRTCManager {
         opusparse.link(&rtpopuspay)?;
         rtpopuspay.link(&audio_appsink)?;
 
-        // Conectar rtspsrc dinámicamente a ambos pipelines
-        let video_appsink_weak = video_appsink.downgrade();
-        let audio_appsink_weak = audio_appsink.downgrade();
+    // Conectar rtspsrc dinámicamente a ambos pipelines
+    let rtph264depay_weak = rtph264depay.downgrade();
+    let rtpopusdepay_weak = rtpopusdepay.downgrade();
 
         rtspsrc.connect_pad_added(move |_, src_pad| {
             let Some(caps) = src_pad.current_caps() else {
@@ -614,8 +614,8 @@ impl WebRTCManager {
 
             match encoding_upper.as_str() {
                 "H264" | "H265" => {
-                    if let Some(video_appsink) = video_appsink_weak.upgrade() {
-                        if let Some(sink_pad) = video_appsink.static_pad("sink") {
+                    if let Some(rtph264depay) = rtph264depay_weak.upgrade() {
+                        if let Some(sink_pad) = rtph264depay.static_pad("sink") {
                             if !sink_pad.is_linked() {
                                 src_pad.link(&sink_pad).unwrap();
                                 log::info!("🎥 Conectado stream de video RTP ({})", encoding_name);
@@ -624,8 +624,8 @@ impl WebRTCManager {
                     }
                 }
                 "OPUS" => {
-                    if let Some(audio_appsink) = audio_appsink_weak.upgrade() {
-                        if let Some(sink_pad) = audio_appsink.static_pad("sink") {
+                    if let Some(rtpopusdepay) = rtpopusdepay_weak.upgrade() {
+                        if let Some(sink_pad) = rtpopusdepay.static_pad("sink") {
                             if !sink_pad.is_linked() {
                                 src_pad.link(&sink_pad).unwrap();
                                 log::info!("🎵 Conectado stream de audio RTP ({})", encoding_name);
