@@ -5,6 +5,7 @@
 
 use crate::error::VigilanteError;
 use crate::state::StreamingState;
+use gst::glib::{self, source::timeout_add_local};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer::ClockTime;
@@ -13,6 +14,7 @@ use gstreamer_video as gst_video;
 use serde_json;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -625,24 +627,39 @@ impl WebRTCManager {
                                 src_pad.link(&sink_pad).unwrap();
                                 log::info!("🎥 Conectado stream de video RTP ({})", encoding_name);
                             }
+                        }
 
-                            let upstream_event = gst_video::UpstreamForceKeyUnitEvent::builder()
-                                .all_headers(true)
-                                .running_time(ClockTime::NONE)
-                                .count(0)
-                                .build();
+                        let request_depay = rtph264depay_weak.clone();
+                        let request_pay = rtph264pay_weak.clone();
+                        let encoding_for_log = encoding_name.clone();
 
-                            if !rtph264depay.send_event(upstream_event) {
-                                log::warn!(
-                                    "⚠️ No se pudo solicitar keyframe upstream al RTSP src"
-                                );
+                        timeout_add_local(Duration::from_millis(200), move || {
+                            if let Some(rtph264depay) = request_depay.upgrade() {
+                                let upstream_event = gst_video::UpstreamForceKeyUnitEvent::builder()
+                                    .all_headers(true)
+                                    .running_time(ClockTime::NONE)
+                                    .count(0)
+                                    .build();
+
+                                if !rtph264depay.send_event(upstream_event) {
+                                    log::warn!(
+                                        "⚠️ No se pudo solicitar keyframe upstream al RTSP src (stream {})",
+                                        encoding_for_log
+                                    );
+                                } else {
+                                    log::info!(
+                                        "📩 Solicitud de keyframe enviada upstream al RTSP src (stream {})",
+                                        encoding_for_log
+                                    );
+                                }
                             } else {
-                                log::info!(
-                                    "📩 Solicitud de keyframe enviada upstream al RTSP src"
+                                log::warn!(
+                                    "⚠️ No fue posible acceder a rtph264depay para solicitar keyframe (stream {})",
+                                    encoding_for_log
                                 );
                             }
 
-                            if let Some(rtph264pay) = rtph264pay_weak.upgrade() {
+                            if let Some(rtph264pay) = request_pay.upgrade() {
                                 let downstream_event =
                                     gst_video::DownstreamForceKeyUnitEvent::builder()
                                         .all_headers(true)
@@ -654,13 +671,19 @@ impl WebRTCManager {
 
                                 if !rtph264pay.send_event(downstream_event) {
                                     log::warn!(
-                                        "⚠️ No se pudo propagar keyframe downstream en el pipeline"
+                                        "⚠️ No se pudo propagar keyframe downstream en el pipeline (stream {})",
+                                        encoding_for_log
                                     );
                                 }
                             } else {
-                                log::warn!("⚠️ No fue posible acceder a rtph264pay para propagar keyframe");
+                                log::warn!(
+                                    "⚠️ No fue posible acceder a rtph264pay para propagar keyframe (stream {})",
+                                    encoding_for_log
+                                );
                             }
-                        }
+
+                            glib::ControlFlow::Break
+                        });
                     }
                 }
                 "OPUS" => {

@@ -43,6 +43,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # GStreamer dependencies unified to version 0.22
 gstreamer = "0.22"
 gstreamer-app = "0.22"
+glib = "0.18"
 gstreamer-video = "0.22"
 gstreamer-pbutils = "0.22"
 gstreamer-webrtc = "0.22"
