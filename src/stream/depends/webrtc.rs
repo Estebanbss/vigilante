@@ -15,6 +15,8 @@ use tokio::sync::RwLock;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::APIBuilder;
 use webrtc::ice::network_type::NetworkType;
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
+use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
@@ -96,19 +98,64 @@ impl WebRTCManager {
 
         // Crear configuración con los ICE servers fetched
         let mut config = RTCConfiguration::default();
-        config.ice_servers = ice_servers_json
+        let mut ice_servers: Vec<RTCIceServer> = ice_servers_json
             .into_iter()
             .filter_map(|v| {
                 // Try to deserialize as RTCIceServer (object format)
-                match serde_json::from_value::<webrtc::ice_transport::ice_server::RTCIceServer>(
-                    v.clone(),
-                ) {
+                match serde_json::from_value::<RTCIceServer>(v.clone()) {
                     Ok(ice_server) => Some(ice_server),
                     Err(_) => {
                         // If that fails, try to parse as JSON object manually
                         if let Some(obj) = v.as_object() {
                             if let Some(urls) = obj.get("urls") {
-                                if let Some(url_str) = urls.as_str() {
+                                let mut parsed_urls: Vec<String> = Vec::new();
+
+                                match urls {
+                                    serde_json::Value::String(url_str) => {
+                                        parsed_urls.push(url_str.to_string());
+                                    }
+                                    serde_json::Value::Array(array) => {
+                                        for url_value in array {
+                                            if let Some(url_str) = url_value.as_str() {
+                                                parsed_urls.push(url_str.to_string());
+                                            } else {
+                                                log::warn!(
+                                                    "Failed to parse ICE server: url is not a string in {:?}",
+                                                    url_value
+                                                );
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        log::warn!(
+                                            "Failed to parse ICE server: urls is not string or array in {:?}",
+                                            obj
+                                        );
+                                    }
+                                }
+
+                                parsed_urls.retain(|url| {
+                                    if url.starts_with("stun:")
+                                        || url.starts_with("turn:")
+                                        || url.starts_with("turns:")
+                                    {
+                                        true
+                                    } else {
+                                        log::warn!(
+                                            "Skipping ICE server url: unsupported scheme in {}",
+                                            url
+                                        );
+                                        false
+                                    }
+                                });
+
+                                if parsed_urls.is_empty() {
+                                    log::warn!(
+                                        "Failed to parse ICE server: no supported urls in {:?}",
+                                        obj
+                                    );
+                                    None
+                                } else {
                                     let username = obj
                                         .get("username")
                                         .and_then(|u| u.as_str())
@@ -120,29 +167,12 @@ impl WebRTCManager {
                                         .unwrap_or("")
                                         .to_string();
 
-                                    if url_str.starts_with("stun:")
-                                        || url_str.starts_with("turn:")
-                                        || url_str.starts_with("turns:")
-                                    {
-                                        Some(webrtc::ice_transport::ice_server::RTCIceServer {
-                                            urls: vec![url_str.to_string()],
-                                            username,
-                                            credential,
-                                            ..Default::default()
-                                        })
-                                    } else {
-                                        log::warn!(
-                                            "Skipping ICE server: unsupported scheme in {}",
-                                            url_str
-                                        );
-                                        None
-                                    }
-                                } else {
-                                    log::warn!(
-                                        "Failed to parse ICE server: urls is not a string in {:?}",
-                                        obj
-                                    );
-                                    None
+                                    Some(RTCIceServer {
+                                        urls: parsed_urls,
+                                        username,
+                                        credential,
+                                        ..Default::default()
+                                    })
                                 }
                             } else {
                                 log::warn!(
@@ -153,12 +183,23 @@ impl WebRTCManager {
                             }
                         } else if let Some(url_str) = v.as_str() {
                             // Handle string format
-                            Some(webrtc::ice_transport::ice_server::RTCIceServer {
-                                urls: vec![url_str.to_string()],
-                                username: String::new(),
-                                credential: String::new(),
-                                ..Default::default()
-                            })
+                            if url_str.starts_with("stun:")
+                                || url_str.starts_with("turn:")
+                                || url_str.starts_with("turns:")
+                            {
+                                Some(RTCIceServer {
+                                    urls: vec![url_str.to_string()],
+                                    username: String::new(),
+                                    credential: String::new(),
+                                    ..Default::default()
+                                })
+                            } else {
+                                log::warn!(
+                                    "Skipping ICE server: unsupported scheme in {}",
+                                    url_str
+                                );
+                                None
+                            }
                         } else {
                             log::warn!("Failed to parse ICE server: unsupported format {:?}", v);
                             None
@@ -167,6 +208,36 @@ impl WebRTCManager {
                 }
             })
             .collect();
+
+        ice_servers.retain(|server| {
+            let has_turn = server
+                .urls
+                .iter()
+                .any(|url| url.starts_with("turn:") || url.starts_with("turns:"));
+
+            if has_turn && (server.username.is_empty() || server.credential.is_empty()) {
+                log::warn!(
+                    "Skipping TURN server {:?}: missing username or credential",
+                    server.urls
+                );
+                false
+            } else {
+                true
+            }
+        });
+
+        for server in ice_servers.iter_mut() {
+            let has_turn = server
+                .urls
+                .iter()
+                .any(|url| url.starts_with("turn:") || url.starts_with("turns:"));
+
+            if has_turn {
+                server.credential_type = RTCIceCredentialType::Password;
+            }
+        }
+
+        config.ice_servers = ice_servers;
 
         log::info!(
             "📡 Configured {} ICE servers: {:?}",
