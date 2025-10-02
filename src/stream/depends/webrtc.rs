@@ -58,9 +58,9 @@ impl WebRTCManager {
     pub async fn process_offer(&self, client_id: &str, offer: RTCSessionDescription) -> Result<RTCSessionDescription, VigilanteError> {
         log::info!("📡 Procesando offer WebRTC del cliente: {}", client_id);
 
-        // Fetch TURN credentials from Metered API
+                // Fetch TURN credentials from Metered API
         let turn_api_key = std::env::var("TURN_API_KEY").unwrap_or_else(|_| "574f9c4d65b7f555ba53016bfd08ad26033e".to_string());
-        let turn_api_url = std::env::var("TURN_API_URL").unwrap_or_else(|_| "https://metered.live/api/v1/turn/credentials".to_string());
+        let turn_api_url = std::env::var("TURN_API_URL").unwrap_or_else(|_| "https://vigilante_stream.metered.live/api/v1/turn/credentials".to_string());
         let client = reqwest::Client::new();
         let response = client
             .get(format!("{}?apiKey={}", turn_api_url, turn_api_key))
@@ -70,15 +70,15 @@ impl WebRTCManager {
                 log::error!("❌ Error fetching TURN credentials: {:?}", e);
                 VigilanteError::WebRTC(format!("Failed to fetch TURN credentials: {:?}", e))
             })?;
-        let ice_servers: Vec<serde_json::Value> = response.json().await.map_err(|e| {
+        let ice_servers_json: Vec<serde_json::Value> = response.json().await.map_err(|e| {
             log::error!("❌ Error parsing TURN credentials: {:?}", e);
             VigilanteError::WebRTC(format!("Failed to parse TURN credentials: {:?}", e))
         })?;
-        log::info!("📡 Fetched {} ICE servers from Metered", ice_servers.len());
+        log::info!("📡 Fetched {} ICE servers from Metered", ice_servers_json.len());
 
         // Crear configuración con los ICE servers fetched
         let mut config = RTCConfiguration::default();
-        config.ice_servers = ice_servers
+        config.ice_servers = ice_servers_json
             .into_iter()
             .filter_map(|v| {
                 // Try to deserialize as RTCIceServer (object format)
@@ -98,8 +98,8 @@ impl WebRTCManager {
                                         .unwrap_or("")
                                         .to_string();
 
-                                    // Only include servers with credentials (TURN servers)
-                                    if !username.is_empty() && !credential.is_empty() {
+                                    // Include TURN servers with TCP transport or STUN
+                                    if url_str.contains("transport=tcp") && !username.is_empty() && !credential.is_empty() {
                                         Some(webrtc::ice_transport::ice_server::RTCIceServer {
                                             urls: vec![url_str.to_string()],
                                             username,
@@ -115,7 +115,7 @@ impl WebRTCManager {
                                             ..Default::default()
                                         })
                                     } else {
-                                        log::warn!("Skipping ICE server without credentials: {}", url_str);
+                                        log::warn!("Skipping ICE server: {}", url_str);
                                         None
                                     }
                                 } else {
@@ -142,6 +142,8 @@ impl WebRTCManager {
                 }
             })
             .collect();
+
+        log::info!("📡 Configured {} ICE servers: {:?}", config.ice_servers.len(), config.ice_servers);
 
         // Crear peer connection
         let peer_connection = Arc::new(self.api.new_peer_connection(config).await.map_err(|e| {
