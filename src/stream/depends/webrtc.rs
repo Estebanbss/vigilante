@@ -5,7 +5,6 @@
 
 use crate::error::VigilanteError;
 use crate::state::StreamingState;
-use gst::glib::{self, source::timeout_add_local};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer::ClockTime;
@@ -587,6 +586,7 @@ impl WebRTCManager {
         let rtph264depay_weak = rtph264depay.downgrade();
         let rtph264pay_weak = rtph264pay.downgrade();
         let rtpopusdepay_weak = rtpopusdepay.downgrade();
+        let tokio_handle = tokio::runtime::Handle::current();
 
         rtspsrc.connect_pad_added(move |_, src_pad| {
             let Some(caps) = src_pad.current_caps() else {
@@ -632,8 +632,11 @@ impl WebRTCManager {
                         let request_depay = rtph264depay_weak.clone();
                         let request_pay = rtph264pay_weak.clone();
                         let encoding_for_log = encoding_name.clone();
+                        let runtime = tokio_handle.clone();
 
-                        timeout_add_local(Duration::from_millis(200), move || {
+                        runtime.spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+
                             if let Some(rtph264depay) = request_depay.upgrade() {
                                 let upstream_event = gst_video::UpstreamForceKeyUnitEvent::builder()
                                     .all_headers(true)
@@ -681,8 +684,6 @@ impl WebRTCManager {
                                     encoding_for_log
                                 );
                             }
-
-                            glib::ControlFlow::Break
                         });
                     }
                 }
