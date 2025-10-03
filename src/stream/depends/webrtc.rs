@@ -414,7 +414,21 @@ impl WebRTCManager {
                     .split('&')
                     .any(|part| part.eq_ignore_ascii_case("transport=tcp"))
             {
-                return Some(format!("{}?transport=tcp", base));
+                let allow_tcp = base
+                    .rsplit_once(':')
+                    .and_then(|(_, port)| port.parse::<u16>().ok())
+                    .map(|port| port == 443)
+                    .unwrap_or(false);
+
+                if allow_tcp {
+                    return Some(format!("{}?transport=tcp", base));
+                } else {
+                    log::warn!(
+                        "Skipping ICE server url {}: TCP transport only allowed on port 443",
+                        cleaned
+                    );
+                    return None;
+                }
             } else {
                 cleaned = base;
             }
