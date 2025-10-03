@@ -389,9 +389,15 @@ impl WebRTCManager {
             return None;
         }
 
-        let supported_scheme = trimmed.starts_with("stun:")
-            || trimmed.starts_with("turn:")
-            || trimmed.starts_with("turns:");
+        if trimmed.starts_with("turns:") {
+            log::warn!(
+                "⚠️ Ignorando servidor ICE con esquema turns:// no soportado: {}",
+                trimmed
+            );
+            return None;
+        }
+
+        let supported_scheme = trimmed.starts_with("stun:") || trimmed.starts_with("turn:");
 
         if !supported_scheme {
             return None;
