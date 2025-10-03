@@ -453,7 +453,7 @@ impl WebRTCManager {
             }
 
             let query = "transport=tcp";
-            return Some(format!("{}://{}?{}", scheme, host_port, query));
+            return Some(format!("{}:{}?{}", scheme, host_port, query));
         }
 
         if scheme == "turn" {
