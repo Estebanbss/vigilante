@@ -678,7 +678,7 @@ impl WebRTCManager {
                                     .count(0)
                                     .build();
 
-                                match rtph264depay.static_pad("sink") {
+                                match rtph264depay.static_pad("src") {
                                     Some(sink_pad) => {
                                         log::debug!(
                                             "➡️ Enviando evento upstream ForceKeyUnit por pad {}",
@@ -724,7 +724,7 @@ impl WebRTCManager {
                                         .count(0)
                                         .build();
 
-                                match rtph264pay.static_pad("src") {
+                                match rtph264pay.static_pad("sink") {
                                     Some(src_pad) => {
                                         log::debug!(
                                             "⬇️ Enviando evento downstream ForceKeyUnit por pad {}",
