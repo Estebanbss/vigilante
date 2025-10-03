@@ -403,16 +403,28 @@ impl WebRTCManager {
             return None;
         }
 
-        let clean = trimmed
-            .split('?')
-            .next()
-            .unwrap_or(trimmed)
-            .trim_end_matches('&');
-        if clean.is_empty() {
+        let mut cleaned = trimmed.trim_end_matches('&');
+
+        if let Some(idx) = cleaned.find('?') {
+            let (base, query_with_sep) = cleaned.split_at(idx);
+            let query = &query_with_sep[1..];
+
+            if cleaned.starts_with("turn:")
+                && query
+                    .split('&')
+                    .any(|part| part.eq_ignore_ascii_case("transport=tcp"))
+            {
+                return Some(format!("{}?transport=tcp", base));
+            } else {
+                cleaned = base;
+            }
+        }
+
+        if cleaned.is_empty() {
             return None;
         }
 
-        Some(clean.to_string())
+        Some(cleaned.to_string())
     }
 
     fn sanitize_ice_server(mut server: RTCIceServer) -> Option<RTCIceServer> {
