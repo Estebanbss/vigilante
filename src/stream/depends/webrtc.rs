@@ -389,7 +389,9 @@ impl WebRTCManager {
             return None;
         }
 
+        let mut was_turns = false;
         let (scheme, remainder) = if let Some(stripped) = trimmed.strip_prefix("turns:") {
+            was_turns = true;
             ("turn", stripped)
         } else if let Some(stripped) = trimmed.strip_prefix("turn:") {
             ("turn", stripped)
@@ -405,16 +407,18 @@ impl WebRTCManager {
         }
 
         let mut host_port = remainder.to_string();
-        let mut params: Vec<String> = Vec::new();
+        let mut transport_param: Option<String> = None;
 
         if let Some(idx) = host_port.find('?') {
             let query = host_port[idx + 1..].to_string();
             host_port.truncate(idx);
-            params = query
-                .split('&')
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .collect();
+            for part in query.split('&').filter(|s| !s.is_empty()) {
+                if let Some((key, value)) = part.split_once('=') {
+                    if key.eq_ignore_ascii_case("transport") {
+                        transport_param = Some(value.trim().to_ascii_lowercase());
+                    }
+                }
+            }
         }
 
         host_port = host_port.trim_end_matches('&').to_string();
@@ -422,42 +426,33 @@ impl WebRTCManager {
             return None;
         }
 
-        let mut has_transport_tcp = params
-            .iter()
-            .any(|part| part.eq_ignore_ascii_case("transport=tcp"));
+        if let Some(ref transport) = transport_param {
+            match transport.as_str() {
+                "udp" => {
+                    // webrtc-rs already treats lack of explicit parameter as UDP; drop the query
+                }
+                "tcp" => {
+                    log::warn!(
+                        "Skipping ICE server url {}: TURN over TCP/TLS not supported by current WebRTC stack",
+                        raw_url
+                    );
+                    return None;
+                }
+                other => {
+                    log::warn!(
+                        "Skipping ICE server url {}: unsupported transport '{}'",
+                        raw_url, other
+                    );
+                    return None;
+                }
+            }
+        }
 
-        if trimmed.starts_with("turns:") && !has_transport_tcp {
-            params.push("transport=tcp".to_string());
-            has_transport_tcp = true;
-            log::info!(
-                "Sanitizing turns:// ICE server url '{}' -> 'turn:{}?transport=tcp'",
+        if was_turns {
+            log::warn!(
+                "Sanitizing turns:// ICE server url '{}' -> 'turn:{}' (UDP only; TCP/TLS unsupported)",
                 trimmed, host_port
             );
-        }
-
-        if has_transport_tcp {
-            params.retain(|part| part.eq_ignore_ascii_case("transport=tcp"));
-
-            let allow_tcp = host_port
-                .rsplit_once(':')
-                .and_then(|(_, port)| port.parse::<u16>().ok())
-                .map(|port| port == 80 || port == 443)
-                .unwrap_or(false);
-
-            if !allow_tcp {
-                log::warn!(
-                    "Skipping ICE server url {}: TCP transport only allowed on ports 80 or 443",
-                    raw_url
-                );
-                return None;
-            }
-
-            let query = "transport=tcp";
-            return Some(format!("{}:{}?{}", scheme, host_port, query));
-        }
-
-        if scheme == "turn" {
-            return Some(format!("{}:{}", scheme, host_port));
         }
 
         Some(format!("{}:{}", scheme, host_port))
