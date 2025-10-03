@@ -431,7 +431,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth: auth_state,
         gstreamer: gstreamer_state,
         camera_pipeline: Arc::new(StdMutex::new(None)),
-        stream: Arc::new(stream::StreamManager::new(streaming_state)?),
+        stream: Arc::new(stream::StreamManager::new(
+            streaming_state,
+            Some(camera_onvif_url.clone()),
+        )?),
     });
 
     // Construir snapshot inicial antes de atender solicitudes

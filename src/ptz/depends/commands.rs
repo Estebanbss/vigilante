@@ -7,6 +7,7 @@ use super::soap::xml_escape;
 use crate::error::VigilanteError;
 
 const NS_PTZ: &str = "http://www.onvif.org/ver20/ptz/wsdl";
+const NS_MEDIA: &str = "http://www.onvif.org/ver10/media/wsdl";
 
 /// Ejecuta un comando PTZ usando un cliente y token de perfil
 pub async fn execute_ptz_command(
@@ -15,6 +16,26 @@ pub async fn execute_ptz_command(
     body: String,
 ) -> Result<(), VigilanteError> {
     client.soap_request(&body).await.map(|_| ())
+}
+
+/// Solicita un keyframe inmediato usando SetSynchronizationPoint del servicio Media
+pub async fn request_keyframe(
+    client: &OnvifClient,
+    profile_token: &str,
+) -> Result<(), VigilanteError> {
+    println!("🎬 ONVIF SetSynchronizationPoint (keyframe request)");
+
+    let body = format!(
+        "<SetSynchronizationPoint xmlns=\"{ns}\">\
+            <ProfileToken>{token}</ProfileToken>\
+        </SetSynchronizationPoint>",
+        ns = NS_MEDIA,
+        token = xml_escape(profile_token)
+    );
+
+    client.soap_request(&body).await.map(|_| ())?;
+    println!("✅ Keyframe solicitado vía ONVIF");
+    Ok(())
 }
 
 /// Comando ContinuousMove para movimiento continuo

@@ -4,6 +4,7 @@
 //! con baja latencia y alta calidad.
 
 use crate::error::VigilanteError;
+use crate::ptz::depends::{client::OnvifClient, commands as onvif_commands};
 use crate::state::StreamingState;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -39,6 +40,7 @@ pub struct WebRTCManager {
     rtp_pipeline: Arc<RwLock<Option<gstreamer::Pipeline>>>,
     video_track: Arc<RwLock<Option<Arc<TrackLocalStaticRTP>>>>,
     audio_track: Arc<RwLock<Option<Arc<TrackLocalStaticRTP>>>>,
+    onvif_url: Option<String>,
 }
 
 impl std::fmt::Debug for WebRTCManager {
@@ -47,12 +49,16 @@ impl std::fmt::Debug for WebRTCManager {
             .field("peer_connections", &self.peer_connections)
             .field("streaming_state", &self.streaming_state)
             .field("rtp_pipeline", &self.rtp_pipeline)
+            .field("onvif_url", &self.onvif_url)
             .finish()
     }
 }
 
 impl WebRTCManager {
-    pub fn new(streaming_state: Arc<StreamingState>) -> Result<Self, VigilanteError> {
+    pub fn new(
+        streaming_state: Arc<StreamingState>,
+        onvif_url: Option<String>,
+    ) -> Result<Self, VigilanteError> {
         // Crear API con codecs e interceptores explícitos
         // Force IPv4 only to avoid IPv6 resolution issues
         let mut setting_engine = SettingEngine::default();
@@ -105,6 +111,7 @@ impl WebRTCManager {
             rtp_pipeline: Arc::new(RwLock::new(None)),
             video_track: Arc::new(RwLock::new(None)),
             audio_track: Arc::new(RwLock::new(None)),
+            onvif_url,
         })
     }
 
@@ -363,6 +370,19 @@ impl WebRTCManager {
         Ok(answer)
     }
 
+    async fn request_onvif_keyframe(onvif_url: String) -> Result<(), VigilanteError> {
+        let client = OnvifClient::from_url(&onvif_url)?;
+        let (endpoint, profile_token) = client.get_profile_token_with_fallback().await?;
+
+        let final_client = OnvifClient::new(
+            endpoint,
+            client.username.clone(),
+            client.password.clone(),
+        );
+
+        onvif_commands::request_keyframe(&final_client, &profile_token).await
+    }
+
     fn sanitize_ice_url(raw_url: &str) -> Option<String> {
         let trimmed = raw_url.trim();
         if trimmed.is_empty() {
@@ -583,11 +603,12 @@ impl WebRTCManager {
         rtpopuspay.link(&audio_appsink)?;
 
         // Conectar rtspsrc dinámicamente a ambos pipelines
-    let rtph264depay_weak = rtph264depay.downgrade();
-    let rtph264pay_weak = rtph264pay.downgrade();
-    let rtpopusdepay_weak = rtpopusdepay.downgrade();
-    let rtspsrc_weak = rtspsrc.downgrade();
+        let rtph264depay_weak = rtph264depay.downgrade();
+        let rtph264pay_weak = rtph264pay.downgrade();
+        let rtpopusdepay_weak = rtpopusdepay.downgrade();
+        let rtspsrc_weak = rtspsrc.downgrade();
         let tokio_handle = tokio::runtime::Handle::current();
+        let onvif_url = self.onvif_url.clone();
 
         rtspsrc.connect_pad_added(move |_, src_pad| {
             let Some(caps) = src_pad.current_caps() else {
@@ -658,12 +679,14 @@ impl WebRTCManager {
                         let rtsp_src_pad_weak = src_pad.downgrade();
                         let encoding_for_log = encoding_name.clone();
                         let runtime = tokio_handle.clone();
+                        let onvif_url_clone = onvif_url.clone();
 
                         log::debug!(
                             "🕒 Programando solicitud ForceKeyUnit para stream {} tras 200ms",
                             encoding_for_log
                         );
                         runtime.spawn(async move {
+                            let onvif_url = onvif_url_clone;
                             tokio::time::sleep(Duration::from_millis(200)).await;
 
                             log::debug!(
@@ -755,9 +778,34 @@ impl WebRTCManager {
 
                             if !upstream_success {
                                 log::warn!(
-                                    "⚠️ No se pudo solicitar keyframe upstream (stream {}) tras intentar en rtph264depay, pad RTSP y elemento rtspsrc",
+                                    "⚠️ No se pudo solicitar keyframe upstream (stream {}) mediante eventos GStreamer; intentando fallback ONVIF si está disponible",
                                     encoding_for_log
                                 );
+
+                                if let Some(onvif_url) = onvif_url.clone() {
+                                    let encoding_for_onvif = encoding_for_log.clone();
+                                    tokio::spawn(async move {
+                                        match WebRTCManager::request_onvif_keyframe(onvif_url).await {
+                                            Ok(_) => {
+                                                log::info!(
+                                                    "📡 Keyframe solicitado exitosamente vía ONVIF SetSynchronizationPoint (stream {})",
+                                                    encoding_for_onvif
+                                                );
+                                            }
+                                            Err(err) => {
+                                                log::warn!(
+                                                    "⚠️ Fallback ONVIF SetSynchronizationPoint falló (stream {}): {:?}",
+                                                    encoding_for_onvif,
+                                                    err
+                                                );
+                                            }
+                                        }
+                                    });
+                                } else {
+                                    log::debug!(
+                                        "🔕 No hay URL ONVIF configurada; no se intentará solicitud adicional de keyframe"
+                                    );
+                                }
                             }
 
                             if let Some(rtph264pay) = request_pay.upgrade() {

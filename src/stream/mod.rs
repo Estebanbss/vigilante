@@ -26,10 +26,13 @@ pub struct StreamManager {
 }
 
 impl StreamManager {
-    pub fn new(streaming_state: Arc<crate::state::StreamingState>) -> Result<Self, VigilanteError> {
+    pub fn new(
+        streaming_state: Arc<crate::state::StreamingState>,
+        onvif_url: Option<String>,
+    ) -> Result<Self, VigilanteError> {
         Ok(Self {
             audio_streamer: AudioStreamer::new(streaming_state.clone()),
-            webrtc_manager: WebRTCManager::new(streaming_state)?,
+            webrtc_manager: WebRTCManager::new(streaming_state, onvif_url)?,
         })
     }
 
