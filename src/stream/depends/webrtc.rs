@@ -653,6 +653,7 @@ impl WebRTCManager {
 
                         let request_depay = rtph264depay_weak.clone();
                         let request_pay = rtph264pay_weak.clone();
+                        let rtsp_src_pad_weak = src_pad.downgrade();
                         let encoding_for_log = encoding_name.clone();
                         let runtime = tokio_handle.clone();
 
@@ -667,9 +668,11 @@ impl WebRTCManager {
                                 "🚀 Ejecutando callback ForceKeyUnit programado para stream {}",
                                 encoding_for_log
                             );
+                            let mut upstream_success = false;
+
                             if let Some(rtph264depay) = request_depay.upgrade() {
                                 log::debug!(
-                                    "🔍 rtph264depay vigente para stream {}, buscando pad sink",
+                                    "🔍 rtph264depay vigente para stream {}, buscando pad src",
                                     encoding_for_log
                                 );
                                 let upstream_event = gst_video::UpstreamForceKeyUnitEvent::builder()
@@ -679,26 +682,27 @@ impl WebRTCManager {
                                     .build();
 
                                 match rtph264depay.static_pad("src") {
-                                    Some(sink_pad) => {
+                                    Some(src_pad) => {
                                         log::debug!(
                                             "➡️ Enviando evento upstream ForceKeyUnit por pad {}",
-                                            sink_pad.name()
+                                            src_pad.name()
                                         );
-                                        if !sink_pad.send_event(upstream_event) {
-                                            log::warn!(
-                                                "⚠️ No se pudo solicitar keyframe upstream al RTSP src (stream {})",
+                                        upstream_success = src_pad.send_event(upstream_event.clone());
+                                        if upstream_success {
+                                            log::info!(
+                                                "📩 Solicitud de keyframe enviada upstream desde rtph264depay (stream {})",
                                                 encoding_for_log
                                             );
                                         } else {
-                                            log::info!(
-                                                "📩 Solicitud de keyframe enviada upstream al RTSP src (stream {})",
+                                            log::warn!(
+                                                "⚠️ No se pudo solicitar keyframe upstream desde rtph264depay (stream {}), se intentará directamente en pad RTSP",
                                                 encoding_for_log
                                             );
                                         }
                                     }
                                     None => {
                                         log::warn!(
-                                            "⚠️ No se encontró el pad sink de rtph264depay para solicitar keyframe (stream {})",
+                                            "⚠️ No se encontró el pad src de rtph264depay para solicitar keyframe (stream {})",
                                             encoding_for_log
                                         );
                                     }
@@ -708,6 +712,38 @@ impl WebRTCManager {
                                     "⚠️ No fue posible acceder a rtph264depay para solicitar keyframe (stream {})",
                                     encoding_for_log
                                 );
+                            }
+
+                            if !upstream_success {
+                                if let Some(rtsp_src_pad) = rtsp_src_pad_weak.upgrade() {
+                                    log::debug!(
+                                        "➡️ Enviando evento upstream ForceKeyUnit directamente al pad RTSP {}",
+                                        rtsp_src_pad.name()
+                                    );
+                                    let upstream_event =
+                                        gst_video::UpstreamForceKeyUnitEvent::builder()
+                                            .all_headers(true)
+                                            .running_time(ClockTime::NONE)
+                                            .count(0)
+                                            .build();
+
+                                    if !rtsp_src_pad.send_event(upstream_event) {
+                                        log::warn!(
+                                            "⚠️ No se pudo solicitar keyframe upstream al RTSP src tras reintento (stream {})",
+                                            encoding_for_log
+                                        );
+                                    } else {
+                                        log::info!(
+                                            "📩 Solicitud de keyframe enviada upstream directamente al RTSP src (stream {})",
+                                            encoding_for_log
+                                        );
+                                    }
+                                } else {
+                                    log::warn!(
+                                        "⚠️ No fue posible acceder al pad RTSP para solicitar keyframe (stream {})",
+                                        encoding_for_log
+                                    );
+                                }
                             }
 
                             if let Some(rtph264pay) = request_pay.upgrade() {
