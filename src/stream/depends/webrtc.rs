@@ -389,21 +389,55 @@ impl WebRTCManager {
             return None;
         }
 
-        if trimmed.starts_with("turns:") {
-            log::warn!(
-                "⚠️ Ignorando servidor ICE con esquema turns:// no soportado: {}",
-                trimmed
+        let mut normalized = trimmed.to_string();
+        if normalized.starts_with("turns:") {
+            let original = normalized.clone();
+            normalized = normalized.replacen("turns:", "turn:", 1);
+
+            let (base, query) = if let Some(idx) = normalized.find('?') {
+                let (b, q_with_sep) = normalized.split_at(idx);
+                (b.to_string(), q_with_sep[1..].to_string())
+            } else {
+                (normalized.clone(), String::new())
+            };
+
+            let mut params: Vec<String> = if query.is_empty() {
+                Vec::new()
+            } else {
+                query
+                    .split('&')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect()
+            };
+
+            if !params
+                .iter()
+                .any(|part| part.eq_ignore_ascii_case("transport=tcp"))
+            {
+                params.push("transport=tcp".to_string());
+            }
+
+            normalized = if params.is_empty() {
+                base
+            } else {
+                format!("{}?{}", base, params.join("&"))
+            };
+
+            log::info!(
+                "Sanitizing turns:// ICE server url '{}' -> '{}'",
+                original, normalized
             );
-            return None;
         }
 
-        let supported_scheme = trimmed.starts_with("stun:") || trimmed.starts_with("turn:");
+        let supported_scheme =
+            normalized.starts_with("stun:") || normalized.starts_with("turn:");
 
         if !supported_scheme {
             return None;
         }
 
-        let mut cleaned = trimmed.trim_end_matches('&');
+        let mut cleaned = normalized.trim_end_matches('&').to_string();
 
         if let Some(idx) = cleaned.find('?') {
             let (base, query_with_sep) = cleaned.split_at(idx);
@@ -417,20 +451,20 @@ impl WebRTCManager {
                 let allow_tcp = base
                     .rsplit_once(':')
                     .and_then(|(_, port)| port.parse::<u16>().ok())
-                    .map(|port| port == 443)
+                    .map(|port| port == 80 || port == 443)
                     .unwrap_or(false);
 
                 if allow_tcp {
                     return Some(format!("{}?transport=tcp", base));
                 } else {
                     log::warn!(
-                        "Skipping ICE server url {}: TCP transport only allowed on port 443",
+                        "Skipping ICE server url {}: TCP transport only allowed on ports 80 or 443",
                         cleaned
                     );
                     return None;
                 }
             } else {
-                cleaned = base;
+                cleaned = base.to_string();
             }
         }
 
@@ -438,7 +472,7 @@ impl WebRTCManager {
             return None;
         }
 
-        Some(cleaned.to_string())
+        Some(cleaned)
     }
 
     fn sanitize_ice_server(mut server: RTCIceServer) -> Option<RTCIceServer> {
