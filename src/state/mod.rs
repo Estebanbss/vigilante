@@ -29,6 +29,7 @@ pub struct StorageConfig {
 #[derive(Debug)]
 pub struct StreamingState {
     pub audio_mp3_tx: broadcast::Sender<bytes::Bytes>,
+    pub mjpeg_tx: broadcast::Sender<bytes::Bytes>,
     pub audio_available: Arc<StdMutex<bool>>,
     pub last_audio_timestamp: Arc<StdMutex<Option<std::time::Instant>>>,
     pub mp4_init_segments: Arc<StdMutex<Vec<Bytes>>>,

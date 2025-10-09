@@ -137,7 +137,7 @@ use storage::{
     delete_recording, recordings_by_day, recordings_summary_ws, refresh_recording_snapshot,
     storage_info, storage_overview, storage_stream_sse, stream_live_recording, system_storage_info,
 };
-use stream::{stream_audio_handler, stream_combined_av, webrtc_answer, webrtc_close, webrtc_offer};
+use stream::{stream_audio_handler, stream_combined_av, stream_mjpeg_handler, webrtc_answer, webrtc_close, webrtc_offer};
 use vigilante::status::get_system_status;
 
 // Dependencias de GStreamer
@@ -367,6 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let (audio_mp3_tx, _audio_rx) = broadcast::channel::<Bytes>(100);
+    let (mjpeg_tx, _mjpeg_rx) = broadcast::channel::<Bytes>(10);
     let (log_tx, _log_rx) = broadcast::channel::<String>(100);
     let notifications = Arc::new(NotificationManager::new());
 
@@ -390,6 +391,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let streaming_state = Arc::new(state::StreamingState {
         audio_mp3_tx,
+        mjpeg_tx,
         audio_available: Arc::new(StdMutex::new(false)),
         last_audio_timestamp: Arc::new(StdMutex::new(None)),
         mp4_init_segments: Arc::new(StdMutex::new(Vec::new())),
@@ -493,6 +495,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/webrtc/close/:client_id", post(webrtc_close))
         .route("/api/stream/audio", get(stream_audio_handler))
         .route("/api/stream/av", get(stream_combined_av))
+        .route("/api/live/mjpeg", get(stream_mjpeg_handler))
         .route("/api/logs/stream", get(stream_logs_sse))
         .route("/api/logs/entries/:date", get(get_log_entries_handler))
         .route("/api/recordings/summary", get(recordings_summary_ws))

@@ -125,16 +125,20 @@ pub async fn start_simple_pipeline(
         // Setup MJPEG sink
         if let Some(mjpeg_sink) = pipeline.by_name("mjpeg_sink") {
             let mjpeg_sink = mjpeg_sink.downcast::<gst_app::AppSink>().unwrap();
-            // MJPEG streaming removed - using WebRTC instead
+            let tx_mjpeg = state.streaming.mjpeg_tx.clone();
             mjpeg_sink.set_callbacks(
                 gst_app::AppSinkCallbacks::builder()
-                    .new_sample(move |_sink| {
-                        // MJPEG frames no longer sent to broadcast channel
+                    .new_sample(move |s| {
+                        let sample = s.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                        let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                        let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                        let data = Bytes::copy_from_slice(map.as_ref());
+                        let _ = tx_mjpeg.send(data);
                         Ok(gst::FlowSuccess::Ok)
                     })
                     .build(),
             );
-            log::info!("📺 MJPEG sink configured");
+            log::info!("📺 MJPEG sink configured and streaming");
         }
 
         // Setup audio sink

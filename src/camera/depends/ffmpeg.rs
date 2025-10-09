@@ -14,9 +14,134 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_rtsp::RTSPLowerTrans;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio;
 use tokio::runtime::Handle;
+use tokio::time::timeout;
+
+/// Verifica la conectividad RTSP antes de iniciar grabación
+async fn check_rtsp_connectivity(rtsp_url: &str) -> Result<()> {
+    log::info!("🔍 Verificando conectividad RTSP: {}", rtsp_url);
+    
+    // Crear un pipeline de prueba simple para verificar conectividad
+    let pipeline_str = format!("rtspsrc location={} latency=1000 ! fakesink", rtsp_url);
+    
+    let pipeline = gst::Pipeline::new();
+    let launch_result = gst::parse::launch(&pipeline_str);
+    
+    match launch_result {
+        Ok(bin) => {
+            pipeline.add(&bin).map_err(|_| {
+                VigilanteError::GStreamer("Failed to add RTSP test pipeline".to_string())
+            })?;
+            
+            // Intentar iniciar el pipeline de prueba
+            match timeout(Duration::from_secs(10), async {
+                match pipeline.set_state(gst::State::Playing) {
+                    Ok(_) => {
+                        // Esperar un poco para ver si se conecta
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        
+                        // Verificar si hay errores
+                        let bus = pipeline.bus().unwrap();
+                        let mut has_error = false;
+                        
+                        for _ in 0..10 {
+                            if let Some(msg) = bus.timed_pop(100 * gst::ClockTime::MSECOND) {
+                                match msg.view() {
+                                    gst::MessageView::Error(_) => {
+                                        has_error = true;
+                                        break;
+                                    }
+                                    gst::MessageView::StateChanged(_) => {
+                                        // Estado cambió, probablemente conectando
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        
+                        // Detener el pipeline de prueba
+                        let _ = pipeline.set_state(gst::State::Null);
+                        
+                        if has_error {
+                            Err(VigilanteError::GStreamer("RTSP connection failed".to_string()))
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    Err(_) => Err(VigilanteError::GStreamer("Failed to start RTSP test pipeline".to_string()))
+                }
+            }).await {
+                Ok(result) => result,
+                Err(_) => {
+                    log::warn!("⏰ Timeout verificando conectividad RTSP");
+                    Err(VigilanteError::GStreamer("RTSP connectivity check timeout".to_string()))
+                }
+            }
+        }
+        Err(_) => Err(VigilanteError::GStreamer("Failed to create RTSP test pipeline".to_string()))
+    }
+}
+
+/// Verifica que el pipeline completo se puede inicializar
+async fn check_pipeline_initialization(_context: &Arc<AppState>) -> Result<()> {
+    log::info!("🔧 Verificando inicialización del pipeline completo");
+    
+    // Intentar crear los elementos básicos del pipeline
+    let _source = gst::ElementFactory::make("rtspsrc")
+        .build()
+        .map_err(|_| VigilanteError::GStreamer("Failed to create rtspsrc for test".to_string()))?;
+    
+    // Intentar configurar propiedades básicas
+    let _decodebin = gst::ElementFactory::make("decodebin")
+        .build()
+        .map_err(|_| VigilanteError::GStreamer("Failed to create decodebin for test".to_string()))?;
+    
+    log::info!("✅ Pipeline básico se puede inicializar");
+    Ok(())
+}
+
+/// Implementa reintentos con backoff exponencial
+async fn retry_with_backoff<F, Fut, T>(
+    operation: F,
+    max_attempts: u32,
+    base_delay_ms: u64,
+    operation_name: &str
+) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut attempt = 1;
+    
+    loop {
+        log::info!("🔄 Intento {} de {} para {}", attempt, max_attempts, operation_name);
+        
+        match operation().await {
+            Ok(result) => {
+                log::info!("✅ {} exitoso en intento {}", operation_name, attempt);
+                return Ok(result);
+            }
+            Err(e) => {
+                if attempt >= max_attempts {
+                    log::error!("❌ {} falló después de {} intentos: {:?}", operation_name, max_attempts, e);
+                    return Err(e);
+                }
+                
+                let delay_ms = base_delay_ms * (2u64.pow(attempt - 1));
+                let delay_ms = delay_ms.min(30000); // Máximo 30 segundos
+                
+                log::warn!("⚠️  {} falló (intento {}): {:?}. Reintentando en {}ms", 
+                          operation_name, attempt, e, delay_ms);
+                
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                attempt += 1;
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct CameraPipeline {
@@ -189,11 +314,116 @@ impl CameraPipeline {
         let filesink = gst::ElementFactory::make("filesink")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create filesink".to_string()))?;
+        
+        // 🔍 PRE-FLIGHT CHECKS: Verificar conectividad antes de crear archivos
+        log::info!("🔍 Ejecutando verificaciones previas antes de crear archivo de grabación");
+        
+        // Verificar inicialización del pipeline
+        if let Err(e) = check_pipeline_initialization(&self.context).await {
+            log::error!("❌ Falló verificación de inicialización del pipeline: {:?}", e);
+            return Err(e);
+        }
+        
+        // Verificar conectividad RTSP con reintentos
+        if let Err(e) = retry_with_backoff(
+            || check_rtsp_connectivity(self.context.camera_rtsp_url()),
+            3, // máximo 3 intentos
+            2000, // delay base de 2 segundos
+            "verificación RTSP"
+        ).await {
+            log::error!("❌ Falló verificación de conectividad RTSP después de reintentos: {:?}", e);
+            return Err(VigilanteError::GStreamer(format!("RTSP connectivity check failed: {:?}", e)));
+        }
+        
+        log::info!("✅ Todas las verificaciones previas pasaron. Procediendo con creación de archivo.");
+        
         let timestamp = crate::camera::depends::utils::CameraUtils::format_timestamp();
         let date = timestamp.split('_').next().unwrap();
         let dir = self.context.storage_path().join(date);
         std::fs::create_dir_all(&dir).map_err(VigilanteError::Io)?;
-        let filename = format!("{}.mkv", date);
+        
+        // Find next available file number to prevent overwrites
+        let mut next_num = 1;
+        let mut existing_files = Vec::new();
+        
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.ends_with(".mkv") {
+                        // Check for exact date match (unnumbered file)
+                        if name == format!("{}.mkv", date) {
+                            existing_files.push(1);
+                        }
+                        // Check for numbered files
+                        else if name.starts_with(&format!("{}-", date)) && name.ends_with(".mkv") {
+                            if let Some(num_str) = name
+                                .strip_prefix(&format!("{}-", date))
+                                .and_then(|s| s.strip_suffix(".mkv"))
+                            {
+                                if let Ok(num) = num_str.parse::<i32>() {
+                                    if num > 0 {
+                                        existing_files.push(num);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Find the highest existing number
+        for &num in &existing_files {
+            next_num = next_num.max(num + 1);
+        }
+        
+        // Check for very recent files (informational only - pre-flight checks prevent issues)
+        let now = std::time::SystemTime::now();
+        let mut recent_files_count = 0;
+        let mut orphaned_small_files = 0;
+        
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|_| std::fs::read_dir("/tmp").unwrap()) {
+            if let Ok(entry) = entry {
+                if let Ok(metadata) = entry.metadata() {
+                    let file_size = metadata.len();
+                    
+                    // Check for very small files (< 1MB) that might be orphaned
+                    if file_size < 1024 * 1024 {
+                        orphaned_small_files += 1;
+                    }
+                    
+                    if let Ok(modified) = metadata.modified() {
+                        if let Ok(duration) = now.duration_since(modified) {
+                            // Count files modified in the last 5 minutes
+                            if duration.as_secs() < 300 {
+                                recent_files_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Log warnings but don't block - pre-flight checks should prevent issues
+        if recent_files_count >= 3 {
+            log::warn!(
+                "ℹ️  Información: {} archivos de grabación modificados en los últimos 5 minutos. Verificaciones previas deberían prevenir problemas.",
+                recent_files_count
+            );
+        }
+        
+        if orphaned_small_files >= 5 {
+            log::warn!(
+                "ℹ️  Información: {} archivos pequeños (< 1MB) detectados. Pueden ser de grabaciones anteriores fallidas.",
+                orphaned_small_files
+            );
+        }
+        
+        let filename = if next_num == 1 {
+            format!("{}.mkv", date)
+        } else {
+            format!("{}-{}.mkv", date, next_num)
+        };
         let path = dir.join(&filename);
         filesink.set_property("location", path.to_str().unwrap());
         filesink.set_property("sync", &false);
@@ -766,15 +996,31 @@ impl CameraPipeline {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // Every 5 minutes
                 loop {
                     interval.tick().await;
-                    // Check if recording file exists and log its status
+                    // Check if recording files exist and log their status
                     let timestamp = crate::camera::depends::utils::CameraUtils::format_timestamp();
                     let date = timestamp.split('_').next().unwrap();
                     let dir = context.storage_path().join(date);
-                    let filename = format!("{}.mkv", date);
-                    let path = dir.join(&filename);
-
-                    if path.exists() {
-                        if let Ok(metadata) = std::fs::metadata(&path) {
+                    
+                    if let Ok(entries) = std::fs::read_dir(&dir) {
+                        let mut latest_file = None;
+                        let mut latest_modified = std::time::SystemTime::UNIX_EPOCH;
+                        
+                        for entry in entries.flatten() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                if name.starts_with(&date) && name.ends_with(".mkv") {
+                                    if let Ok(metadata) = entry.metadata() {
+                                        if let Ok(modified) = metadata.modified() {
+                                            if modified > latest_modified {
+                                                latest_modified = modified;
+                                                latest_file = Some((name.to_string(), entry.path(), metadata));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if let Some((filename, path, metadata)) = latest_file {
                             let size_mb = metadata.len() / (1024 * 1024);
                             log::info!(
                                 "✅ Archivo creciendo: {} ({} MB) - path: {}",

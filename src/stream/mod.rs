@@ -205,6 +205,49 @@ fn audio_to_mpeg_ts(audio_data: &[u8]) -> Vec<bytes::Bytes> {
     packets
 }
 
+// ===== ENDPOINT MJPEG =====
+
+/// Endpoint para stream MJPEG
+pub async fn stream_mjpeg_handler(State(state): State<Arc<crate::AppState>>) -> impl IntoResponse {
+    use axum::body::Body;
+
+    let mut mjpeg_rx = state.streaming.mjpeg_tx.subscribe();
+
+    // Create a stream that yields MJPEG frames with multipart boundary
+    let stream = async_stream::stream! {
+        let boundary = "frame";
+        loop {
+            match mjpeg_rx.recv().await {
+                Ok(frame) => {
+                    if !frame.is_empty() {
+                        // MJPEG multipart response
+                        let header = format!(
+                            "--{}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                            boundary,
+                            frame.len()
+                        );
+                        yield Ok::<_, std::io::Error>(bytes::Bytes::from(header));
+                        yield Ok(frame);
+                        yield Ok::<_, std::io::Error>(bytes::Bytes::from("\r\n"));
+                    }
+                }
+                Err(_) => break, // Channel closed
+            }
+        }
+    };
+
+    let body = Body::from_stream(stream);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONNECTION, "close")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(body)
+        .unwrap()
+}
+
 // ===== ENDPOINTS WEBRTC =====
 
 /// Endpoint para iniciar conexión WebRTC - recibe offer del cliente
