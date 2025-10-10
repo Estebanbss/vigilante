@@ -307,6 +307,7 @@ impl CameraPipeline {
             .field("alignment", "au")
             .build();
         capsfilter_rec.set_property("caps", &rec_caps);
+        log::info!("🔧 Recording caps set: {:?}", rec_caps);
         let mux = gst::ElementFactory::make("matroskamux")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create matroskamux".to_string()))?;
@@ -427,6 +428,10 @@ impl CameraPipeline {
         let path = dir.join(&filename);
         filesink.set_property("location", path.to_str().unwrap());
         filesink.set_property("sync", &false);
+        // Avoid preroll blocking on live sources; let pipeline reach Playing without waiting
+        if filesink.find_property("async").is_some() {
+            filesink.set_property("async", &false);
+        }
 
         log::info!("📹 Grabación iniciada: {}", path.display());
 
@@ -567,6 +572,17 @@ impl CameraPipeline {
             );
         }
 
+        // Log matroskamux pad templates for debugging
+        log::info!("🔧 matroskamux pad templates:");
+        for template in mux.pad_template_list() {
+            log::info!(
+                "🔧 matroskamux pad template name='{}' direction={:?} presence={:?}",
+                template.name_template(),
+                template.direction(),
+                template.presence()
+            );
+        }
+
         pipeline.set_state(gst::State::Ready).map_err(|_| {
             VigilanteError::GStreamer("Failed to set pipeline to Ready".to_string())
         })?;
@@ -679,9 +695,41 @@ impl CameraPipeline {
             VigilanteError::GStreamer("Failed to link h264parse to tee".to_string())
         })?;
 
-        gst::Element::link_many([&queue_rec, &capsfilter_rec, &mux, &filesink]).map_err(|_| {
-            VigilanteError::GStreamer("Failed to link recording branch".to_string())
+        // --- Recording branch explicit linking ---
+        // queue_rec -> capsfilter_rec
+        gst::Element::link_many([&queue_rec, &capsfilter_rec]).map_err(|_| {
+            VigilanteError::GStreamer("Failed to link recording queue to capsfilter".to_string())
         })?;
+
+        // capsfilter_rec (src) -> matroskamux (request sink pad video_%u)
+        let capsfilter_rec_src = capsfilter_rec
+            .static_pad("src")
+            .ok_or_else(|| VigilanteError::GStreamer("capsfilter_rec has no src pad".to_string()))?;
+        let mux_video_pad = mux
+            .request_pad_simple("video_%u")
+            .ok_or_else(|| VigilanteError::GStreamer("Failed to request matroskamux video pad (video_%u)".to_string()))?;
+        match capsfilter_rec_src.link(&mux_video_pad) {
+            Ok(_) => log::info!("🔧 Linked recording capsfilter to matroskamux video pad: {}", mux_video_pad.name()),
+            Err(e) => {
+                log::error!("❌ Failed to link capsfilter_rec to matroskamux video pad: {:?}", e);
+                return Err(VigilanteError::GStreamer("Failed to link recording caps to mux".to_string()));
+            }
+        }
+
+        // matroskamux (src) -> filesink (sink)
+        let mux_src = mux
+            .static_pad("src")
+            .ok_or_else(|| VigilanteError::GStreamer("matroskamux has no src pad".to_string()))?;
+        let filesink_sink = filesink
+            .static_pad("sink")
+            .ok_or_else(|| VigilanteError::GStreamer("filesink has no sink pad".to_string()))?;
+        match mux_src.link(&filesink_sink) {
+            Ok(_) => log::info!("🔧 Linked matroskamux src to filesink"),
+            Err(e) => {
+                log::error!("❌ Failed to link matroskamux to filesink: {:?}", e);
+                return Err(VigilanteError::GStreamer("Failed to link mux to filesink".to_string()));
+            }
+        }
 
         gst::Element::link_many([
             &queue_motion,
