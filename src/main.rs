@@ -260,6 +260,32 @@ async fn metrics_handler() -> impl IntoResponse {
     }
 }
 
+// Sencillo healthcheck
+async fn health_handler() -> impl IntoResponse {
+    let body = serde_json::json!({
+        "status": "ok"
+    })
+    .to_string();
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+// HEAD para MJPEG: devuelve headers correctos sin cuerpo
+async fn mjpeg_head_handler() -> impl IntoResponse {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONNECTION, "close")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(Body::empty())
+        .unwrap()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
@@ -490,12 +516,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Router PROTEGIDO con autenticación flexible (header o query token)
     let app = Router::new()
         .route("/metrics", get(metrics_handler))
+        .route("/api/health", get(health_handler))
         .route("/api/webrtc/offer", post(webrtc_offer))
         .route("/api/webrtc/answer/:client_id", post(webrtc_answer))
         .route("/api/webrtc/close/:client_id", post(webrtc_close))
         .route("/api/stream/audio", get(stream_audio_handler))
         .route("/api/stream/av", get(stream_combined_av))
-        .route("/api/live/mjpeg", get(stream_mjpeg_handler))
+        .route("/api/live/mjpeg", get(stream_mjpeg_handler).head(mjpeg_head_handler))
         .route("/api/logs/stream", get(stream_logs_sse))
         .route("/api/logs/entries/:date", get(get_log_entries_handler))
         .route("/api/recordings/summary", get(recordings_summary_ws))
