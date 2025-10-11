@@ -472,6 +472,45 @@ impl CameraPipeline {
         appsink_motion.set_max_buffers(1);
         appsink_motion.set_drop(true);
 
+        // --- MJPEG live branch (for multipart/x-mixed-replace endpoint) ---
+        let queue_mjpeg = gst::ElementFactory::make("queue")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create queue_mjpeg".to_string()))?;
+        // Leaky to avoid backpressure on live preview
+        queue_mjpeg.set_property_from_str("leaky", "downstream");
+        queue_mjpeg.set_property("max-size-buffers", 2u32);
+        queue_mjpeg.set_property("max-size-time", 80_000_000u64);
+
+        let avdec_mjpeg = gst::ElementFactory::make("avdec_h264")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create avdec_mjpeg".to_string()))?;
+        let videoconvert_mjpeg = gst::ElementFactory::make("videoconvert")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create videoconvert_mjpeg".to_string()))?;
+        let videoscale_mjpeg = gst::ElementFactory::make("videoscale")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create videoscale_mjpeg".to_string()))?;
+        let capsfilter_mjpeg = gst::ElementFactory::make("capsfilter")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create capsfilter_mjpeg".to_string()))?;
+        let caps_mjpeg = gst::Caps::builder("video/x-raw")
+            .field("width", 1280i32)
+            .field("height", 720i32)
+            .build();
+        capsfilter_mjpeg.set_property("caps", &caps_mjpeg);
+
+        let jpegenc = gst::ElementFactory::make("jpegenc")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create jpegenc".to_string()))?;
+        if jpegenc.find_property("quality").is_some() {
+            jpegenc.set_property("quality", &85i32);
+        }
+        let appsink_mjpeg = gst_app::AppSink::builder().build();
+        appsink_mjpeg.set_property("emit-signals", &true);
+        appsink_mjpeg.set_property("sync", &false);
+        appsink_mjpeg.set_max_buffers(1);
+        appsink_mjpeg.set_drop(true);
+
         let queue_live = gst::ElementFactory::make("queue")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create queue_live".to_string()))?;
@@ -551,6 +590,13 @@ impl CameraPipeline {
                 &videoscale_motion,
                 &capsfilter_motion,
                 appsink_motion.upcast_ref(),
+                &queue_mjpeg,
+                &avdec_mjpeg,
+                &videoconvert_mjpeg,
+                &videoscale_mjpeg,
+                &capsfilter_mjpeg,
+                &jpegenc,
+                appsink_mjpeg.upcast_ref(),
                 &queue_live,
                 &mp4mux,
                 appsink_live.upcast_ref(),
@@ -741,6 +787,18 @@ impl CameraPipeline {
         ])
         .map_err(|_| VigilanteError::GStreamer("Failed to link motion branch".to_string()))?;
 
+        // --- MJPEG branch explicit linking ---
+        gst::Element::link_many([
+            &queue_mjpeg,
+            &avdec_mjpeg,
+            &videoconvert_mjpeg,
+            &videoscale_mjpeg,
+            &capsfilter_mjpeg,
+            &jpegenc,
+            appsink_mjpeg.upcast_ref(),
+        ])
+        .map_err(|_| VigilanteError::GStreamer("Failed to link MJPEG branch".to_string()))?;
+
         gst::Element::link_many([&mp4mux, appsink_live.upcast_ref()])
             .map_err(|_| VigilanteError::GStreamer("Failed to link live branch".to_string()))?;
 
@@ -784,6 +842,42 @@ impl CameraPipeline {
             .build();
         appsink_motion.set_callbacks(motion_callbacks);
         log::info!("🚶 Motion appsink callbacks configured");
+
+        // MJPEG callbacks: forward JPEG frames to broadcast channel
+        let mjpeg_tx = self.context.streaming.mjpeg_tx.clone();
+        let mjpeg_callbacks = gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = match sink.pull_sample() {
+                    Ok(sample) => sample,
+                    Err(err) => {
+                        log::warn!("🖼️ Failed to pull MJPEG sample: {:?}", err);
+                        return Err(gst::FlowError::Error);
+                    }
+                };
+
+                let buffer = match sample.buffer() {
+                    Some(buffer) => buffer,
+                    None => {
+                        log::warn!("🖼️ MJPEG sample missing buffer");
+                        return Ok(gst::FlowSuccess::Ok);
+                    }
+                };
+
+                let map = match buffer.map_readable() {
+                    Ok(map) => map,
+                    Err(err) => {
+                        log::warn!("🖼️ Failed to map MJPEG buffer: {:?}", err);
+                        return Err(gst::FlowError::Error);
+                    }
+                };
+
+                let data = Bytes::copy_from_slice(map.as_slice());
+                let _ = mjpeg_tx.send(data);
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build();
+        appsink_mjpeg.set_callbacks(mjpeg_callbacks);
+        log::info!("🖼️ MJPEG appsink callbacks configured");
 
         let context_weak = Arc::downgrade(&self.context);
         let latency_tracker_for_live = Arc::clone(&latency_tracker);
@@ -978,6 +1072,11 @@ impl CameraPipeline {
         let queue_live_sink_pad = queue_live.static_pad("sink").unwrap();
         tee_src_pad_live.link(&queue_live_sink_pad).unwrap();
         log::info!("🔧 Linked tee to live queue");
+
+    let tee_src_pad_mjpeg = tee.request_pad_simple("src_%u").unwrap();
+    let queue_mjpeg_sink_pad = queue_mjpeg.static_pad("sink").unwrap();
+    tee_src_pad_mjpeg.link(&queue_mjpeg_sink_pad).unwrap();
+    log::info!("🔧 Linked tee to mjpeg queue");
 
         let queue_live_src_pad = queue_live.static_pad("src").unwrap();
         let mp4mux_video_pad = mp4mux.request_pad_simple("video_%u").ok_or_else(|| {
