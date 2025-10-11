@@ -58,7 +58,7 @@ Todos los endpoints requieren autenticación:
 ### Almacenamiento
 - GET `/api/recordings/summary` — Resumen de grabaciones por día
 - GET `/api/recordings/day/:date` — Lista de grabaciones de un día específico (`YYYY-MM-DD`)
-- GET `/api/recordings/stream/*path` — Stream de una grabación existente
+- GET `/api/recordings/stream/*path` — Stream de una grabación existente (MP4 recomendado)
 - DELETE `/api/recordings/delete/*path` — Eliminar una grabación por ruta relativa (p. ej. `2025-09-28/recording_001.mkv`)
 - GET `/api/storage` — Resumen de almacenamiento
 - GET `/api/storage/info` — Información detallada de almacenamiento
@@ -141,7 +141,7 @@ Respuesta JSON (200):
 ### Stream de una grabación existente
 ```bash
 curl -H "Authorization: Bearer mi_token_seguro" \
-  http://localhost:8080/api/recordings/stream/2025-09-28/recording_001.mkv
+  http://localhost:8080/api/recordings/stream/2025-09-28/recording_001.mp4
 ```
 
 ### Eliminar grabación (DELETE)

@@ -308,10 +308,18 @@ impl CameraPipeline {
             .build();
         capsfilter_rec.set_property("caps", &rec_caps);
         log::info!("🔧 Recording caps set: {:?}", rec_caps);
-        let mux = gst::ElementFactory::make("matroskamux")
+        // MP4 muxer for recordings (browser-friendly)
+        let mp4mux_rec = gst::ElementFactory::make("mp4mux")
             .build()
-            .map_err(|_| VigilanteError::GStreamer("Failed to create matroskamux".to_string()))?;
-        mux.set_property("writing-app", "vigilante");
+            .map_err(|_| VigilanteError::GStreamer("Failed to create mp4mux for recording".to_string()))?;
+        // Place moov at the beginning for HTTP playback
+        if mp4mux_rec.find_property("faststart").is_some() {
+            mp4mux_rec.set_property("faststart", &true);
+        }
+        // Ensure proper timestamps for compatibility
+        if mp4mux_rec.find_property("presentation-time").is_some() {
+            mp4mux_rec.set_property("presentation-time", &true);
+        }
         let filesink = gst::ElementFactory::make("filesink")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create filesink".to_string()))?;
@@ -350,16 +358,16 @@ impl CameraPipeline {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if name.ends_with(".mkv") {
+                    if name.ends_with(".mp4") {
                         // Check for exact date match (unnumbered file)
-                        if name == format!("{}.mkv", date) {
+                        if name == format!("{}.mp4", date) {
                             existing_files.push(1);
                         }
                         // Check for numbered files
-                        else if name.starts_with(&format!("{}-", date)) && name.ends_with(".mkv") {
+                        else if name.starts_with(&format!("{}-", date)) && name.ends_with(".mp4") {
                             if let Some(num_str) = name
                                 .strip_prefix(&format!("{}-", date))
-                                .and_then(|s| s.strip_suffix(".mkv"))
+                                .and_then(|s| s.strip_suffix(".mp4"))
                             {
                                 if let Ok(num) = num_str.parse::<i32>() {
                                     if num > 0 {
@@ -421,9 +429,9 @@ impl CameraPipeline {
         }
         
         let filename = if next_num == 1 {
-            format!("{}.mkv", date)
+            format!("{}.mp4", date)
         } else {
-            format!("{}-{}.mkv", date, next_num)
+            format!("{}-{}.mp4", date, next_num)
         };
         let path = dir.join(&filename);
         filesink.set_property("location", path.to_str().unwrap());
@@ -582,7 +590,7 @@ impl CameraPipeline {
                 &tee,
                 &queue_rec,
                 &capsfilter_rec,
-                &mux,
+                &mp4mux_rec,
                 &filesink,
                 &queue_motion,
                 &avdec_motion,
@@ -618,11 +626,11 @@ impl CameraPipeline {
             );
         }
 
-        // Log matroskamux pad templates for debugging
-        log::info!("🔧 matroskamux pad templates:");
-        for template in mux.pad_template_list() {
+        // Log mp4mux (recording) pad templates for debugging
+        log::info!("🔧 mp4mux_rec pad templates:");
+        for template in mp4mux_rec.pad_template_list() {
             log::info!(
-                "🔧 matroskamux pad template name='{}' direction={:?} presence={:?}",
+                "🔧 mp4mux_rec pad template name='{}' direction={:?} presence={:?}",
                 template.name_template(),
                 template.direction(),
                 template.presence()
@@ -747,33 +755,33 @@ impl CameraPipeline {
             VigilanteError::GStreamer("Failed to link recording queue to capsfilter".to_string())
         })?;
 
-        // capsfilter_rec (src) -> matroskamux (request sink pad video_%u)
+        // capsfilter_rec (src) -> mp4mux_rec (request sink pad video_%u)
         let capsfilter_rec_src = capsfilter_rec
             .static_pad("src")
             .ok_or_else(|| VigilanteError::GStreamer("capsfilter_rec has no src pad".to_string()))?;
-        let mux_video_pad = mux
+        let rec_video_pad = mp4mux_rec
             .request_pad_simple("video_%u")
-            .ok_or_else(|| VigilanteError::GStreamer("Failed to request matroskamux video pad (video_%u)".to_string()))?;
-        match capsfilter_rec_src.link(&mux_video_pad) {
-            Ok(_) => log::info!("🔧 Linked recording capsfilter to matroskamux video pad: {}", mux_video_pad.name()),
+            .ok_or_else(|| VigilanteError::GStreamer("Failed to request mp4mux_rec video pad (video_%u)".to_string()))?;
+        match capsfilter_rec_src.link(&rec_video_pad) {
+            Ok(_) => log::info!("🔧 Linked recording capsfilter to mp4mux_rec video pad: {}", rec_video_pad.name()),
             Err(e) => {
-                log::error!("❌ Failed to link capsfilter_rec to matroskamux video pad: {:?}", e);
-                return Err(VigilanteError::GStreamer("Failed to link recording caps to mux".to_string()));
+                log::error!("❌ Failed to link capsfilter_rec to mp4mux_rec video pad: {:?}", e);
+                return Err(VigilanteError::GStreamer("Failed to link recording caps to mp4mux_rec".to_string()));
             }
         }
 
-        // matroskamux (src) -> filesink (sink)
-        let mux_src = mux
+        // mp4mux_rec (src) -> filesink (sink)
+        let mux_src = mp4mux_rec
             .static_pad("src")
-            .ok_or_else(|| VigilanteError::GStreamer("matroskamux has no src pad".to_string()))?;
+            .ok_or_else(|| VigilanteError::GStreamer("mp4mux_rec has no src pad".to_string()))?;
         let filesink_sink = filesink
             .static_pad("sink")
             .ok_or_else(|| VigilanteError::GStreamer("filesink has no sink pad".to_string()))?;
         match mux_src.link(&filesink_sink) {
-            Ok(_) => log::info!("🔧 Linked matroskamux src to filesink"),
+            Ok(_) => log::info!("🔧 Linked mp4mux_rec src to filesink"),
             Err(e) => {
-                log::error!("❌ Failed to link matroskamux to filesink: {:?}", e);
-                return Err(VigilanteError::GStreamer("Failed to link mux to filesink".to_string()));
+                log::error!("❌ Failed to link mp4mux_rec to filesink: {:?}", e);
+                return Err(VigilanteError::GStreamer("Failed to link mp4mux_rec to filesink".to_string()));
             }
         }
 
@@ -1154,7 +1162,7 @@ impl CameraPipeline {
                         
                         for entry in entries.flatten() {
                             if let Some(name) = entry.file_name().to_str() {
-                                if name.starts_with(&date) && name.ends_with(".mkv") {
+                                if name.starts_with(&date) && name.ends_with(".mp4") {
                                     if let Ok(metadata) = entry.metadata() {
                                         if let Ok(modified) = metadata.modified() {
                                             if modified > latest_modified {

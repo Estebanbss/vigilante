@@ -519,6 +519,7 @@ pub async fn storage_stream_sse() -> impl axum::response::IntoResponse {
 
 /// Streaming en vivo de grabaciones antiguas con soporte de formato
 pub async fn stream_live_recording(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
     axum::extract::Path(path): axum::extract::Path<String>,
     axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
     headers: axum::http::HeaderMap,
@@ -535,16 +536,17 @@ pub async fn stream_live_recording(
     };
 
     // Streaming continuo como si fuera en vivo
-    stream_continuous_recording(path, format, headers).await
+    stream_continuous_recording(state.storage.root.clone(), path, format, headers).await
 }
 
 /// Streaming continuo de grabaciones como si fueran en vivo
 async fn stream_continuous_recording(
+    storage_root: std::path::PathBuf,
     path: String,
     content_type: &str,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    let full_path = std::path::Path::new("storage").join(&path);
+    let full_path = storage_root.join(&path);
 
     if !full_path.exists() {
         return (StatusCode::NOT_FOUND, "Recording not found").into_response();
