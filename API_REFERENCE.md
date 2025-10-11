@@ -12,12 +12,26 @@
 
 Todos los endpoints requieren autenticación:
 - Header: `Authorization: Bearer <PROXY_TOKEN>` (recomendado)
-- Query parameter: `?token=<PROXY_TOKEN>` solo para endpoints de streaming y solo si está habilitado por configuración (`STREAM_TOKEN_IN_QUERY=1` o `STREAM_MJPEG_TOKEN_IN_QUERY=1`).
+ Query parameter: `?token=<PROXY_TOKEN>` solo para endpoints de streaming y solo si está habilitado por configuración (`STREAM_TOKEN_IN_QUERY=1` o `STREAM_MJPEG_TOKEN_IN_QUERY=1`).
+ Nota: El servidor prioriza el header `Authorization: Bearer ...`. Si `STREAM_TOKEN_IN_QUERY` está deshabilitado, las peticiones con `?token=` devolverán 401.
 
 ## Endpoints
 
 ### Sistema
 - GET `/api/health` — Healthcheck simple. Respuesta: `{ "status": "ok" }`
+ 
+ Para reproductores como ffplay/ffmpeg que aceptan cabeceras manuales, use el flag `-headers` y recuerde incluir el CRLF al final de la línea de cabecera:
+ 
+ ```bash
+ # ffplay
+ ffplay -headers "Authorization: Bearer mi_token_seguro\r\n" \
+   -fflags nobuffer -flags low_delay -framedrop -probesize 32 -analyzeduration 0 \
+   "http://localhost:8080/api/live/mjpeg"
+ 
+ # ffmpeg (descarga corta)
+ ffmpeg -headers "Authorization: Bearer mi_token_seguro\r\n" \
+   -fflags nobuffer -flags low_delay -i "http://localhost:8080/api/live/mjpeg" -t 5 dump.mkv
+ ```
 - GET `/api/status` — Estado general del sistema
 - GET `/metrics` — Métricas Prometheus (content-type: `text/plain; version=0.0.4`)
 
