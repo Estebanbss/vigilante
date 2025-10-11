@@ -240,7 +240,7 @@ pub async fn stream_mjpeg_handler(State(state): State<Arc<crate::AppState>>) -> 
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
+    .header(header::CONTENT_TYPE, "multipart/x-mixed-replace;boundary=frame")
         // Strong cache controls for proxies/CDNs that might otherwise buffer/transform
         .header(
             header::CACHE_CONTROL,

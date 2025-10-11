@@ -278,7 +278,7 @@ async fn health_handler() -> impl IntoResponse {
 async fn mjpeg_head_handler() -> impl IntoResponse {
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
+    .header(header::CONTENT_TYPE, "multipart/x-mixed-replace;boundary=frame")
         .header(
             header::CACHE_CONTROL,
             "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",

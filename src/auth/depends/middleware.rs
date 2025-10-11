@@ -22,7 +22,10 @@ impl AuthMiddleware {
         // Verificar bypass de dominio
         if let Some(bypass_domain) = &context.auth.bypass_base_domain {
             if let Some(host) = request.headers().get("host").and_then(|h| h.to_str().ok()) {
-                if host == bypass_domain {
+                // Normalizar Host: bajar a minúsculas y quitar ":puerto" si viene presente
+                let host_norm = host.to_lowercase();
+                let host_base = host_norm.split(':').next().unwrap_or(&host_norm);
+                if host_base == bypass_domain {
                     // Si hay secreto requerido, verificar
                     if let Some(required_secret) = &context.auth.bypass_domain_secret {
                         if let Some(provided_secret) = request
@@ -73,7 +76,15 @@ impl AuthMiddleware {
             let path = request.uri().path();
             let is_live_path = path.starts_with("/api/live/");
 
-            if is_live_path && context.auth.allow_query_token_streams {
+            // Para /api/live/* aceptar query token SIEMPRE.
+            // Para otros endpoints, respetar la bandera global allow_query_token_streams.
+            let allow_query_here = if is_live_path {
+                true
+            } else {
+                context.auth.allow_query_token_streams
+            };
+
+            if allow_query_here {
                 if let Some(query) = request.uri().query() {
                     if let Some(token_start) = query.find("token=") {
                         let token_part = &query[token_start + 6..];
