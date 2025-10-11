@@ -494,7 +494,7 @@ impl CameraPipeline {
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create capsfilter_mjpeg".to_string()))?;
         let caps_mjpeg = gst::Caps::builder("video/x-raw")
-            .field("width", 1920i32)
+            .field("width", 1280i32)
             .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
             .build();
         capsfilter_mjpeg.set_property("caps", &caps_mjpeg);
