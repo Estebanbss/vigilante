@@ -312,13 +312,22 @@ impl CameraPipeline {
         let mp4mux_rec = gst::ElementFactory::make("mp4mux")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create mp4mux for recording".to_string()))?;
-        // Place moov at the beginning for HTTP playback
+        // Configure MP4 for progressive playback and in-progress viewing
+        // 1) faststart: place moov early for completed files
         if mp4mux_rec.find_property("faststart").is_some() {
             mp4mux_rec.set_property("faststart", &true);
         }
-        // Ensure proper timestamps for compatibility
+        // 2) presentation-time: stable timestamps
         if mp4mux_rec.find_property("presentation-time").is_some() {
             mp4mux_rec.set_property("presentation-time", &true);
+        }
+        // 3) streamable + fragments: better mid-recording playback
+        if mp4mux_rec.find_property("streamable").is_some() {
+            mp4mux_rec.set_property("streamable", &true);
+        }
+        if mp4mux_rec.find_property("fragment-duration").is_some() {
+            // Fragment roughly every 2 seconds
+            mp4mux_rec.set_property("fragment-duration", &2000u32);
         }
         let filesink = gst::ElementFactory::make("filesink")
             .build()
@@ -572,10 +581,17 @@ impl CameraPipeline {
         let audioresample = gst::ElementFactory::make("audioresample")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create audioresample".to_string()))?;
+        let tee_audio = gst::ElementFactory::make("tee")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create tee_audio".to_string()))?;
         let voaacenc = gst::ElementFactory::make("voaacenc")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create voaacenc".to_string()))?;
         voaacenc.set_property("bitrate", 128000i32); // 128 kbps AAC
+        let voaacenc_rec = gst::ElementFactory::make("voaacenc")
+            .build()
+            .map_err(|_| VigilanteError::GStreamer("Failed to create voaacenc_rec".to_string()))?;
+        voaacenc_rec.set_property("bitrate", 128000i32);
         let appsink_audio = gst_app::AppSink::builder().build();
         appsink_audio.set_property("emit-signals", &true);
         appsink_audio.set_property("sync", &false);
@@ -612,7 +628,9 @@ impl CameraPipeline {
                 &alawdec,
                 &audioconvert,
                 &audioresample,
+                &tee_audio,
                 &voaacenc,
+                &voaacenc_rec,
             ])
             .map_err(|_| VigilanteError::GStreamer("Failed to add elements".to_string()))?;
 
@@ -646,19 +664,33 @@ impl CameraPipeline {
                 "Failed to request initial mp4mux audio pad (audio_%u)".to_string(),
             )
         })?;
+        let mp4mux_rec_audio_pad = mp4mux_rec.request_pad_simple("audio_%u").ok_or_else(|| {
+            VigilanteError::GStreamer(
+                "Failed to request initial mp4mux_rec audio pad (audio_%u)".to_string(),
+            )
+        })?;
+        log::info!(
+            "🔧 Reserved mp4mux_rec audio pad for recording branch: {}",
+            mp4mux_rec_audio_pad.name()
+        );
+        let mp4mux_rec_audio_pad_weak = mp4mux_rec_audio_pad.downgrade();
+
         log::info!(
             "🔧 Reserved mp4mux audio pad for live branch: {}",
             mp4mux_audio_pad.name()
         );
         let mp4mux_audio_pad_weak = mp4mux_audio_pad.downgrade();
 
-        let rtph264depay_clone = rtph264depay.clone();
+    let rtph264depay_clone = rtph264depay.clone();
         let rtppcmadepay_clone = rtppcmadepay.clone();
         let alawdec_clone = alawdec.clone();
         let audioconvert_clone = audioconvert.clone();
         let audioresample_clone = audioresample.clone();
         let voaacenc_clone = voaacenc.clone();
+    let voaacenc_rec_clone = voaacenc_rec.clone();
+    let tee_audio_clone = tee_audio.clone();
         let mp4mux_audio_pad_weak_clone = mp4mux_audio_pad_weak.clone();
+    let mp4mux_rec_audio_pad_weak_clone = mp4mux_rec_audio_pad_weak.clone();
         source.connect_pad_added(move |_, src_pad| {
             log::info!("🔧 RTSP source created new pad: {:?}", src_pad.name());
 
@@ -692,40 +724,46 @@ impl CameraPipeline {
                                             &alawdec_clone,
                                             &audioconvert_clone,
                                             &audioresample_clone,
-                                            &voaacenc_clone,
+                                            &tee_audio_clone,
                                         ]) {
-                                            log::error!("🔊 Failed to link audio branch: {:?}", e);
+                                            log::error!("🔊 Failed to link audio branch up to tee: {:?}", e);
                                         } else {
                                             log::info!("🔊 Successfully linked audio branch");
-                                            // Link voaacenc to mp4mux audio pad
-                                            if let Some(mp4mux_audio_pad) =
-                                                mp4mux_audio_pad_weak_clone.upgrade()
-                                            {
-                                                if mp4mux_audio_pad.is_linked() {
-                                                    log::info!(
-                                                        "🔊 mp4mux audio pad already linked, skipping"
-                                                    );
-                                                } else {
-                                                    let voaacenc_src_pad =
-                                                        voaacenc_clone.static_pad("src").unwrap();
-                                                    if let Err(e) =
-                                                        voaacenc_src_pad.link(&mp4mux_audio_pad)
-                                                    {
-                                                        log::error!(
-                                                            "🔊 Failed to link voaacenc to mp4mux: {:?}",
-                                                            e
-                                                        );
-                                                    } else {
-                                                        log::info!(
-                                                            "🔊 Successfully linked audio to mp4mux"
-                                                        );
+                                                    // Split audio to live and recording encoders via tee
+                                                    let tee_src_live = tee_audio_clone.request_pad_simple("src_%u").unwrap();
+                                                    let tee_src_rec = tee_audio_clone.request_pad_simple("src_%u").unwrap();
+                                                    let enc_live_sink = voaacenc_clone.static_pad("sink").unwrap();
+                                                    let enc_rec_sink = voaacenc_rec_clone.static_pad("sink").unwrap();
+                                                    if let Err(e) = tee_src_live.link(&enc_live_sink) {
+                                                        log::error!("🔊 Failed to link tee->voaacenc (live): {:?}", e);
                                                     }
-                                                }
-                                            } else {
-                                                log::error!(
-                                                    "🔊 mp4mux audio pad weak ref unavailable during linking"
-                                                );
-                                            }
+                                                    if let Err(e) = tee_src_rec.link(&enc_rec_sink) {
+                                                        log::error!("🔊 Failed to link tee->voaacenc_rec: {:?}", e);
+                                                    }
+
+                                                    // Link live AAC to mp4mux (live)
+                                                    if let Some(mp4mux_audio_pad) = mp4mux_audio_pad_weak_clone.upgrade() {
+                                                        let voaacenc_src_pad = voaacenc_clone.static_pad("src").unwrap();
+                                                        if !mp4mux_audio_pad.is_linked() {
+                                                            if let Err(e) = voaacenc_src_pad.link(&mp4mux_audio_pad) {
+                                                                log::error!("🔊 Failed to link live AAC to mp4mux: {:?}", e);
+                                                            } else {
+                                                                log::info!("🔊 Linked live AAC to mp4mux");
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // Link recording AAC to mp4mux_rec
+                                                    if let Some(mp4mux_rec_audio_pad) = mp4mux_rec_audio_pad_weak_clone.upgrade() {
+                                                        let voaacenc_rec_src_pad = voaacenc_rec_clone.static_pad("src").unwrap();
+                                                        if !mp4mux_rec_audio_pad.is_linked() {
+                                                            if let Err(e) = voaacenc_rec_src_pad.link(&mp4mux_rec_audio_pad) {
+                                                                log::error!("🔊 Failed to link rec AAC to mp4mux_rec: {:?}", e);
+                                                            } else {
+                                                                log::info!("🔊 Linked rec AAC to mp4mux_rec");
+                                                            }
+                                                        }
+                                                    }
                                         }
                                     }
                                 }

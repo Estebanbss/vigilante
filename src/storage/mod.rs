@@ -17,6 +17,7 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
+use tokio::time::{sleep, Duration};
 use chrono;
 use log::warn;
 use serde::Serialize;
@@ -575,7 +576,10 @@ async fn stream_continuous_recording(
             Ok(buffer) => axum::response::Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, content_type)
-                .header(header::CACHE_CONTROL, "no-cache")
+                .header(
+                    header::CACHE_CONTROL,
+                    "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
+                )
                 .header(header::TRANSFER_ENCODING, "chunked")
                 .body(axum::body::Body::from(buffer))
                 .unwrap(),
@@ -610,27 +614,78 @@ async fn stream_progressive_recording(
     file_path: &std::path::Path,
     content_type: &str,
 ) -> axum::response::Response {
-    // Para una implementación completa de streaming progresivo, necesitaríamos:
-    // 1. Mantener la conexión abierta
-    // 2. Leer chunks del archivo a medida que crece
-    // 3. Enviar chunks al cliente en tiempo real
-    // 4. Detectar cuando la grabación termina
+    use axum::body::Body;
 
-    // Por ahora, implementamos una versión que lee el archivo completo
-    // pero marca que es una grabación en vivo
-    match tokio::fs::read(file_path).await {
-        Ok(buffer) => {
-            axum::response::Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, content_type)
-                .header(header::CACHE_CONTROL, "no-cache")
-                .header(header::TRANSFER_ENCODING, "chunked")
-                .header("X-Recording-Status", "live") // Indicador de que es una grabación en vivo
-                .body(axum::body::Body::from(buffer))
-                .unwrap()
+    let path = file_path.to_path_buf();
+
+    // Create an async stream that tails the file as it grows
+    let stream = async_stream::stream! {
+        let mut offset: u64 = 0;
+
+        loop {
+            // Check current size
+            let size = match tokio::fs::metadata(&path).await {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    log::warn!("progressive_stream: metadata error: {}", e);
+                    break;
+                }
+            };
+
+            if size > offset {
+                // Read new data from offset..size
+                match File::open(&path).await {
+                    Ok(mut file) => {
+                        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+                            log::warn!("progressive_stream: seek error: {}", e);
+                            break;
+                        }
+
+                        let to_read = size - offset;
+                        // Read in chunks to avoid large allocations
+                        let mut remaining = to_read;
+                        let mut buf = vec![0u8; 64 * 1024]; // 64 KiB chunks
+                        while remaining > 0 {
+                            let chunk_len = std::cmp::min(remaining, buf.len() as u64) as usize;
+                            match file.read_exact(&mut buf[..chunk_len]).await {
+                                Ok(_) => {
+                                    yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..chunk_len]));
+                                    offset += chunk_len as u64;
+                                    remaining -= chunk_len as u64;
+                                }
+                                Err(e) => {
+                                    // If we hit EOF because writer is still flushing, wait and retry
+                                    log::debug!("progressive_stream: read error (likely EOF during write): {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("progressive_stream: open error: {}", e);
+                        break;
+                    }
+                }
+            } else {
+                // No new data yet, wait a bit
+                sleep(Duration::from_millis(400)).await;
+            }
         }
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "File read error").into_response(),
-    }
+    };
+
+    let body = Body::from_stream(stream);
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CACHE_CONTROL,
+            "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
+        )
+        .header(header::TRANSFER_ENCODING, "chunked")
+        .header("X-Recording-Status", "live")
+        .body(body)
+        .unwrap()
 }
 
 /// Manejar peticiones range para streaming parcial (seek/scrubbing)
@@ -678,7 +733,12 @@ async fn handle_range_request(
             );
             response
                 .headers_mut()
-                .insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+                .insert(
+                    header::CACHE_CONTROL,
+                    "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform"
+                        .parse()
+                        .unwrap(),
+                );
             *response.status_mut() = StatusCode::PARTIAL_CONTENT;
             return response;
         }
