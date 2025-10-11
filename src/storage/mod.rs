@@ -580,6 +580,9 @@ async fn stream_continuous_recording(
                     header::CACHE_CONTROL,
                     "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
                 )
+                .header(header::PRAGMA, "no-cache")
+                .header(header::EXPIRES, "0")
+                .header("Surrogate-Control", "no-store")
                 .header(header::TRANSFER_ENCODING, "chunked")
                 .body(axum::body::Body::from(buffer))
                 .unwrap(),
@@ -682,6 +685,9 @@ async fn stream_progressive_recording(
             header::CACHE_CONTROL,
             "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
         )
+        .header(header::PRAGMA, "no-cache")
+        .header(header::EXPIRES, "0")
+        .header("Surrogate-Control", "no-store")
         .header(header::TRANSFER_ENCODING, "chunked")
         .header("X-Recording-Status", "live")
         .body(body)
@@ -739,6 +745,15 @@ async fn handle_range_request(
                         .parse()
                         .unwrap(),
                 );
+            response
+                .headers_mut()
+                .insert(header::PRAGMA, "no-cache".parse().unwrap());
+            response
+                .headers_mut()
+                .insert(header::EXPIRES, "0".parse().unwrap());
+            response
+                .headers_mut()
+                .insert("surrogate-control", "no-store".parse().unwrap());
             *response.status_mut() = StatusCode::PARTIAL_CONTENT;
             return response;
         }
