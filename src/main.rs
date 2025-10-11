@@ -279,8 +279,12 @@ async fn mjpeg_head_handler() -> impl IntoResponse {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header(header::CONNECTION, "close")
+        .header(
+            header::CACHE_CONTROL,
+            "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
+        )
+        .header(header::PRAGMA, "no-cache")
+        .header(header::CONNECTION, "keep-alive")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(Body::empty())
         .unwrap()

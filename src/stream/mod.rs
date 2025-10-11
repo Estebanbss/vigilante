@@ -241,8 +241,14 @@ pub async fn stream_mjpeg_handler(State(state): State<Arc<crate::AppState>>) -> 
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header(header::CONNECTION, "close")
+        // Strong cache controls for proxies/CDNs that might otherwise buffer/transform
+        .header(
+            header::CACHE_CONTROL,
+            "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
+        )
+        .header(header::PRAGMA, "no-cache")
+        // Keep the connection alive for long-lived streaming
+        .header(header::CONNECTION, "keep-alive")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(body)
         .unwrap()
