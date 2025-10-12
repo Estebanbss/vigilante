@@ -1,7 +1,7 @@
 use axum::body::{to_bytes, Body, Bytes};
 use axum::{
     extract::Request,
-    http::{header, HeaderValue, Method, StatusCode},
+    http::{header, HeaderName, HeaderValue, Method, StatusCode},
     middleware::{from_fn, from_fn_with_state, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -172,6 +172,28 @@ async fn shutdown_signal() {
 async fn log_requests(req: Request<Body>, next: Next) -> Response {
     let method = req.method().clone();
     let uri = req.uri().clone();
+    // Log extra CORS preflight details (do not change the main structured line)
+    if method == Method::OPTIONS {
+        let origin = req
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let acr_method = req
+            .headers()
+            .get("access-control-request-method")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let acr_headers = req
+            .headers()
+            .get("access-control-request-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        info!(
+            "[CORS] Preflight origin={} request-method={} request-headers={}",
+            origin, acr_method, acr_headers
+        );
+    }
     let started = Instant::now();
     info!("→ {} {}", method, uri);
 
@@ -209,15 +231,23 @@ async fn log_requests(req: Request<Body>, next: Next) -> Response {
         return Response::from_parts(parts, body);
     }
 
-    let body_bytes = match to_bytes(body, 2048).await {
+    // Para respuestas no streaming, intentamos capturar hasta 16KB
+    let body_bytes = match to_bytes(body, 16 * 1024).await {
         Ok(bytes) => bytes,
         Err(_) => Bytes::new(),
     };
     let response_size = body_bytes.len() as u64;
 
-    // Incluir body en logs si es pequeño y parece JSON
-    let response_body = if body_bytes.len() < 2048 && body_bytes.starts_with(b"{") {
-        Some(String::from_utf8_lossy(&body_bytes).to_string())
+    // Incluir body en logs si es relativamente pequeño y JSON/Texto
+    let response_body = if response_size <= 16 * 1024 {
+        // JSON objeto o arreglo
+        if body_bytes.starts_with(b"{") || body_bytes.starts_with(b"[") {
+            Some(String::from_utf8_lossy(&body_bytes).to_string())
+        } else if content_type.starts_with("text/") {
+            Some(String::from_utf8_lossy(&body_bytes).to_string())
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -364,6 +394,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             header::CONTENT_TYPE,
             header::ACCEPT,
             header::USER_AGENT,
+            HeaderName::from_static("cache-control"),
+            HeaderName::from_static("pragma"),
+            HeaderName::from_static("last-event-id"),
+            HeaderName::from_static("x-requested-with"),
         ]);
 
     let storage_path_buf = PathBuf::from(&storage_path);
