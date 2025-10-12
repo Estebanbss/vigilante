@@ -949,6 +949,9 @@ impl CameraPipeline {
                 };
 
                 let data = Bytes::copy_from_slice(map.as_slice());
+                if log::log_enabled!(log::Level::Debug) {
+                    log::debug!("🖼️ Emitting MJPEG frame, {} bytes", data.len());
+                }
                 let _ = mjpeg_tx.send(data);
                 Ok(gst::FlowSuccess::Ok)
             })
