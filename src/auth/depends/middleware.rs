@@ -19,6 +19,10 @@ impl AuthMiddleware {
         request: Request<Body>,
         next: Next,
     ) -> Result<Response, StatusCode> {
+        let method = request.method().clone();
+        let full_path = request.uri().to_string();
+        log::debug!("🔐 Auth middleware received {} {}", method, full_path);
+
         // Verificar bypass de dominio
         if let Some(bypass_domain) = &context.auth.bypass_base_domain {
             if let Some(host) = request.headers().get("host").and_then(|h| h.to_str().ok()) {
@@ -34,13 +38,22 @@ impl AuthMiddleware {
                             .and_then(|s| s.to_str().ok())
                         {
                             if provided_secret == required_secret {
+                                log::debug!(
+                                    "🔓 Bypass auth granted for host {} via header secret",
+                                    host_base
+                                );
                                 return Ok(next.run(request).await);
                             }
                         }
                         // Secreto no coincide o no proporcionado, rechazar
+                        log::warn!(
+                            "🔐 Bypass secret mismatch for host {}, rejecting request",
+                            host_base
+                        );
                         return Err(StatusCode::UNAUTHORIZED);
                     } else {
                         // No hay secreto requerido, permitir bypass
+                        log::debug!("🔓 Bypass auth granted for host {} without secret", host_base);
                         return Ok(next.run(request).await);
                     }
                 }
@@ -61,10 +74,12 @@ impl AuthMiddleware {
             .and_then(|s| {
                 // soportar tanto "Bearer TOKEN" como solo el token
                 if s.to_lowercase().starts_with("bearer ") {
+                    log::debug!("🔑 Token provided via Authorization header for {}", full_path);
                     Some(s[7..].trim().to_string())
                 } else if s.is_empty() {
                     None
                 } else {
+                    log::debug!("🔑 Token provided via non-Bearer Authorization header for {}", full_path);
                     Some(s)
                 }
             });
@@ -89,6 +104,7 @@ impl AuthMiddleware {
                     if let Some(token_start) = query.find("token=") {
                         let token_part = &query[token_start + 6..];
                         let token = token_part.split('&').next().unwrap_or(token_part);
+                        log::debug!("🔑 Token sourced from query string for {}", full_path);
                         provided = Some(token.to_string());
                     }
                 }
@@ -98,6 +114,7 @@ impl AuthMiddleware {
         // Compare provided token (as &str) with manager expected token
         let provided_ref: Option<&str> = provided.as_deref();
         if manager.is_authorised(provided_ref) {
+            log::debug!("✅ Auth success for {}", full_path);
             Ok(next.run(request).await)
         } else {
             // Log a masked version of the provided token for debugging (don't leak full token)

@@ -263,6 +263,8 @@ async fn metrics_handler() -> impl IntoResponse {
 
 // Sencillo healthcheck
 async fn health_handler() -> impl IntoResponse {
+    log::info!("🩺 Health endpoint hit");
+
     let body = serde_json::json!({
         "status": "ok"
     })

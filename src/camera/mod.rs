@@ -93,8 +93,13 @@ pub async fn start_camera_pipeline(
 
             // Check pipeline state
             if let Some(ref pipeline) = camera_pipeline.pipeline {
-                // Get current state - pipeline.state() returns (result, current_state, pending_state)
-                let (_, current_state, _) = pipeline.state(gst::ClockTime::NONE);
+                let current_state = pipeline.current_state();
+                let pending_state = pipeline.pending_state();
+                log::debug!(
+                    "🩺 Pipeline health snapshot - current: {:?}, pending: {:?}",
+                    current_state, pending_state
+                );
+
                 match current_state {
                     gst::State::Playing => {
                         log::debug!("✅ Pipeline health check: OK (Playing)");
@@ -104,6 +109,12 @@ pub async fn start_camera_pipeline(
                             "⚠️ Pipeline health check: State is {:?}, expected Playing",
                             pipeline_state
                         );
+                        if pending_state != gst::State::VoidPending {
+                            log::warn!(
+                                "⏳ Pending state detected during health check: {:?}",
+                                pending_state
+                            );
+                        }
                         // Try to restart pipeline
                         log::info!("🔄 Attempting to restart pipeline...");
                         if let Err(e) = pipeline.set_state(gst::State::Playing) {
