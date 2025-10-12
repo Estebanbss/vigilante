@@ -110,6 +110,8 @@ pub async fn start_camera_pipeline(
                             log::error!("❌ Failed to restart pipeline: {}", e);
                             *state.gstreamer.pipeline_running.lock().unwrap() = false;
                             return Err(e.into());
+                        } else {
+                            log::info!("✅ Pipeline restarted successfully");
                         }
                     }
                 }
