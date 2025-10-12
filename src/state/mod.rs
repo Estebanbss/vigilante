@@ -30,6 +30,8 @@ pub struct StorageConfig {
 pub struct StreamingState {
     pub audio_mp3_tx: broadcast::Sender<bytes::Bytes>,
     pub mjpeg_tx: broadcast::Sender<bytes::Bytes>,
+    /// SSE updates for current recording metadata (JSON lines)
+    pub recording_meta_tx: broadcast::Sender<String>,
     pub audio_available: Arc<StdMutex<bool>>,
     pub last_audio_timestamp: Arc<StdMutex<Option<std::time::Instant>>>,
     pub mp4_init_segments: Arc<StdMutex<Vec<Bytes>>>,

@@ -134,8 +134,9 @@ use camera::start_camera_pipeline;
 use logs::{get_log_entries_handler, stream_logs_sse};
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
-    delete_recording, recordings_by_day, recordings_summary_ws, refresh_recording_snapshot,
-    storage_info, storage_overview, storage_stream_sse, stream_live_recording, system_storage_info,
+    delete_recording, recordings_by_day, recordings_by_day_sse, recordings_summary_ws,
+    refresh_recording_snapshot, storage_info, storage_overview, storage_stream_sse,
+    stream_live_recording, system_storage_info, current_recording_meta_sse,
 };
 use stream::{stream_audio_handler, stream_combined_av, stream_mjpeg_handler, webrtc_answer, webrtc_close, webrtc_offer};
 use vigilante::status::get_system_status;
@@ -401,6 +402,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (log_tx, _log_rx) = broadcast::channel::<String>(100);
     let notifications = Arc::new(NotificationManager::new());
 
+        // Initialize recording_meta_tx channel
+        let (recording_meta_tx, _) = broadcast::channel(128);
+
     // Initialize auth manager
     let auth_manager = AuthManager::new(auth::AuthConfig {
         bearer_token: Some(proxy_token.clone()),
@@ -429,6 +433,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mp4_init_scan_tail: Arc::new(StdMutex::new(Vec::new())),
         mp4_init_warned_before_moov: Arc::new(StdMutex::new(false)),
         live_latency_snapshot: Arc::new(StdMutex::new(state::LatencySnapshot::default())),
+            recording_meta_tx,
     });
 
     let logging_state = Arc::new(state::LoggingState {
@@ -531,6 +536,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/logs/entries/:date", get(get_log_entries_handler))
         .route("/api/recordings/summary", get(recordings_summary_ws))
         .route("/api/recordings/day/:date", get(recordings_by_day))
+    .route("/api/recordings/day/:date/stream", get(recordings_by_day_sse))
+    .route("/api/recordings/current/stream", get(current_recording_meta_sse))
         .route("/api/storage", get(storage_overview))
         .route("/api/storage/info", get(storage_info))
         .route("/api/system/storage", get(system_storage_info))

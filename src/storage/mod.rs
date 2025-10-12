@@ -261,8 +261,86 @@ impl Default for StorageManager {
     }
 }
 
-pub async fn delete_recording() -> impl axum::response::IntoResponse {
-    "OK"
+#[axum::debug_handler]
+pub async fn delete_recording(
+    axum::extract::Path(path): axum::extract::Path<String>,
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
+) -> impl axum::response::IntoResponse {
+    use axum::response::Response;
+
+    // Normalizar y validar la ruta relativa (evitar traversal)
+    let mut cleaned = path.replace('\\', "/");
+    while cleaned.starts_with('/') {
+        cleaned.remove(0);
+    }
+    let parts: Vec<&str> = cleaned
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parts.iter().any(|p| *p == "." || *p == "..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Invalid path: directory traversal not allowed",
+        )
+            .into_response();
+    }
+    if parts.len() < 2 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Invalid path: expected 'YYYY-MM-DD/filename.mp4'",
+        )
+            .into_response();
+    }
+
+    let full_path = state.storage_root().join(parts.join("/"));
+
+    if !full_path.exists() {
+        return (StatusCode::NOT_FOUND, "Recording not found").into_response();
+    }
+    if !full_path.is_file() {
+        return (StatusCode::BAD_REQUEST, "Target is not a file").into_response();
+    }
+
+    // Evitar borrar grabación en curso
+    if is_file_being_recorded(&full_path).await {
+        return (
+            StatusCode::LOCKED,
+            "Recording is in progress; cannot delete right now",
+        )
+            .into_response();
+    }
+
+    // Intentar borrar
+    match tokio::fs::remove_file(&full_path).await {
+        Ok(_) => {
+            // Intentar refrescar snapshot (no crítico si falla)
+            if let Err(e) = crate::storage::refresh_recording_snapshot(&state).await {
+                log::warn!("Failed to refresh recording snapshot after delete: {}", e);
+            }
+
+            let body = serde_json::json!({
+                "deleted": true,
+                "path": path,
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(
+                    header::CACHE_CONTROL,
+                    "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
+                )
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap()
+        }
+        Err(e) => {
+            log::error!("Failed to delete recording {}: {}", full_path.display(), e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to delete recording: {}", e),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[axum::debug_handler]
@@ -516,6 +594,89 @@ pub async fn refresh_recording_snapshot(
 }
 pub async fn storage_stream_sse() -> impl axum::response::IntoResponse {
     "OK"
+}
+
+/// SSE de metadatos de la grabación en curso
+pub async fn current_recording_meta_sse(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
+) -> impl axum::response::IntoResponse {
+    use axum::body::Body;
+
+    let mut rx = state.streaming.recording_meta_tx.subscribe();
+
+    let stream = async_stream::stream! {
+        // Enviar un ping inicial para abrir el stream
+        yield Ok::<_, std::io::Error>(bytes::Bytes::from("event: open\n\n"));
+        loop {
+            match rx.recv().await {
+                Ok(line) => {
+                    let mut buf = String::new();
+                    buf.push_str("data: ");
+                    buf.push_str(&line);
+                    buf.push_str("\n\n");
+                    yield Ok(bytes::Bytes::from(buf));
+                }
+                Err(_) => break,
+            }
+        }
+    };
+
+    let body = Body::from_stream(stream);
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform")
+        .header(header::PRAGMA, "no-cache")
+        .header(header::EXPIRES, "0")
+        .header("surrogate-control", "no-store")
+        .header("x-accel-buffering", "no")
+        .body(body)
+        .unwrap()
+}
+
+/// SSE reactivo de grabaciones por día
+pub async fn recordings_by_day_sse(
+    axum::extract::Path(date): axum::extract::Path<String>,
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
+) -> impl axum::response::IntoResponse {
+    use axum::body::Body;
+
+    let storage_path = state.storage_path().clone();
+
+    let stream = async_stream::stream! {
+        // Pequeño poll reactivo cada 3s
+        let mut last_payload = String::new();
+        loop {
+            let day_path = storage_path.join(&date);
+            let list = if day_path.is_dir() {
+                crate::storage::list_recordings_in_day(&day_path, &date).await.unwrap_or_default()
+            } else { Vec::new() };
+            let json = serde_json::to_string(&list).unwrap_or("[]".to_string());
+            if json != last_payload {
+                last_payload = json.clone();
+                let mut buf = String::new();
+                buf.push_str("data: ");
+                buf.push_str(&json);
+                buf.push_str("\n\n");
+                yield Ok::<_, std::io::Error>(bytes::Bytes::from(buf));
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    };
+
+    let body = Body::from_stream(stream);
+
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform")
+        .header(header::PRAGMA, "no-cache")
+        .header(header::EXPIRES, "0")
+        .header("surrogate-control", "no-store")
+        .header("x-accel-buffering", "no")
+        .body(body)
+        .unwrap()
 }
 
 /// Streaming en vivo de grabaciones antiguas con soporte de formato

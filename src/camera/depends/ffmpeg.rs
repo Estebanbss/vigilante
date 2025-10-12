@@ -455,6 +455,37 @@ impl CameraPipeline {
         let runtime_handle = Handle::current();
         let latency_tracker = Arc::new(StdMutex::new(LatencyTracker::default()));
 
+        // Spawn periodic metadata broadcaster for the current recording
+        {
+            let recording_path = path.clone();
+            let meta_tx = self.context.streaming.recording_meta_tx.clone();
+            let start_instant = std::time::Instant::now();
+            tokio::spawn(async move {
+                loop {
+                    // Gather basic metadata: size and elapsed seconds
+                    let mut size_bytes: u64 = 0;
+                    if let Ok(meta) = tokio::fs::metadata(&recording_path).await {
+                        size_bytes = meta.len();
+                    }
+
+                    let elapsed = start_instant.elapsed();
+                    let payload = serde_json::json!({
+                        "event": "recording_meta",
+                        "path": recording_path.display().to_string(),
+                        "size_bytes": size_bytes,
+                        "elapsed_seconds": elapsed.as_secs_f64(),
+                        // Hints for clients: these are dynamic during in-progress recording
+                        "in_progress": true,
+                        "ts": chrono::Utc::now(),
+                    })
+                    .to_string();
+                    let _ = meta_tx.send(payload);
+
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            });
+        }
+
         let queue_motion = gst::ElementFactory::make("queue")
             .build()
             .map_err(|_| VigilanteError::GStreamer("Failed to create queue_motion".to_string()))?;
