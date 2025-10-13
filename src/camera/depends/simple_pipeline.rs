@@ -133,6 +133,7 @@ pub async fn start_simple_pipeline(
                         let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
                         let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                         let data = Bytes::copy_from_slice(map.as_ref());
+                        log::debug!("Emitiendo MJPEG frame, {} bytes", data.len());
                         let _ = tx_mjpeg.send(data);
                         Ok(gst::FlowSuccess::Ok)
                     })
