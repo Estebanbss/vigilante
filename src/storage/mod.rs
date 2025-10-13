@@ -25,6 +25,10 @@ use serde::Serialize;
 use log::warn;
 use std::sync::Arc;
 use std::sync::Mutex;
+// GStreamer discovery for media metadata (duration, codecs)
+use gstreamer_pbutils::Discoverer; // main discoverer
+use gstreamer_pbutils::DiscovererInfo; // info struct
+use gstreamer_pbutils::DiscovererResult; // result enum
 
 #[cfg(unix)]
 use std::ffi::CString;
@@ -260,6 +264,37 @@ impl Default for StorageManager {
     }
 }
 
+/// Intenta extraer la duración del archivo de video (segundos, f64).
+/// Usa GStreamer Discoverer de forma bloqueante dentro de spawn_blocking para no bloquear el runtime.
+async fn probe_duration_seconds(path: &std::path::Path) -> Option<f64> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        // Inicializar GStreamer si no está listo
+        let _ = gstreamer::init();
+
+    let timeout = gstreamer::ClockTime::from_mseconds(5_000);
+    let discoverer = Discoverer::new(timeout).ok()?; // timeout 5s
+        let uri = format!("file://{}", path.display());
+        let info: DiscovererInfo = discoverer.discover_uri(&uri).ok()?;
+        match info.result() {
+            DiscovererResult::Ok | DiscovererResult::Timeout | DiscovererResult::MissingPlugins => {
+                if let Some(dur) = info.duration() {
+                    // Convertir GstClockTime (nanosegundos) a segundos f64
+                    let secs = (dur.nseconds() as f64) / 1_000_000_000.0;
+                    if secs.is_finite() && secs > 0.0 {
+                        return Some(secs);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 #[axum::debug_handler]
 pub async fn delete_recording(
     axum::extract::Path(path): axum::extract::Path<String>,
@@ -443,8 +478,8 @@ async fn list_recordings_in_day(
                                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                             let modified_dt = chrono::DateTime::<chrono::Utc>::from(modified);
 
-                            // Calcular duración aproximada (esto es básico, se puede mejorar)
-                            let duration = None; // TODO: implementar extracción de duración con ffprobe
+                            // Calcular duración real (mejorable): intentar con GStreamer
+                            let duration = probe_duration_seconds(&path).await;
 
                             recordings.push(RecordingEntry {
                                 name: file_name.clone(),
@@ -479,7 +514,7 @@ async fn list_recordings_in_day(
 pub async fn recordings_by_day(
     axum::extract::Path(date): axum::extract::Path<String>,
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-) -> Result<axum::Json<Vec<crate::RecordingEntry>>, VigilanteError> {
+) -> Result<axum::response::Response, VigilanteError> {
     let storage_path = state.storage_path();
     let day_path = storage_path.join(&date);
 
@@ -494,7 +529,16 @@ pub async fn recordings_by_day(
     // Obtener lista de grabaciones del día
     let recordings = list_recordings_in_day(&day_path, &date).await?;
 
-    Ok(axum::Json(recordings))
+    // Responder con JSON sin cacheo para reflejar cambios en disco en tiempo real
+    let payload = serde_json::to_string(&recordings).unwrap_or("[]".to_string());
+    let mut resp = axum::response::Response::new(axum::body::Body::from(payload));
+    resp.headers_mut().insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    resp.headers_mut().insert(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform".parse().unwrap());
+    resp.headers_mut().insert(header::PRAGMA, "no-cache".parse().unwrap());
+    resp.headers_mut().insert(header::EXPIRES, "0".parse().unwrap());
+    resp.headers_mut().insert("surrogate-control", "no-store".parse().unwrap());
+    resp.headers_mut().insert("x-accel-buffering", "no".parse().unwrap());
+    Ok(resp.into())
 }
 
 async fn calculate_directory_size(day_path: &std::path::Path) -> Result<u64, VigilanteError> {
@@ -751,6 +795,7 @@ async fn stream_continuous_recording(
                     .header(header::PRAGMA, "no-cache")
                     .header(header::EXPIRES, "0")
                     .header("Surrogate-Control", "no-store")
+                    .header("x-accel-buffering", "no")
                     .header(header::ACCEPT_RANGES, "bytes")
                     .body(body)
                     .unwrap()
@@ -927,6 +972,9 @@ async fn handle_range_request(
             response
                 .headers_mut()
                 .insert("surrogate-control", "no-store".parse().unwrap());
+            response
+                .headers_mut()
+                .insert("x-accel-buffering", "no".parse().unwrap());
             *response.status_mut() = StatusCode::PARTIAL_CONTENT;
             return response;
         }
