@@ -18,6 +18,8 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use tokio::time::{sleep, Duration};
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
 use chrono;
 use log::warn;
 use serde::Serialize;
@@ -732,22 +734,31 @@ async fn stream_continuous_recording(
         // Streaming progresivo para archivos en grabación
         return stream_progressive_recording(&full_path, content_type).await;
     } else {
-        // Streaming normal para archivos completados
-        match tokio::fs::read(&full_path).await {
-            Ok(buffer) => axum::response::Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, content_type)
-                .header(
-                    header::CACHE_CONTROL,
-                    "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
-                )
-                .header(header::PRAGMA, "no-cache")
-                .header(header::EXPIRES, "0")
-                .header("Surrogate-Control", "no-store")
-                .header(header::TRANSFER_ENCODING, "chunked")
-                .body(axum::body::Body::from(buffer))
-                .unwrap(),
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "File read error").into_response(),
+        // Streaming normal para archivos completados usando stream real
+        match File::open(&full_path).await {
+            Ok(file) => {
+                use axum::body::Body;
+                use tokio_util::io::ReaderStream;
+
+                let stream = ReaderStream::new(file);
+                let body = Body::from_stream(stream);
+
+                axum::response::Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, content_type)
+                    .header(header::CONTENT_LENGTH, file_size.to_string())
+                    .header(
+                        header::CACHE_CONTROL,
+                        "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
+                    )
+                    .header(header::PRAGMA, "no-cache")
+                    .header(header::EXPIRES, "0")
+                    .header("Surrogate-Control", "no-store")
+                    .header(header::ACCEPT_RANGES, "bytes")
+                    .body(body)
+                    .unwrap()
+            }
+            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "File open error").into_response(),
         }
     }
 }
@@ -870,6 +881,10 @@ async fn handle_range_request(
             let end: u64 = parts[1].parse().unwrap_or(file_size - 1);
             let content_length = end - start + 1;
 
+            // Limit range size to prevent memory exhaustion (max 10MB per range request)
+            const MAX_RANGE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+            let actual_content_length = std::cmp::min(content_length, MAX_RANGE_SIZE);
+
             let mut file = match File::open(full_path).await {
                 Ok(f) => f,
                 Err(_) => {
@@ -878,7 +893,7 @@ async fn handle_range_request(
             };
 
             file.seek(std::io::SeekFrom::Start(start)).await.unwrap();
-            let mut buffer = vec![0; content_length as usize];
+            let mut buffer = vec![0; actual_content_length as usize];
             file.read_exact(&mut buffer).await.unwrap();
 
             let mut response = axum::response::Response::new(axum::body::Body::from(buffer));
@@ -887,14 +902,14 @@ async fn handle_range_request(
                 .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
             response.headers_mut().insert(
                 header::CONTENT_LENGTH,
-                content_length.to_string().parse().unwrap(),
+                actual_content_length.to_string().parse().unwrap(),
             );
             response
                 .headers_mut()
                 .insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
             response.headers_mut().insert(
                 header::CONTENT_RANGE,
-                format!("bytes {}-{}/{}", start, end, file_size)
+                format!("bytes {}-{}/{}", start, start + actual_content_length - 1, file_size)
                     .parse()
                     .unwrap(),
             );
