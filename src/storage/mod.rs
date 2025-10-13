@@ -25,6 +25,7 @@ use serde::Serialize;
 use log::warn;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::collections::HashMap;
 // GStreamer discovery for media metadata (duration, codecs)
 use gstreamer_pbutils::Discoverer; // main discoverer
 use gstreamer_pbutils::DiscovererInfo; // info struct
@@ -264,6 +265,34 @@ impl Default for StorageManager {
     }
 }
 
+// Cache para recordar el instante en que "vimos por primera vez" un archivo en curso.
+lazy_static::lazy_static! {
+    static ref LIVE_START_SEEN: Mutex<HashMap<String, std::time::SystemTime>> = Mutex::new(HashMap::new());
+}
+
+/// Estima el instante de inicio de una grabación en curso.
+/// - Preferimos metadata.created() si está disponible.
+/// - En Linux puede no estar; entonces usamos un cache de "primer visto" por ruta.
+fn estimate_started_at(path: &std::path::Path, meta: &std::fs::Metadata) -> std::time::SystemTime {
+    if let Ok(created) = meta.created() {
+        return created;
+    }
+    let key = path.to_string_lossy().to_string();
+    let now = std::time::SystemTime::now();
+    let mut map = LIVE_START_SEEN.lock().unwrap();
+    *map.entry(key).or_insert(now)
+}
+
+/// Calcula duración en segundos de una grabación en curso usando inicio estimado.
+fn live_duration_seconds(path: &std::path::Path, meta: &std::fs::Metadata) -> Option<f64> {
+    let started = estimate_started_at(path, meta);
+    if let Ok(elapsed) = std::time::SystemTime::now().duration_since(started) {
+        let secs = elapsed.as_secs_f64();
+        if secs.is_finite() && secs > 0.0 { return Some(secs); }
+    }
+    None
+}
+
 /// Intenta extraer la duración del archivo de video (segundos, f64).
 /// Usa GStreamer Discoverer de forma bloqueante dentro de spawn_blocking para no bloquear el runtime.
 async fn probe_duration_seconds(path: &std::path::Path) -> Option<f64> {
@@ -479,7 +508,12 @@ async fn list_recordings_in_day(
                             let modified_dt = chrono::DateTime::<chrono::Utc>::from(modified);
 
                             // Calcular duración real (mejorable): intentar con GStreamer
-                            let duration = probe_duration_seconds(&path).await;
+                            let mut duration = probe_duration_seconds(&path).await;
+
+                            // Si está en curso y no hay duración descubierta, dar una estimación viva
+                            if duration.is_none() && is_file_being_recorded(&path).await {
+                                duration = live_duration_seconds(&path, &metadata);
+                            }
 
                             recordings.push(RecordingEntry {
                                 name: file_name.clone(),
@@ -920,8 +954,14 @@ async fn handle_range_request(
         let parts: Vec<&str> = start_end.split('-').collect();
         if parts.len() == 2 {
             let start: u64 = parts[0].parse().unwrap_or(0);
-            let end: u64 = parts[1].parse().unwrap_or(file_size - 1);
-            let content_length = end - start + 1;
+            // Validar que el inicio esté dentro del tamaño actual
+            if start >= file_size {
+                return (StatusCode::RANGE_NOT_SATISFIABLE, "Invalid range").into_response();
+            }
+            let mut end: u64 = parts[1].parse().unwrap_or(file_size.saturating_sub(1));
+            // Asegurar que el final no exceda el tamaño actual
+            end = std::cmp::min(end, file_size.saturating_sub(1));
+            let content_length = end.saturating_sub(start) + 1;
 
             // Limit range size to prevent memory exhaustion (max 10MB per range request)
             const MAX_RANGE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
