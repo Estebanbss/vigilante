@@ -26,6 +26,7 @@ use log::warn;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::collections::HashMap;
+use std::io::Read as _;
 // GStreamer discovery for media metadata (duration, codecs)
 use gstreamer_pbutils::Discoverer; // main discoverer
 use gstreamer_pbutils::DiscovererInfo; // info struct
@@ -324,6 +325,85 @@ async fn probe_duration_seconds(path: &std::path::Path) -> Option<f64> {
     .flatten()
 }
 
+/// Lector rápido de duración para MP4 (mvhd) leyendo los primeros ~2MB.
+/// Evita invocar GStreamer cuando no es necesario y suele ser más veloz.
+fn probe_mp4_duration_quick(path: &std::path::Path) -> Option<f64> {
+    // Solo aplica a .mp4
+    if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("mp4")) != Some(true) {
+        return None;
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; 2 * 1024 * 1024]; // 2MB
+    let n = file.read(&mut buf).ok()?;
+    let data = &buf[..n];
+
+    let mut pos = 0usize;
+    while pos + 8 <= data.len() {
+        let size = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let kind = &data[pos + 4..pos + 8];
+        if size < 8 { break; }
+        if kind == b"moov" {
+            // Buscar mvhd dentro de moov
+            let moov_end = pos.saturating_add(size).min(data.len());
+            let mut cpos = pos + 8;
+            while cpos + 8 <= moov_end {
+                let csize = u32::from_be_bytes([
+                    data[cpos], data[cpos + 1], data[cpos + 2], data[cpos + 3],
+                ]) as usize;
+                if csize < 8 { break; }
+                let ctype = &data[cpos + 4..cpos + 8];
+                if ctype == b"mvhd" {
+                    // Parse mvhd
+                    let start = cpos + 8;
+                    if start + 4 <= moov_end {
+                        let version = data[start];
+                        // flags = 3 bytes después de version
+                        if version == 0 {
+                            // v0: creation_time(4) mod_time(4) timescale(4) duration(4)
+                            let need = start + 1 + 3 + 4 + 4 + 4 + 4; // version+flags+4 fields
+                            if need <= moov_end {
+                                let timescale_off = start + 1 + 3 + 4 + 4;
+                                let duration_off = timescale_off + 4;
+                                let timescale = u32::from_be_bytes([
+                                    data[timescale_off], data[timescale_off + 1], data[timescale_off + 2], data[timescale_off + 3]
+                                ]);
+                                let duration = u32::from_be_bytes([
+                                    data[duration_off], data[duration_off + 1], data[duration_off + 2], data[duration_off + 3]
+                                ]);
+                                if timescale > 0 {
+                                    return Some(duration as f64 / timescale as f64);
+                                }
+                            }
+                        } else if version == 1 {
+                            // v1: creation_time(8) mod_time(8) timescale(4) duration(8)
+                            let need = start + 1 + 3 + 8 + 8 + 4 + 8;
+                            if need <= moov_end {
+                                let timescale_off = start + 1 + 3 + 8 + 8;
+                                let duration_off = timescale_off + 4;
+                                let timescale = u32::from_be_bytes([
+                                    data[timescale_off], data[timescale_off + 1], data[timescale_off + 2], data[timescale_off + 3]
+                                ]);
+                                let duration = u64::from_be_bytes([
+                                    data[duration_off], data[duration_off + 1], data[duration_off + 2], data[duration_off + 3],
+                                    data[duration_off + 4], data[duration_off + 5], data[duration_off + 6], data[duration_off + 7]
+                                ]);
+                                if timescale > 0 {
+                                    return Some(duration as f64 / timescale as f64);
+                                }
+                            }
+                        }
+                    }
+                    return None;
+                }
+                cpos = cpos.saturating_add(csize);
+            }
+            return None;
+        }
+        pos = pos.saturating_add(size);
+    }
+    None
+}
+
 #[axum::debug_handler]
 pub async fn delete_recording(
     axum::extract::Path(path): axum::extract::Path<String>,
@@ -439,7 +519,18 @@ pub async fn recordings_summary_ws(
         }
     }
 
-    Ok(axum::Json(day_summaries))
+    // Serializar para logging y para respuesta sin caché
+    let payload = serde_json::to_string(&day_summaries).unwrap_or("[]".to_string());
+    log::info!("/api/recordings/summary body: {}", payload);
+
+    let mut resp = axum::response::Response::new(axum::body::Body::from(payload));
+    resp.headers_mut().insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    resp.headers_mut().insert(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform".parse().unwrap());
+    resp.headers_mut().insert(header::PRAGMA, "no-cache".parse().unwrap());
+    resp.headers_mut().insert(header::EXPIRES, "0".parse().unwrap());
+    resp.headers_mut().insert("surrogate-control", "no-store".parse().unwrap());
+    resp.headers_mut().insert("x-accel-buffering", "no".parse().unwrap());
+    Ok(resp)
 }
 
 async fn count_recordings_in_day(day_path: &std::path::Path) -> Result<usize, VigilanteError> {
@@ -507,13 +598,34 @@ async fn list_recordings_in_day(
                                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                             let modified_dt = chrono::DateTime::<chrono::Utc>::from(modified);
 
-                            // Calcular duración real (mejorable): intentar con GStreamer
-                            let mut duration = probe_duration_seconds(&path).await;
-
-                            // Si está en curso y no hay duración descubierta, dar una estimación viva
-                            if duration.is_none() && is_file_being_recorded(&path).await {
+                            // Duración: priorizar según estado
+                            let mut duration: Option<f64>;
+                            let live_now = is_file_being_recorded(&path).await;
+                            if live_now {
+                                // En curso: usar estimación viva para que siempre suba
                                 duration = live_duration_seconds(&path, &metadata);
+                            } else {
+                                // Terminado: rápido por MP4 (mvhd); si falla, GStreamer
+                                duration = probe_mp4_duration_quick(&path);
+                                if duration.is_none() {
+                                    duration = probe_duration_seconds(&path).await;
+                                }
                             }
+
+                            let duration_source = if live_now {
+                                Some("live_estimate".to_string())
+                            } else if path
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .map(|e| e.eq_ignore_ascii_case("mp4"))
+                                == Some(true)
+                                && probe_mp4_duration_quick(&path).is_some() {
+                                Some("mp4_fast".to_string())
+                            } else if duration.is_some() {
+                                Some("gstreamer".to_string())
+                            } else {
+                                None
+                            };
 
                             recordings.push(RecordingEntry {
                                 name: file_name.clone(),
@@ -528,6 +640,8 @@ async fn list_recordings_in_day(
                                 size,
                                 last_modified: modified_dt,
                                 duration,
+                                is_live: Some(live_now),
+                                duration_source,
                                 day: date.to_string(),
                             });
                         }

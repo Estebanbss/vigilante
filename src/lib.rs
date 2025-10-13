@@ -106,6 +106,10 @@ pub struct RecordingEntry {
     pub last_modified: chrono::DateTime<chrono::Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_live: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_source: Option<String>,
     #[serde(skip_serializing)]
     pub day: String,
 }

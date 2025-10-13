@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{broadcast, Mutex};
-use tower_http::cors::CorsLayer;
+use tower_http::{cors::CorsLayer, compression::CompressionLayer};
 
 // Custom logger that sends JSON logs to broadcast channel and stdout
 struct BroadcastLogger {
@@ -592,8 +592,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/status", get(get_system_status))
         // Middleware flexible: valida token por header O por query
         .layer(from_fn_with_state(state.clone(), flexible_auth_middleware))
-        // CORS middleware permite preflight antes de llegar al handler
+    // CORS middleware permite preflight antes de llegar al handler
         .layer(cors)
+    // Compresión (gzip/deflate/br) para acelerar JSON/SSE cuando el cliente lo soporta
+    .layer(CompressionLayer::new())
         // Logging de requests (debe envolver toda la pila para registrar cualquier respuesta)
         .layer(from_fn(log_requests))
         .with_state(state);
