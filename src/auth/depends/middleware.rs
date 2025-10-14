@@ -28,90 +28,29 @@ impl AuthMiddleware {
             log::debug!("↔ OPTIONS preflight - skipping auth guard");
             return Ok(next.run(request).await);
         }
-        let method = request.method().clone();
-        let full_path = request.uri().to_string();
-        log::debug!("🔐 Auth middleware received {} {}", method, full_path);
 
-        // Verificar bypass de dominio.
-        // Two ways to trigger bypass:
-        // 1) Host header equals BYPASS_DOMAIN (typical when a reverse-proxy forwards the Host)
-        // 2) Origin header corresponds to BYPASS_DOMAIN (useful when the browser calls the API directly)
+        // Bypass absoluto para dominio nubellesalon.com
         if let Some(bypass_domain) = &context.auth.bypass_base_domain {
-            // Helper to check a candidate host string (lowercase, no port)
-            let check_host = |candidate: &str| -> bool {
-                let s = candidate.to_lowercase();
-                let host_part = s.split("/").next().unwrap_or(&s); // if candidate includes scheme
-                let host_base = host_part.split(':').next().unwrap_or(host_part);
-                host_base == bypass_domain
-            };
-
-            // 1) Check Host header first - acceso total si coincide con bypass_domain
-            if let Some(host_hdr) = request.headers().get("host").and_then(|h| h.to_str().ok()) {
-                if check_host(host_hdr) {
-                    log::debug!("🔓 Bypass por Host {} (acceso total sin token ni secret)", host_hdr);
+            // Check Origin header (for CORS requests)
+            if let Some(origin_hdr) = request.headers().get("origin").and_then(|o| o.to_str().ok()) {
+                let origin_lower = origin_hdr.to_lowercase();
+                if origin_lower.contains(bypass_domain) {
+                    log::debug!("🔓 Bypass absoluto por Origin {} - acceso total sin restricciones", origin_hdr);
                     return Ok(next.run(request).await);
                 }
             }
-
-            // 2) If Host didn't match, check Origin header (useful when browser calls CORS to API host)
-            if let Some(origin_hdr) = request.headers().get("origin").and_then(|o| o.to_str().ok()) {
-                // origin_hdr looks like "https://nubellesalon.com" — normalize to an owned lowercase host
-                let origin_trim = origin_hdr.trim();
-                let mut origin_lower = origin_trim.to_lowercase();
-                if let Some(stripped) = origin_lower.strip_prefix("https://") {
-                    origin_lower = stripped.to_string();
-                } else if let Some(stripped) = origin_lower.strip_prefix("http://") {
-                    origin_lower = stripped.to_string();
-                }
-
-                // origin_lower may still contain path or port; extract base host
-                let origin_host_base = origin_lower
-                    .split('/')
-                    .next()
-                    .map(|s| s.split(':').next().unwrap_or(s).to_string())
-                    .unwrap_or_else(|| origin_lower.clone());
-
-                if origin_host_base == *bypass_domain {
-                    // Política solicitada: el dominio en Origin tiene acceso total sin token ni header.
-                    if context.auth.bypass_domain_secret.is_some() {
-                        log::debug!(
-                            "🔓 Bypass por Origin {} (se ignora secret aunque esté configurado)",
-                            origin_host_base
-                        );
-                    } else {
-                        log::debug!("🔓 Bypass por Origin {} sin secret", origin_host_base);
-                    }
-                    // Clonar el valor de Origin antes de mover request
-                    let origin_value = origin_hdr.to_string();
-                    let mut response = next.run(request).await;
-                    response.headers_mut().insert(
-                        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-                        axum::http::HeaderValue::from_str(&origin_value).unwrap_or_else(|_| axum::http::HeaderValue::from_static("*")),
-                    );
-                    response.headers_mut().insert(
-                        axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
-                        axum::http::HeaderValue::from_static("true"),
-                    );
-                    response.headers_mut().insert(
-                        axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
-                        axum::http::HeaderValue::from_static("authorization, x-bypass-secret, content-type"),
-                    );
-                    response.headers_mut().insert(
-                        axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
-                        axum::http::HeaderValue::from_static("GET, POST, OPTIONS, PUT, DELETE"),
-                    );
-                    return Ok(response);
-                }
-            }
-
-            // 3) Check Referer header for direct requests without Origin (e.g., MJPEG from <img>)
+            // Check Referer header (for direct requests like MJPEG)
             if let Some(referer_hdr) = request.headers().get("referer").and_then(|r| r.to_str().ok()) {
-                if referer_hdr.starts_with(&format!("https://{}", bypass_domain)) || referer_hdr.starts_with(&format!("http://{}", bypass_domain)) {
-                    log::debug!("🔓 Bypass por Referer {} (acceso total sin token)", referer_hdr);
+                let referer_lower = referer_hdr.to_lowercase();
+                if referer_lower.contains(bypass_domain) {
+                    log::debug!("🔓 Bypass absoluto por Referer {} - acceso total sin restricciones", referer_hdr);
                     return Ok(next.run(request).await);
                 }
             }
         }
+        let method = request.method().clone();
+        let full_path = request.uri().to_string();
+        log::debug!("🔐 Auth middleware received {} {}", method, full_path);
 
         // Validación normal de token: prefer header, pero permitir token en query
         // para endpoints de streaming cuando esté habilitado (o para /api/live/*
