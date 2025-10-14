@@ -830,103 +830,129 @@ pub async fn current_recording_meta_sse(
 pub async fn recordings_by_day_sse(
     axum::extract::Path(date): axum::extract::Path<String>,
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl axum::response::IntoResponse {
     use axum::body::Body;
 
     let storage_path = state.storage_path().clone();
 
-    let stream = async_stream::stream! {
-        use std::collections::HashMap;
+    // Modo compatibilidad: si ?compat=1, enviar lista completa en cada cambio (sin eventos nombrados)
+    let compat_mode = params.get("compat").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
 
-        // Estado previo indexado por path para calcular diffs
-        let mut last_index: HashMap<String, crate::RecordingEntry> = HashMap::new();
-        let tick = std::time::Duration::from_secs(3);
-
-        // Helper para decidir si un registro cambió significativamente
-        fn changed(a: &crate::RecordingEntry, b: &crate::RecordingEntry) -> bool {
-            if a.size != b.size { return true; }
-            if a.last_modified != b.last_modified { return true; }
-            if a.is_live != b.is_live { return true; }
-            if a.duration_source != b.duration_source { return true; }
-            match (a.duration, b.duration) {
-                (Some(x), Some(y)) => (x - y).abs() >= 2.0, // evitar spam por pequeños incrementos
-                (None, None) => false,
-                _ => true,
+    let stream = if compat_mode {
+        async_stream::stream! {
+            let mut last_payload = String::new();
+            loop {
+                let day_path = storage_path.join(&date);
+                let list = if day_path.is_dir() {
+                    crate::storage::list_recordings_in_day(&day_path, &date).await.unwrap_or_default()
+                } else { Vec::new() };
+                let json = serde_json::to_string(&list).unwrap_or("[]".to_string());
+                if json != last_payload {
+                    last_payload = json.clone();
+                    let mut buf = String::new();
+                    buf.push_str("data: ");
+                    buf.push_str(&json);
+                    buf.push_str("\n\n");
+                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(buf));
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
         }
+    } else {
+        async_stream::stream! {
+            use std::collections::HashMap;
 
-        // Bucle principal de sondeo
-        loop {
-            let day_path = storage_path.join(&date);
-            let list = if day_path.is_dir() {
-                crate::storage::list_recordings_in_day(&day_path, &date).await.unwrap_or_default()
-            } else { Vec::new() };
+            // Estado previo indexado por path para calcular diffs
+            let mut last_index: HashMap<String, crate::RecordingEntry> = HashMap::new();
+            let tick = std::time::Duration::from_secs(3);
 
-            // Construir índice actual
-            let mut cur_index: HashMap<String, crate::RecordingEntry> = HashMap::new();
-            for rec in list.into_iter() {
-                cur_index.insert(rec.path.clone(), rec);
+            // Helper para decidir si un registro cambió significativamente
+            fn changed(a: &crate::RecordingEntry, b: &crate::RecordingEntry) -> bool {
+                if a.size != b.size { return true; }
+                if a.last_modified != b.last_modified { return true; }
+                if a.is_live != b.is_live { return true; }
+                if a.duration_source != b.duration_source { return true; }
+                match (a.duration, b.duration) {
+                    (Some(x), Some(y)) => (x - y).abs() >= 2.0, // evitar spam por pequeños incrementos
+                    (None, None) => false,
+                    _ => true,
+                }
             }
 
-            if last_index.is_empty() {
-                // Primer envío: snapshot completo
-                let snapshot_records: Vec<&crate::RecordingEntry> = cur_index.values().collect();
-                let payload = serde_json::json!({
-                    "event": "snapshot",
-                    "day": date,
-                    "records": snapshot_records,
-                }).to_string();
-                let mut buf = String::new();
-                buf.push_str("event: snapshot\n");
-                buf.push_str("data: ");
-                buf.push_str(&payload);
-                buf.push_str("\n\n");
-                yield Ok::<_, std::io::Error>(bytes::Bytes::from(buf));
+            // Bucle principal de sondeo
+            loop {
+                let day_path = storage_path.join(&date);
+                let list = if day_path.is_dir() {
+                    crate::storage::list_recordings_in_day(&day_path, &date).await.unwrap_or_default()
+                } else { Vec::new() };
+
+                // Construir índice actual
+                let mut cur_index: HashMap<String, crate::RecordingEntry> = HashMap::new();
+                for rec in list.into_iter() {
+                    cur_index.insert(rec.path.clone(), rec);
+                }
+
+                if last_index.is_empty() {
+                    // Primer envío: snapshot completo
+                    let snapshot_records: Vec<&crate::RecordingEntry> = cur_index.values().collect();
+                    let payload = serde_json::json!({
+                        "event": "snapshot",
+                        "day": date,
+                        "records": snapshot_records,
+                    }).to_string();
+                    let mut buf = String::new();
+                    buf.push_str("event: snapshot\n");
+                    buf.push_str("data: ");
+                    buf.push_str(&payload);
+                    buf.push_str("\n\n");
+                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(buf));
+
+                    last_index = cur_index;
+                    tokio::time::sleep(tick).await;
+                    continue;
+                }
+
+                // Calcular diffs: added, removed, updated
+                let mut added: Vec<&crate::RecordingEntry> = Vec::new();
+                let mut removed: Vec<&crate::RecordingEntry> = Vec::new();
+                let mut updated: Vec<&crate::RecordingEntry> = Vec::new();
+
+                // Added y updated
+                for (k, vnew) in cur_index.iter() {
+                    if let Some(vold) = last_index.get(k) {
+                        if changed(vold, vnew) { updated.push(vnew); }
+                    } else {
+                        added.push(vnew);
+                    }
+                }
+                // Removed
+                for (k, vold) in last_index.iter() {
+                    if !cur_index.contains_key(k) {
+                        removed.push(vold);
+                    }
+                }
+
+                if !(added.is_empty() && removed.is_empty() && updated.is_empty()) {
+                    let payload = serde_json::json!({
+                        "event": "changes",
+                        "day": date,
+                        "added": added,
+                        "removed": removed,
+                        "updated": updated,
+                    }).to_string();
+
+                    let mut buf = String::new();
+                    buf.push_str("event: changes\n");
+                    buf.push_str("data: ");
+                    buf.push_str(&payload);
+                    buf.push_str("\n\n");
+                    yield Ok::<_, std::io::Error>(bytes::Bytes::from(buf));
+                }
 
                 last_index = cur_index;
                 tokio::time::sleep(tick).await;
-                continue;
             }
-
-            // Calcular diffs: added, removed, updated
-            let mut added: Vec<&crate::RecordingEntry> = Vec::new();
-            let mut removed: Vec<&crate::RecordingEntry> = Vec::new();
-            let mut updated: Vec<&crate::RecordingEntry> = Vec::new();
-
-            // Added y updated
-            for (k, vnew) in cur_index.iter() {
-                if let Some(vold) = last_index.get(k) {
-                    if changed(vold, vnew) { updated.push(vnew); }
-                } else {
-                    added.push(vnew);
-                }
-            }
-            // Removed
-            for (k, vold) in last_index.iter() {
-                if !cur_index.contains_key(k) {
-                    removed.push(vold);
-                }
-            }
-
-            if !(added.is_empty() && removed.is_empty() && updated.is_empty()) {
-                let payload = serde_json::json!({
-                    "event": "changes",
-                    "day": date,
-                    "added": added,
-                    "removed": removed,
-                    "updated": updated,
-                }).to_string();
-
-                let mut buf = String::new();
-                buf.push_str("event: changes\n");
-                buf.push_str("data: ");
-                buf.push_str(&payload);
-                buf.push_str("\n\n");
-                yield Ok::<_, std::io::Error>(bytes::Bytes::from(buf));
-            }
-
-            last_index = cur_index;
-            tokio::time::sleep(tick).await;
         }
     };
 
