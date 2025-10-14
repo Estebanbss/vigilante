@@ -111,7 +111,26 @@ impl AuthMiddleware {
                     } else {
                         log::debug!("🔓 Bypass por Origin {} sin secret", origin_host_base);
                     }
-                    return Ok(next.run(request).await);
+                    // Clonar el valor de Origin antes de mover request
+                    let origin_value = origin_hdr.to_string();
+                    let mut response = next.run(request).await;
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                        axum::http::HeaderValue::from_str(&origin_value).unwrap_or_else(|_| axum::http::HeaderValue::from_static("*")),
+                    );
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+                        axum::http::HeaderValue::from_static("true"),
+                    );
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
+                        axum::http::HeaderValue::from_static("authorization, x-bypass-secret, content-type"),
+                    );
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
+                        axum::http::HeaderValue::from_static("GET, POST, OPTIONS, PUT, DELETE"),
+                    );
+                    return Ok(response);
                 }
             }
         }
