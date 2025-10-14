@@ -50,12 +50,20 @@ impl AuthMiddleware {
                 if check_host(host_hdr) {
                     // Perform secret check if required
                     if let Some(required_secret) = &context.auth.bypass_domain_secret {
-                        if let Some(provided_secret) = request
+                        if let Some(provided_secret_raw) = request
                             .headers()
                             .get("x-bypass-secret")
                             .and_then(|s| s.to_str().ok())
                         {
-                            if provided_secret == required_secret {
+                            let provided_secret = provided_secret_raw.trim();
+                            // Mask secret for logging
+                            let masked = if provided_secret.len() > 8 {
+                                format!("{}...{}", &provided_secret[..4], &provided_secret[provided_secret.len() - 4..])
+                            } else {
+                                "<short>".to_string()
+                            };
+                            log::debug!("🔐 Provided bypass secret (masked) for host {}: {}", host_hdr, masked);
+                            if provided_secret == required_secret.as_str() {
                                 log::debug!(
                                     "🔓 Bypass auth granted for host {} via header secret",
                                     host_hdr
@@ -95,12 +103,19 @@ impl AuthMiddleware {
 
                 if origin_host_base == *bypass_domain {
                     if let Some(required_secret) = &context.auth.bypass_domain_secret {
-                        if let Some(provided_secret) = request
+                        if let Some(provided_secret_raw) = request
                             .headers()
                             .get("x-bypass-secret")
                             .and_then(|s| s.to_str().ok())
                         {
-                            if provided_secret == required_secret {
+                            let provided_secret = provided_secret_raw.trim();
+                            let masked = if provided_secret.len() > 8 {
+                                format!("{}...{}", &provided_secret[..4], &provided_secret[provided_secret.len() - 4..])
+                            } else {
+                                "<short>".to_string()
+                            };
+                            log::debug!("🔐 Provided bypass secret (masked) for origin {}: {}", origin_host_base, masked);
+                            if provided_secret == required_secret.as_str() {
                                 log::debug!(
                                     "🔓 Bypass auth granted for origin {} via header secret",
                                     origin_host_base
