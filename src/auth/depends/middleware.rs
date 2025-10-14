@@ -77,17 +77,21 @@ impl AuthMiddleware {
 
             // 2) If Host didn't match, check Origin header (useful when browser calls CORS to API host)
             if let Some(origin_hdr) = request.headers().get("origin").and_then(|o| o.to_str().ok()) {
-                // origin_hdr looks like "https://nubellesalon.com" — extract host
-                let origin_host = origin_hdr
-                    .trim()
-                    .to_lowercase()
-                    .strip_prefix("https://")
-                    .or_else(|| origin_hdr.trim().to_lowercase().strip_prefix("http://"))
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| origin_hdr.trim().to_lowercase());
+                // origin_hdr looks like "https://nubellesalon.com" — normalize to an owned lowercase host
+                let origin_trim = origin_hdr.trim();
+                let mut origin_lower = origin_trim.to_lowercase();
+                if let Some(stripped) = origin_lower.strip_prefix("https://") {
+                    origin_lower = stripped.to_string();
+                } else if let Some(stripped) = origin_lower.strip_prefix("http://") {
+                    origin_lower = stripped.to_string();
+                }
 
-                // origin_host may still contain path or port; normalize
-                let origin_host_base = origin_host.split('/').next().unwrap_or(&origin_host).split(':').next().unwrap_or(&origin_host).to_string();
+                // origin_lower may still contain path or port; extract base host
+                let origin_host_base = origin_lower
+                    .split('/')
+                    .next()
+                    .map(|s| s.split(':').next().unwrap_or(s).to_string())
+                    .unwrap_or_else(|| origin_lower.clone());
 
                 if origin_host_base == *bypass_domain {
                     if let Some(required_secret) = &context.auth.bypass_domain_secret {
