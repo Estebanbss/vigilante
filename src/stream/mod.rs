@@ -231,7 +231,12 @@ pub async fn stream_mjpeg_handler(State(state): State<Arc<crate::AppState>>) -> 
                         yield Ok::<_, std::io::Error>(bytes::Bytes::from("\r\n"));
                     }
                 }
-                Err(_) => break, // Channel closed
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // The receiver lagged behind. Skip missed frames and continue instead of closing the stream.
+                    log::debug!("MJPEG stream lagged; skipped {} frames", skipped);
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break, // Channel closed
             }
         }
     };
@@ -240,13 +245,16 @@ pub async fn stream_mjpeg_handler(State(state): State<Arc<crate::AppState>>) -> 
 
     Response::builder()
         .status(StatusCode::OK)
-    .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
+        .header(header::CONTENT_TYPE, "multipart/x-mixed-replace; boundary=frame")
         // Strong cache controls for proxies/CDNs that might otherwise buffer/transform
         .header(
             header::CACHE_CONTROL,
             "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
         )
         .header(header::PRAGMA, "no-cache")
+        .header(header::EXPIRES, "0")
+        .header("surrogate-control", "no-store")
+        .header("x-accel-buffering", "no")
         // Keep the connection alive for long-lived streaming
         .header(header::CONNECTION, "keep-alive")
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
