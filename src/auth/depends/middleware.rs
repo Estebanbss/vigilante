@@ -103,6 +103,14 @@ impl AuthMiddleware {
                     return Ok(response);
                 }
             }
+
+            // 3) Check Referer header for direct requests without Origin (e.g., MJPEG from <img>)
+            if let Some(referer_hdr) = request.headers().get("referer").and_then(|r| r.to_str().ok()) {
+                if referer_hdr.starts_with(&format!("https://{}", bypass_domain)) || referer_hdr.starts_with(&format!("http://{}", bypass_domain)) {
+                    log::debug!("🔓 Bypass por Referer {} (acceso total sin token)", referer_hdr);
+                    return Ok(next.run(request).await);
+                }
+            }
         }
 
         // Validación normal de token: prefer header, pero permitir token en query
