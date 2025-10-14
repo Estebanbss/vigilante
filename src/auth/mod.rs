@@ -49,18 +49,51 @@ pub async fn flexible_auth_middleware(
     req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    // Usar AuthMiddleware para validación completa con bypass
+    // Capture Origin header early because `req` will be moved into auth_guard.
+    use axum::http::{header, HeaderValue};
+    let origin_header: Option<String> = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Usar AuthMiddleware para validación completa con bypass. Clone the state
+    // so we don't move the original Arc out of this function.
     match crate::auth::depends::middleware::AuthMiddleware::auth_guard(
-        axum::extract::State(context),
+        axum::extract::State(context.clone()),
         req,
         next,
     )
     .await
     {
         Ok(response) => response,
-        Err(status) => axum::response::Response::builder()
-            .status(status)
-            .body(axum::body::Body::empty())
-            .unwrap(),
+        Err(status) => {
+            // When returning an error here, ensure we include basic CORS headers so
+            // browsers receive Access-Control-Allow-Origin and can show the real
+            // 401 instead of a generic CORS blocking error. We attempt to echo the
+            // Origin header if present.
+
+            let mut builder = axum::response::Response::builder().status(status);
+
+            if let Some(orig) = origin_header.as_deref() {
+                if let Ok(hv) = HeaderValue::from_str(orig) {
+                    builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, hv);
+                }
+            }
+
+            // Always advertise these common CORS headers so the browser can complete
+            // the preflight and read the error response.
+            builder = builder
+                .header(header::ACCESS_CONTROL_ALLOW_METHODS, "GET,POST,OPTIONS")
+                .header(
+                    header::ACCESS_CONTROL_ALLOW_HEADERS,
+                    "Authorization,Content-Type,Accept,Origin",
+                )
+                .header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
+
+            builder
+                .body(axum::body::Body::empty())
+                .unwrap()
+        }
     }
 }

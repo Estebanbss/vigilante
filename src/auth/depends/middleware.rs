@@ -5,6 +5,7 @@
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
+use axum::http::Method;
 use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
@@ -19,6 +20,14 @@ impl AuthMiddleware {
         request: Request<Body>,
         next: Next,
     ) -> Result<Response, StatusCode> {
+        // Allow CORS preflight requests to pass through without authentication so
+        // the CORS layer (or other handlers) can respond with the proper headers.
+        // If we reject OPTIONS here, the browser will receive a 401 with no
+        // CORS headers which causes a CORS block instead of an auth error.
+        if request.method() == Method::OPTIONS {
+            log::debug!("↔ OPTIONS preflight - skipping auth guard");
+            return Ok(next.run(request).await);
+        }
         let method = request.method().clone();
         let full_path = request.uri().to_string();
         log::debug!("🔐 Auth middleware received {} {}", method, full_path);

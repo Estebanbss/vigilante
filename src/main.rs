@@ -595,11 +595,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/webrtc/close/:client_id", post(webrtc_close));
 
     // Router PROTEGIDO con autenticación flexible (header o query token)
+    // Important: Apply CORS layer before authentication middleware so OPTIONS
+    // preflight requests and error responses can be handled with the proper
+    // Access-Control-Allow-* headers even when authentication rejects the request.
     let app = Router::new()
         .merge(app_compressed)
         .merge(app_streams)
-        .layer(from_fn_with_state(state.clone(), flexible_auth_middleware))
         .layer(cors)
+        .layer(from_fn_with_state(state.clone(), flexible_auth_middleware))
         .layer(from_fn(log_requests))
         .with_state(state);
 
