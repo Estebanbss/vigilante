@@ -558,29 +558,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Camera pipeline started");
 
-    // Router PROTEGIDO con autenticación flexible (header o query token)
-    let app = Router::new()
+    // Subrouter comprimido: solo JSON/text (no streams) para evitar bloqueo de MJPEG/SSE
+    let app_compressed = Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/api/health", get(health_handler))
-        .route("/api/webrtc/offer", post(webrtc_offer))
-        .route("/api/webrtc/answer/:client_id", post(webrtc_answer))
-        .route("/api/webrtc/close/:client_id", post(webrtc_close))
-        .route("/api/stream/audio", get(stream_audio_handler))
-        .route("/api/stream/av", get(stream_combined_av))
-        .route("/api/live/mjpeg", get(stream_mjpeg_handler).head(mjpeg_head_handler))
-        .route("/api/logs/stream", get(stream_logs_sse))
-        .route("/api/logs/entries/:date", get(get_log_entries_handler))
         .route("/api/recordings/summary", get(recordings_summary_ws))
         .route("/api/recordings/day/:date", get(recordings_by_day))
-    .route("/api/recordings/day/:date/stream", get(recordings_by_day_sse))
-    .route("/api/recordings/current/stream", get(current_recording_meta_sse))
         .route("/api/storage", get(storage_overview))
         .route("/api/storage/info", get(storage_info))
         .route("/api/system/storage", get(system_storage_info))
-        .route("/api/storage/stream", get(storage_stream_sse))
-        .route("/api/recordings/stream/*path", get(stream_live_recording))
-        .route("/api/recordings/delete/*path", delete(delete_recording))
-        // Rutas para el control PTZ
         .route("/api/ptz/pan/left", post(pan_left))
         .route("/api/ptz/pan/right", post(pan_right))
         .route("/api/ptz/tilt/up", post(tilt_up))
@@ -588,15 +574,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/ptz/zoom/in", post(zoom_in))
         .route("/api/ptz/zoom/out", post(zoom_out))
         .route("/api/ptz/stop", post(ptz_stop))
-        // Ruta de estado simple
         .route("/api/status", get(get_system_status))
-        // Middleware flexible: valida token por header O por query
+        // Compresión solo para estas rutas no-stream
+        .layer(CompressionLayer::new());
+
+    // Subrouter sin compresión: MJPEG, SSE, AV, WebRTC, streams de grabaciones
+    let app_streams = Router::new()
+        .route("/api/live/mjpeg", get(stream_mjpeg_handler).head(mjpeg_head_handler))
+        .route("/api/stream/audio", get(stream_audio_handler))
+        .route("/api/stream/av", get(stream_combined_av))
+        .route("/api/logs/stream", get(stream_logs_sse))
+        .route("/api/logs/entries/:date", get(get_log_entries_handler))
+        .route("/api/recordings/day/:date/stream", get(recordings_by_day_sse))
+        .route("/api/recordings/current/stream", get(current_recording_meta_sse))
+        .route("/api/storage/stream", get(storage_stream_sse))
+        .route("/api/recordings/stream/*path", get(stream_live_recording))
+        .route("/api/recordings/delete/*path", delete(delete_recording))
+        .route("/api/webrtc/offer", post(webrtc_offer))
+        .route("/api/webrtc/answer/:client_id", post(webrtc_answer))
+        .route("/api/webrtc/close/:client_id", post(webrtc_close));
+
+    // Router PROTEGIDO con autenticación flexible (header o query token)
+    let app = Router::new()
+        .merge(app_compressed)
+        .merge(app_streams)
         .layer(from_fn_with_state(state.clone(), flexible_auth_middleware))
-    // CORS middleware permite preflight antes de llegar al handler
         .layer(cors)
-    // Compresión (gzip/deflate/br) para acelerar JSON/SSE cuando el cliente lo soporta
-    .layer(CompressionLayer::new())
-        // Logging de requests (debe envolver toda la pila para registrar cualquier respuesta)
         .layer(from_fn(log_requests))
         .with_state(state);
 
