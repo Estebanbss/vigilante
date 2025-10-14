@@ -36,7 +36,26 @@ impl AuthMiddleware {
                 let origin_lower = origin_hdr.to_lowercase();
                 if origin_lower.contains(bypass_domain) {
                     log::debug!("🔓 Bypass absoluto por Origin {} - acceso total sin restricciones", origin_hdr);
-                    return Ok(next.run(request).await);
+                    // Add CORS headers for Origin bypass
+                    let origin_value = origin_hdr.to_string();
+                    let mut response = next.run(request).await;
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                        axum::http::HeaderValue::from_str(&origin_value).unwrap_or_else(|_| axum::http::HeaderValue::from_static("*")),
+                    );
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+                        axum::http::HeaderValue::from_static("true"),
+                    );
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
+                        axum::http::HeaderValue::from_static("authorization, x-bypass-secret, content-type"),
+                    );
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
+                        axum::http::HeaderValue::from_static("GET, POST, OPTIONS, PUT, DELETE"),
+                    );
+                    return Ok(response);
                 }
             }
             // Check Referer header (for direct requests like MJPEG)
