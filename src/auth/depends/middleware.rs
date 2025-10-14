@@ -45,41 +45,11 @@ impl AuthMiddleware {
                 host_base == bypass_domain
             };
 
-            // 1) Check Host header first (unchanged behavior)
+            // 1) Check Host header first - acceso total si coincide con bypass_domain
             if let Some(host_hdr) = request.headers().get("host").and_then(|h| h.to_str().ok()) {
                 if check_host(host_hdr) {
-                    // Perform secret check if required
-                    if let Some(required_secret) = &context.auth.bypass_domain_secret {
-                        if let Some(provided_secret_raw) = request
-                            .headers()
-                            .get("x-bypass-secret")
-                            .and_then(|s| s.to_str().ok())
-                        {
-                            let provided_secret = provided_secret_raw.trim();
-                            // Mask secret for logging
-                            let masked = if provided_secret.len() > 8 {
-                                format!("{}...{}", &provided_secret[..4], &provided_secret[provided_secret.len() - 4..])
-                            } else {
-                                "<short>".to_string()
-                            };
-                            log::debug!("🔐 Provided bypass secret (masked) for host {}: {}", host_hdr, masked);
-                            if provided_secret == required_secret.as_str() {
-                                log::debug!(
-                                    "🔓 Bypass auth granted for host {} via header secret",
-                                    host_hdr
-                                );
-                                return Ok(next.run(request).await);
-                            }
-                        }
-                        log::warn!(
-                            "🔐 Bypass secret mismatch for host {}, rejecting request",
-                            host_hdr
-                        );
-                        return Err(StatusCode::UNAUTHORIZED);
-                    } else {
-                        log::debug!("🔓 Bypass auth granted for host {} without secret", host_hdr);
-                        return Ok(next.run(request).await);
-                    }
+                    log::debug!("🔓 Bypass por Host {} (acceso total sin token ni secret)", host_hdr);
+                    return Ok(next.run(request).await);
                 }
             }
 
