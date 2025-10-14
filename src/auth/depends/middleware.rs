@@ -102,36 +102,16 @@ impl AuthMiddleware {
                     .unwrap_or_else(|| origin_lower.clone());
 
                 if origin_host_base == *bypass_domain {
-                    if let Some(required_secret) = &context.auth.bypass_domain_secret {
-                        if let Some(provided_secret_raw) = request
-                            .headers()
-                            .get("x-bypass-secret")
-                            .and_then(|s| s.to_str().ok())
-                        {
-                            let provided_secret = provided_secret_raw.trim();
-                            let masked = if provided_secret.len() > 8 {
-                                format!("{}...{}", &provided_secret[..4], &provided_secret[provided_secret.len() - 4..])
-                            } else {
-                                "<short>".to_string()
-                            };
-                            log::debug!("🔐 Provided bypass secret (masked) for origin {}: {}", origin_host_base, masked);
-                            if provided_secret == required_secret.as_str() {
-                                log::debug!(
-                                    "🔓 Bypass auth granted for origin {} via header secret",
-                                    origin_host_base
-                                );
-                                return Ok(next.run(request).await);
-                            }
-                        }
-                        log::warn!(
-                            "🔐 Bypass secret mismatch for origin {}, rejecting request",
+                    // Política solicitada: el dominio en Origin tiene acceso total sin token ni header.
+                    if context.auth.bypass_domain_secret.is_some() {
+                        log::debug!(
+                            "🔓 Bypass por Origin {} (se ignora secret aunque esté configurado)",
                             origin_host_base
                         );
-                        return Err(StatusCode::UNAUTHORIZED);
                     } else {
-                        log::debug!("🔓 Bypass auth granted for origin {} without secret", origin_host_base);
-                        return Ok(next.run(request).await);
+                        log::debug!("🔓 Bypass por Origin {} sin secret", origin_host_base);
                     }
+                    return Ok(next.run(request).await);
                 }
             }
         }
