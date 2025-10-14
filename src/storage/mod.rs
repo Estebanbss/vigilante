@@ -839,8 +839,12 @@ pub async fn recordings_by_day_sse(
     // Modo compatibilidad: si ?compat=1, enviar lista completa en cada cambio (sin eventos nombrados)
     let compat_mode = params.get("compat").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
 
-    let stream = if compat_mode {
-        async_stream::stream! {
+    // Unificar tipo de stream en ambos branches
+    use std::pin::Pin;
+    type SseStream = Pin<Box<dyn futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>>;
+
+    let stream: SseStream = if compat_mode {
+        Box::pin(async_stream::stream! {
             let mut last_payload = String::new();
             loop {
                 let day_path = storage_path.join(&date);
@@ -858,9 +862,9 @@ pub async fn recordings_by_day_sse(
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
-        }
+        })
     } else {
-        async_stream::stream! {
+        Box::pin(async_stream::stream! {
             use std::collections::HashMap;
 
             // Estado previo indexado por path para calcular diffs
@@ -953,7 +957,7 @@ pub async fn recordings_by_day_sse(
                 last_index = cur_index;
                 tokio::time::sleep(tick).await;
             }
-        }
+        })
     };
 
     let body = Body::from_stream(stream);
