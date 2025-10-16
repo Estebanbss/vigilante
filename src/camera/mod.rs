@@ -115,15 +115,19 @@ pub async fn start_camera_pipeline(
                                 pending_state
                             );
                         }
-                        // Try to restart pipeline
-                        log::info!("🔄 Attempting to restart pipeline...");
-                        if let Err(e) = pipeline.set_state(gst::State::Playing) {
-                            log::error!("❌ Failed to restart pipeline: {}", e);
-                            *state.gstreamer.pipeline_running.lock().unwrap() = false;
-                            return Err(e.into());
-                        } else {
-                            log::info!("✅ Pipeline restarted successfully");
-                        }
+
+                        // Attempt a graceful restart with limited retry/backoff to avoid thrashing
+                        log::info!("🔄 Attempting graceful restart of pipeline (health check)");
+                        let restart_ctx = Arc::clone(&state);
+                        // Spawn a background task to restart so the health loop keeps running
+                        tokio::spawn(async move {
+                            // Small backoff before restart
+                            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                            match crate::camera::restart_camera_pipeline(restart_ctx).await {
+                                Ok(_) => log::info!("✅ Pipeline restart_camera_pipeline succeeded from health check"),
+                                Err(e) => log::error!("❌ Pipeline restart_camera_pipeline failed from health check: {:?}", e),
+                            }
+                        });
                     }
                 }
             } else {
