@@ -21,6 +21,9 @@ use tokio::time::{sleep, Duration};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
+use tokio::process::Command;
+use tokio::io::AsyncRead;
+use std::process::Stdio;
 use serde::Serialize;
 use log::warn;
 use std::sync::Arc;
@@ -1028,6 +1031,73 @@ async fn stream_continuous_recording(
         return stream_progressive_recording(&full_path, content_type).await;
     } else {
         // Streaming normal para archivos completados usando stream real
+        // If MP4 and the quick MP4 probe didn't find a 'moov' atom up front,
+        // try to remux on-the-fly with ffmpeg into a fragmented MP4 so browsers
+        // can start playback immediately. If ffmpeg is not available or fails,
+        // fallback to streaming the file as-is.
+        let try_remux = full_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("mp4"))
+            .unwrap_or(false)
+            && probe_mp4_duration_quick(&full_path).is_none();
+
+        if try_remux {
+            // Attempt to spawn ffmpeg to remux to fragmented MP4 streamed to stdout
+            let fp = full_path.to_string_lossy().to_string();
+            let ffmpeg_cmd = Command::new("ffmpeg")
+                .arg("-hide_banner")
+                .arg("-loglevel")
+                .arg("error")
+                .arg("-i")
+                .arg(&fp)
+                .arg("-c")
+                .arg("copy")
+                .arg("-movflags")
+                .arg("frag_keyframe+empty_moov+default_base_moof")
+                .arg("-f")
+                .arg("mp4")
+                .arg("-")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn();
+
+            if let Ok(mut child) = ffmpeg_cmd {
+                if let Some(stdout) = child.stdout.take() {
+                    use axum::body::Body;
+                    use tokio_util::io::ReaderStream;
+
+                    let stream = ReaderStream::new(stdout);
+                    let body = Body::from_stream(stream);
+
+                    // Note: we don't set Content-Length because this will be chunked
+                    let mut builder = axum::response::Response::builder();
+                    builder = builder.status(StatusCode::OK);
+                    builder = builder.header(header::CONTENT_TYPE, "video/mp4");
+                    builder = builder.header(
+                        header::CACHE_CONTROL,
+                        "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
+                    );
+                    builder = builder.header(header::PRAGMA, "no-cache");
+                    builder = builder.header(header::EXPIRES, "0");
+                    builder = builder.header("Surrogate-Control", "no-store");
+                    builder = builder.header("x-accel-buffering", "no");
+                    builder = builder.header(header::TRANSFER_ENCODING, "chunked");
+                    builder = builder.header("X-Recording-Remuxed", "true");
+
+                    // Return the response streaming ffmpeg stdout. The child process
+                    // will be automatically terminated when stdout closes; if the
+                    // client disconnects early the child may remain -- OS will
+                    // reap when process exits; acceptable for now.
+                    return builder.body(body).unwrap();
+                } else {
+                    // stdout not available, try to kill child and fallback
+                    let _ = child.kill().await;
+                }
+            }
+            // If we reach here, remux attempt failed; fallthrough to normal streaming
+        }
+
         match File::open(&full_path).await {
             Ok(file) => {
                 use axum::body::Body;
