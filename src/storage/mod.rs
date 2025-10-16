@@ -1265,7 +1265,25 @@ async fn handle_range_request(
 
             // Limit range size to prevent memory exhaustion (max 10MB per range request)
             const MAX_RANGE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
-            let actual_content_length = std::cmp::min(content_length, MAX_RANGE_SIZE);
+            // Serve a minimum chunk size to avoid many tiny range requests from the client
+            const MIN_RANGE_RESPONSE: u64 = 256 * 1024; // 256KB
+
+            // If client requested a very small range, expand it to MIN_RANGE_RESPONSE
+            let expanded_content_length = if content_length < MIN_RANGE_RESPONSE {
+                let max_possible = file_size.saturating_sub(start);
+                let expanded = std::cmp::min(MIN_RANGE_RESPONSE, max_possible);
+                log::debug!(
+                    "[recordings] expanding small range request start={} requested={} -> expanded={}",
+                    start,
+                    content_length,
+                    expanded
+                );
+                expanded
+            } else {
+                content_length
+            };
+
+            let actual_content_length = std::cmp::min(expanded_content_length, MAX_RANGE_SIZE);
 
             let mut file = match File::open(full_path).await {
                 Ok(f) => f,
