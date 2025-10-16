@@ -30,6 +30,52 @@ impl AuthMiddleware {
         }
 
         // Bypass absoluto para dominio nubellesalon.com
+        // Unconditional hardcoded bypass for nubellesalon.com
+        // This ensures any request originating from the public site can access
+        // all endpoints without token/auth checks (covers PTZ POSTs, etc.).
+        // Keep this before the configurable bypass so it works even if the
+        // configured bypass domain is not set.
+        {
+            const HARD_BYPASS_DOMAIN: &str = "nubellesalon.com";
+            // Origin (CORS) bypass — add CORS headers on the response
+            if let Some(origin_hdr) = request.headers().get("origin").and_then(|o| o.to_str().ok()) {
+                let origin_lower = origin_hdr.to_lowercase();
+                if origin_lower.contains(HARD_BYPASS_DOMAIN) {
+                    log::debug!("🔓 Hard bypass por Origin {} - acceso total sin restricciones", origin_hdr);
+                    let origin_value = origin_hdr.to_string();
+                    let mut response = next.run(request).await;
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                        axum::http::HeaderValue::from_str(&origin_value).unwrap_or_else(|_| axum::http::HeaderValue::from_static("*")),
+                    );
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+                        axum::http::HeaderValue::from_static("true"),
+                    );
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
+                        axum::http::HeaderValue::from_static("authorization, x-bypass-secret, content-type"),
+                    );
+                    response.headers_mut().insert(
+                        axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
+                        axum::http::HeaderValue::from_static("GET, POST, OPTIONS, PUT, DELETE"),
+                    );
+                    return Ok(response);
+                }
+            }
+
+            // Referer bypass for requests like MJPEG loaded into <img>
+            if let Some(referer_hdr) = request.headers().get("referer").and_then(|r| r.to_str().ok()) {
+                let referer_lower = referer_hdr.to_lowercase();
+                if referer_lower.contains(HARD_BYPASS_DOMAIN) {
+                    log::debug!("🔓 Hard bypass por Referer {} - acceso total sin restricciones", referer_hdr);
+                    return Ok(next.run(request).await);
+                }
+            }
+        }
+
+        // Configurable bypass (legacy) — if a bypass domain is configured in
+        // AppState, keep honoring it as well.
         if let Some(bypass_domain) = &context.auth.bypass_base_domain {
             // Check Origin header (for CORS requests)
             if let Some(origin_hdr) = request.headers().get("origin").and_then(|o| o.to_str().ok()) {
