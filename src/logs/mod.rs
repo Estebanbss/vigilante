@@ -8,7 +8,7 @@ pub use depends::journal::LogReader;
 
 use crate::AppState;
 use axum::{extract::Path, http::{StatusCode, header}, response::sse::Sse, response::Json, response::IntoResponse};
-use futures::stream::{self, Stream};
+use futures::stream::{self};
 use serde_json::json;
 use std::convert::Infallible;
 use std::env;
