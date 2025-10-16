@@ -7,7 +7,7 @@ pub mod depends;
 pub use depends::journal::LogReader;
 
 use crate::AppState;
-use axum::{extract::Path, http::StatusCode, response::sse::Sse, response::Json};
+use axum::{extract::Path, http::{StatusCode, header}, response::sse::Sse, response::Json, response::IntoResponse};
 use futures::stream::{self, Stream};
 use serde_json::json;
 use std::convert::Infallible;
@@ -72,11 +72,13 @@ pub async fn get_log_entries_handler(
 /// Ruta: GET /api/logs/stream
 pub async fn stream_logs_sse(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>,
-) -> Sse<impl Stream<Item = Result<axum::response::sse::Event, Infallible>>> {
+) -> impl axum::response::IntoResponse {
     let mut rx = state.log_tx().subscribe();
     let stream = stream::poll_fn(move |cx| {
         match rx.try_recv() {
-            Ok(msg) => Poll::Ready(Some(Ok(axum::response::sse::Event::default().data(msg)))),
+            Ok(msg) => Poll::Ready(Some(Ok::<axum::response::sse::Event, Infallible>(
+                axum::response::sse::Event::default().data(msg),
+            ))),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
                 // No message available, but keep polling
                 cx.waker().wake_by_ref();
@@ -85,16 +87,24 @@ pub async fn stream_logs_sse(
             Err(tokio::sync::broadcast::error::TryRecvError::Closed) => Poll::Ready(None),
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
                 // Lagged, send a message
-                Poll::Ready(Some(Ok(
-                    axum::response::sse::Event::default().data("Log stream lagged")
+                Poll::Ready(Some(Ok::<axum::response::sse::Event, Infallible>(
+                    axum::response::sse::Event::default().data("Log stream lagged"),
                 )))
             }
         }
     });
 
-    Sse::new(stream).keep_alive(
+    let sse = Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
-    )
+    );
+
+    // As a safety fallback, ensure SSE responses include CORS header so
+    // browsers receive Access-Control-Allow-Origin even if a proxy or
+    // middleware misconfiguration prevents the global CORS layer from running.
+    let mut resp = sse.into_response();
+    resp.headers_mut()
+        .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, header::HeaderValue::from_static("*"));
+    resp
 }

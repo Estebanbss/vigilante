@@ -1081,6 +1081,8 @@ async fn stream_continuous_recording(
                     let mut builder = axum::response::Response::builder();
                     builder = builder.status(StatusCode::OK);
                     builder = builder.header(header::CONTENT_TYPE, "video/mp4");
+                    // Fallback CORS header in case the global CORS layer is not applied
+                    builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
                     builder = builder.header(
                         header::CACHE_CONTROL,
                         "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
@@ -1119,6 +1121,8 @@ async fn stream_continuous_recording(
                 let mut builder = axum::response::Response::builder();
                 builder = builder.status(StatusCode::OK);
                 builder = builder.header(header::CONTENT_TYPE, content_type);
+                // Fallback CORS header in case the global CORS layer is not applied
+                builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
                 builder = builder.header(header::CONTENT_LENGTH, file_size.to_string());
                 builder = builder.header(
                     header::CACHE_CONTROL,
@@ -1226,20 +1230,21 @@ async fn stream_progressive_recording(
 
     let body = Body::from_stream(stream);
 
-    axum::response::Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        .header(
-            header::CACHE_CONTROL,
-            "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
-        )
-        .header(header::PRAGMA, "no-cache")
-        .header(header::EXPIRES, "0")
-        .header("Surrogate-Control", "no-store")
-        .header(header::TRANSFER_ENCODING, "chunked")
-        .header("X-Recording-Status", "live")
-        .body(body)
-        .unwrap()
+    let mut builder = axum::response::Response::builder();
+    builder = builder.status(StatusCode::OK);
+    builder = builder.header(header::CONTENT_TYPE, content_type);
+    // Fallback CORS header in case the global CORS layer is not applied
+    builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+    builder = builder.header(
+        header::CACHE_CONTROL,
+        "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
+    );
+    builder = builder.header(header::PRAGMA, "no-cache");
+    builder = builder.header(header::EXPIRES, "0");
+    builder = builder.header("Surrogate-Control", "no-store");
+    builder = builder.header(header::TRANSFER_ENCODING, "chunked");
+    builder = builder.header("X-Recording-Status", "live");
+    builder.body(body).unwrap()
 }
 
 /// Manejar peticiones range para streaming parcial (seek/scrubbing)
@@ -1300,6 +1305,10 @@ async fn handle_range_request(
             response
                 .headers_mut()
                 .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            // Fallback CORS header in case the global CORS layer is not applied
+            response
+                .headers_mut()
+                .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
             response.headers_mut().insert(
                 header::CONTENT_LENGTH,
                 actual_content_length.to_string().parse().unwrap(),
