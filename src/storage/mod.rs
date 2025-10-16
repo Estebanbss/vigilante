@@ -1005,6 +1005,8 @@ async fn stream_continuous_recording(
     content_type: &str,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
+    let req_start = std::time::Instant::now();
+    log::info!("[recordings] stream request start path={} content_type={}", path, content_type);
     let full_path = storage_root.join(&path);
 
     if !full_path.exists() {
@@ -1018,7 +1020,10 @@ async fn stream_continuous_recording(
 
     // Verificar si es una petición range para streaming parcial
     if let Some(range) = headers.get("range") {
-        return handle_range_request(&full_path, range, file_size, content_type).await;
+        log::info!("[recordings] range request detected: {}", range.to_str().unwrap_or("<invalid>"));
+        let resp = handle_range_request(&full_path, range, file_size, content_type).await;
+        log::info!("[recordings] range handler returning for path={} after {}ms", path, req_start.elapsed().as_millis());
+        return resp;
     }
 
     // Verificar si el archivo está siendo grabado actualmente
@@ -1042,6 +1047,7 @@ async fn stream_continuous_recording(
             && probe_mp4_duration_quick(&full_path).is_none();
 
         if try_remux {
+            log::info!("[recordings] remux candidate (mp4 with moov at end) for path={}", path);
             // Attempt to spawn ffmpeg to remux to fragmented MP4 streamed to stdout
             let fp = full_path.to_string_lossy().to_string();
             let ffmpeg_cmd = Command::new("ffmpeg")
@@ -1061,8 +1067,10 @@ async fn stream_continuous_recording(
                 .stderr(Stdio::null())
                 .spawn();
 
-            if let Ok(mut child) = ffmpeg_cmd {
-                if let Some(stdout) = child.stdout.take() {
+            match ffmpeg_cmd {
+                Ok(mut child) => {
+                    log::info!("[recordings] ffmpeg spawned pid={} for path={}", child.id().unwrap_or(0), path);
+                    if let Some(stdout) = child.stdout.take() {
                     use axum::body::Body;
                     use tokio_util::io::ReaderStream;
 
@@ -1089,9 +1097,13 @@ async fn stream_continuous_recording(
                     // client disconnects early the child may remain -- OS will
                     // reap when process exits; acceptable for now.
                     return builder.body(body).unwrap();
-                } else {
-                    // stdout not available, try to kill child and fallback
-                    let _ = child.kill().await;
+                    } else {
+                        log::warn!("[recordings] ffmpeg started but stdout not piped for path={}", path);
+                        let _ = child.kill().await;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[recordings] ffmpeg spawn failed for path={} err={}", path, e);
                 }
             }
             // If we reach here, remux attempt failed; fallthrough to normal streaming
@@ -1104,22 +1116,23 @@ async fn stream_continuous_recording(
 
                 let stream = ReaderStream::new(file);
                 let body = Body::from_stream(stream);
+                let mut builder = axum::response::Response::builder();
+                builder = builder.status(StatusCode::OK);
+                builder = builder.header(header::CONTENT_TYPE, content_type);
+                builder = builder.header(header::CONTENT_LENGTH, file_size.to_string());
+                builder = builder.header(
+                    header::CACHE_CONTROL,
+                    "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
+                );
+                builder = builder.header(header::PRAGMA, "no-cache");
+                builder = builder.header(header::EXPIRES, "0");
+                builder = builder.header("Surrogate-Control", "no-store");
+                builder = builder.header("x-accel-buffering", "no");
+                builder = builder.header(header::ACCEPT_RANGES, "bytes");
 
-                axum::response::Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, content_type)
-                    .header(header::CONTENT_LENGTH, file_size.to_string())
-                    .header(
-                        header::CACHE_CONTROL,
-                        "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
-                    )
-                    .header(header::PRAGMA, "no-cache")
-                    .header(header::EXPIRES, "0")
-                    .header("Surrogate-Control", "no-store")
-                    .header("x-accel-buffering", "no")
-                    .header(header::ACCEPT_RANGES, "bytes")
-                    .body(body)
-                    .unwrap()
+                let resp = builder.body(body).unwrap();
+                log::info!("[recordings] serving file path={} size={} took={}ms", path, file_size, req_start.elapsed().as_millis());
+                return resp;
             }
             Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "File open error").into_response(),
         }

@@ -115,7 +115,18 @@ impl AuthMiddleware {
         }
         let method = request.method().clone();
         let full_path = request.uri().to_string();
-        log::debug!("🔐 Auth middleware received {} {}", method, full_path);
+        // Diagnostic: log key headers to help debug 401 in production (do not print tokens)
+        let origin_hdr = request.headers().get("origin").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+        let referer_hdr = request.headers().get("referer").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+        let auth_hdr_present = request.headers().get(axum::http::header::AUTHORIZATION).is_some();
+        log::debug!(
+            "🔐 Auth middleware received {} {} origin={:?} referer={:?} auth_present={}",
+            method,
+            full_path,
+            origin_hdr,
+            referer_hdr,
+            auth_hdr_present
+        );
 
         // Validación normal de token: prefer header, pero permitir token en query
         // para endpoints de streaming cuando esté habilitado (o para /api/live/*
@@ -181,9 +192,20 @@ impl AuthMiddleware {
                 } else {
                     "<short>".to_string()
                 };
-                log::warn!("Auth failed for request {} - provided token: {}", request.uri().path(), masked);
+                log::warn!(
+                    "Auth failed for request {} - provided token: {} origin={:?} referer={:?}",
+                    request.uri().path(),
+                    masked,
+                    origin_hdr,
+                    referer_hdr
+                );
             } else {
-                log::warn!("Auth failed for request {} - no token provided", request.uri().path());
+                log::warn!(
+                    "Auth failed for request {} - no token provided origin={:?} referer={:?}",
+                    request.uri().path(),
+                    origin_hdr,
+                    referer_hdr
+                );
             }
             Err(StatusCode::UNAUTHORIZED)
         }
