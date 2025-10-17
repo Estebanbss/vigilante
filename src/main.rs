@@ -131,7 +131,7 @@ use vigilante::{
 
 use auth::flexible_auth_middleware;
 use camera::start_camera_pipeline;
-use logs::{get_log_entries_handler, stream_logs_sse};
+use logs::{get_log_entries_handler, poll_log_entries_handler, stream_logs_sse};
 use ptz::{pan_left, pan_right, ptz_stop, tilt_down, tilt_up, zoom_in, zoom_out};
 use storage::{
     delete_recording, recordings_by_day, recordings_by_day_sse, recordings_summary_ws,
@@ -584,6 +584,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/health", get(health_handler))
         .route("/api/recordings/summary", get(recordings_summary_ws))
         .route("/api/recordings/day/:date", get(recordings_by_day))
+        .route("/api/logs/entries/:date", get(get_log_entries_handler))
+        .route("/api/logs/entries/:date/poll", get(poll_log_entries_handler))
+    .route("/api/logs/entries/:date/ndjson", get(logs::get_log_entries_ndjson_handler))
         .route("/api/storage", get(storage_overview))
         .route("/api/storage/info", get(storage_info))
         .route("/api/system/storage", get(system_storage_info))
@@ -603,8 +606,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/live/mjpeg", get(stream_mjpeg_handler).head(mjpeg_head_handler))
         .route("/api/stream/audio", get(stream_audio_handler))
         .route("/api/stream/av", get(stream_combined_av))
-        .route("/api/logs/stream", get(stream_logs_sse))
-        .route("/api/logs/entries/:date", get(get_log_entries_handler))
+    .route("/api/logs/stream", get(stream_logs_sse))
         .route("/api/recordings/day/:date/stream", get(recordings_by_day_sse))
         .route("/api/recordings/current/stream", get(current_recording_meta_sse))
         .route("/api/storage/stream", get(storage_stream_sse))
