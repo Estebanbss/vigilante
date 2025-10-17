@@ -272,7 +272,7 @@ pub async fn poll_log_entries_handler(
 /// Accepts optional query param `date=YYYY-MM-DD` but will stream all new logs.
 pub async fn stream_logs_sse(
     State(state): State<std::sync::Arc<AppState>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(_params): Query<std::collections::HashMap<String, String>>,
 ) -> impl axum::response::IntoResponse {
     let mut rx = state.log_tx().subscribe();
 
