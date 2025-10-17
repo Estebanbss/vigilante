@@ -373,21 +373,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-    // Configuración de CORS: orígenes permitidos desde variable de entorno
-    let allowed_origins_str = env::var("ALLOWED_ORIGINS")
-        .unwrap_or_else(|_| "http://localhost:3000,http://localhost:8080".to_string());
-    let mut allowed_origins: Vec<HeaderValue> = allowed_origins_str
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
-    if allowed_origins.is_empty() {
-        eprintln!("Warning: No valid origins in ALLOWED_ORIGINS, defaulting to localhost");
-        allowed_origins.push(HeaderValue::from_static("http://localhost:3000"));
-        allowed_origins.push(HeaderValue::from_static("http://localhost:8080"));
-    }
-
+    // Configuración de CORS: permitir cualquier origen para simplificar el acceso desde el front
+    // Si quieres restringir orígenes, restaura ALLOWED_ORIGINS env var y ajusta aquí.
+    use tower_http::cors::Any;
     let cors = CorsLayer::new()
-        .allow_origin(allowed_origins)
+        .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers([
             header::AUTHORIZATION,

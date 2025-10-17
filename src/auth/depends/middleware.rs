@@ -29,48 +29,26 @@ impl AuthMiddleware {
             return Ok(next.run(request).await);
         }
 
-        // Bypass absoluto para dominio nubellesalon.com
-        // Unconditional hardcoded bypass for nubellesalon.com
-        // This ensures any request originating from the public site can access
-        // all endpoints without token/auth checks (covers PTZ POSTs, etc.).
-        // Keep this before the configurable bypass so it works even if the
-        // configured bypass domain is not set.
-        {
-            const HARD_BYPASS_DOMAIN: &str = "nubellesalon.com";
-            // Origin (CORS) bypass — add CORS headers on the response
-            if let Some(origin_hdr) = request.headers().get("origin").and_then(|o| o.to_str().ok()) {
-                let origin_lower = origin_hdr.to_lowercase();
-                if origin_lower.contains(HARD_BYPASS_DOMAIN) {
-                    log::debug!("🔓 Hard bypass por Origin {} - acceso total sin restricciones", origin_hdr);
-                    let origin_value = origin_hdr.to_string();
-                    let mut response = next.run(request).await;
-                    response.headers_mut().insert(
-                        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-                        axum::http::HeaderValue::from_str(&origin_value).unwrap_or_else(|_| axum::http::HeaderValue::from_static("*")),
-                    );
-                    response.headers_mut().insert(
-                        axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
-                        axum::http::HeaderValue::from_static("true"),
-                    );
-                    response.headers_mut().insert(
-                        axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
-                        axum::http::HeaderValue::from_static("authorization, x-bypass-secret, content-type"),
-                    );
-                    response.headers_mut().insert(
-                        axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
-                        axum::http::HeaderValue::from_static("GET, POST, OPTIONS, PUT, DELETE"),
-                    );
-                    return Ok(response);
-                }
+        // Bypass absoluto para dominio nubellesalon.com: si el Origin o Referer
+        // contiene nubellesalon.com, permitimos la petición sin token y
+        // añadimos los headers CORS adecuados.
+        const HARD_BYPASS_DOMAIN: &str = "nubellesalon.com";
+        if let Some(origin_hdr) = request.headers().get("origin").and_then(|o| o.to_str().ok()) {
+            if origin_hdr.to_lowercase().contains(HARD_BYPASS_DOMAIN) {
+                log::debug!("🔓 Hard bypass por Origin {} - acceso total sin restricciones", origin_hdr);
+                let origin_value = origin_hdr.to_string();
+                let mut response = next.run(request).await;
+                response.headers_mut().insert(
+                    axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                    axum::http::HeaderValue::from_str(&origin_value).unwrap_or_else(|_| axum::http::HeaderValue::from_static("*")),
+                );
+                return Ok(response);
             }
-
-            // Referer bypass for requests like MJPEG loaded into <img>
-            if let Some(referer_hdr) = request.headers().get("referer").and_then(|r| r.to_str().ok()) {
-                let referer_lower = referer_hdr.to_lowercase();
-                if referer_lower.contains(HARD_BYPASS_DOMAIN) {
-                    log::debug!("🔓 Hard bypass por Referer {} - acceso total sin restricciones", referer_hdr);
-                    return Ok(next.run(request).await);
-                }
+        }
+        if let Some(referer_hdr) = request.headers().get("referer").and_then(|r| r.to_str().ok()) {
+            if referer_hdr.to_lowercase().contains(HARD_BYPASS_DOMAIN) {
+                log::debug!("🔓 Hard bypass por Referer {} - acceso total sin restricciones", referer_hdr);
+                return Ok(next.run(request).await);
             }
         }
 
@@ -128,65 +106,41 @@ impl AuthMiddleware {
             auth_hdr_present
         );
 
-        // Validación normal de token: prefer header, pero permitir token en query
-        // para endpoints de streaming cuando esté habilitado (o para /api/live/*
-        // específicamente si se desea dar compatibilidad puntual).
+        // Validación normal de token: prefer header, pero aceptar token en query
+        // como fallback. Extraemos token de Authorization (soportando "Bearer ")
+        // o del query string ?token=...
         let manager = &context.auth.manager;
-
-        // Extraer Authorization de forma robusta y normalizar "Bearer " prefix.
         let mut provided: Option<String> = request
             .headers()
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
-            .map(|value| value.trim().to_string())
+            .map(|s| s.trim().to_string())
             .and_then(|s| {
-                // soportar tanto "Bearer TOKEN" como solo el token
                 if s.to_lowercase().starts_with("bearer ") {
-                    log::debug!("🔑 Token provided via Authorization header for {}", full_path);
                     Some(s[7..].trim().to_string())
                 } else if s.is_empty() {
                     None
                 } else {
-                    log::debug!("🔑 Token provided via non-Bearer Authorization header for {}", full_path);
                     Some(s)
                 }
             });
 
-        // Si no hay token en header, y la petición es a /api/live/*, permitir token en query
-        // si la configuración lo permite. Esto mantiene la política por defecto para
-        // otros endpoints mientras permite reproductores simples usar ?token= para MJPEG.
         if provided.is_none() {
-            let path = request.uri().path();
-            let is_live_path = path.starts_with("/api/live/");
-
-            // Para /api/live/* aceptar query token SIEMPRE.
-            // Para otros endpoints, respetar la bandera global allow_query_token_streams.
-            let allow_query_here = if is_live_path {
-                true
-            } else {
-                context.auth.allow_query_token_streams
-            };
-
-            if allow_query_here {
-                if let Some(query) = request.uri().query() {
-                    if let Some(token_start) = query.find("token=") {
-                        let token_part = &query[token_start + 6..];
-                        let token = token_part.split('&').next().unwrap_or(token_part);
-                        log::debug!("🔑 Token sourced from query string for {}", full_path);
-                        provided = Some(token.to_string());
-                    }
+            if let Some(query) = request.uri().query() {
+                if let Some(pos) = query.find("token=") {
+                    let tail = &query[pos + 6..];
+                    let token = tail.split('&').next().unwrap_or(tail);
+                    provided = Some(token.to_string());
                 }
             }
         }
 
-        // Compare provided token (as &str) with manager expected token
-        let provided_ref: Option<&str> = provided.as_deref();
-        if manager.is_authorised(provided_ref) {
+        if manager.is_authorised(provided.as_deref()) {
             log::debug!("✅ Auth success for {}", full_path);
             Ok(next.run(request).await)
         } else {
             // Log a masked version of the provided token for debugging (don't leak full token)
-            if let Some(p) = provided_ref {
+            if let Some(p) = provided.as_deref() {
                 let masked = if p.len() > 8 {
                     format!("{}...{}", &p[..4], &p[p.len() - 4..])
                 } else {
