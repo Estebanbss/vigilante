@@ -195,8 +195,9 @@ impl CameraUtils {
 
     /// Genera un timestamp formateado para nombres de archivo
     pub fn format_timestamp() -> String {
-        use chrono::{DateTime, Utc};
-        let now: DateTime<Utc> = Utc::now();
+        // Use the system local timezone so filenames and dates match the host clock
+        use chrono::Local;
+        let now = Local::now();
         now.format("%Y-%m-%d_%H-%M-%S").to_string()
     }
 }
