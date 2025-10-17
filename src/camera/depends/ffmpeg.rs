@@ -1263,16 +1263,11 @@ impl CameraPipeline {
             // Watchdog: check that the active recording file keeps growing. If the
             // file size stalls for a configurable number of checks, attempt to
             // restart the camera pipeline automatically and emit detailed logs.
+            // Instead of capturing a `path` variable that may be out of scope,
+            // compute the latest recording file for the current date on each
+            // iteration. This avoids referencing non-existent variables and
+            // reduces false positives when file names are rotated by the filesink.
             let context_watch = Arc::clone(&self.context);
-            // Recompute the expected recording file path (use current timestamp-derived name)
-            let timestamp_watch = crate::camera::depends::utils::CameraUtils::format_timestamp();
-            let date_watch = timestamp_watch.split('_').next().unwrap();
-            let filename_watch = if 1 == 1 { // placeholder to mirror earlier naming logic (always use base name)
-                format!("{}.mp4", date_watch)
-            } else {
-                format!("{}.mp4", date_watch)
-            };
-            let recording_file_path = context_watch.storage_path().join(date_watch).join(&filename_watch);
             tokio::spawn(async move {
                 const CHECK_INTERVAL_SECS: u64 = 10; // every 10s
                 const MAX_STABLE_CHECKS: u32 = 12; // ~2 minutes of no growth
@@ -1282,82 +1277,110 @@ impl CameraPipeline {
 
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+                    // Determine today's directory and pick the latest MP4 file
+                    let timestamp = crate::camera::depends::utils::CameraUtils::format_timestamp();
+                    let date = timestamp.split('_').next().unwrap_or("");
+                    let dir = context_watch.storage_path().join(date);
 
-                    match tokio::fs::metadata(&recording_file_path).await {
-                        Ok(meta) => {
-                            let size = meta.len();
-                            if size > last_size {
-                                if stable_count > 0 {
-                                    log::info!(
-                                        "🩺 Recording file resumed growth: {} -> {} bytes (stable_count was {})",
-                                        last_size,
-                                        size,
-                                        stable_count
-                                    );
-                                }
-                                last_size = size;
-                                stable_count = 0;
-                            } else {
-                                stable_count = stable_count.saturating_add(1);
-                                log::debug!(
-                                    "🕵️ Recording file size unchanged: {} bytes (stable_count={})",
-                                    size,
-                                    stable_count
-                                );
-                                if stable_count >= MAX_STABLE_CHECKS {
-                                    log::error!(
-                                        "❌ Recording file appears stalled (no growth for {} checks, ~{}s). Path: {}. Attempting automatic pipeline restart",
-                                        MAX_STABLE_CHECKS,
-                                        (MAX_STABLE_CHECKS as u64) * CHECK_INTERVAL_SECS,
-                                        recording_file_path.display()
-                                    );
-
-                                    // Try to restart pipeline to recover. We can't safely
-                                    // tokio::spawn the restart future if it's not `Send` (GStreamer
-                                    // types are often !Send). Spawn a dedicated thread and run a
-                                    // small current-thread runtime to execute the async restart.
-                                    let ctx = Arc::clone(&context_watch);
-                                    std::thread::spawn(move || {
-                                        let rt = tokio::runtime::Builder::new_current_thread()
-                                            .enable_all()
-                                            .build();
-                                        match rt {
-                                            Ok(rt) => {
-                                                let res = rt.block_on(async move {
-                                                    crate::camera::restart_camera_pipeline(ctx).await
-                                                });
-                                                match res {
-                                                    Ok(_) => log::info!(
-                                                        "✅ Automatic restart_camera_pipeline succeeded after detecting stalled recording"
-                                                    ),
-                                                    Err(e) => log::error!(
-                                                        "❌ Automatic restart_camera_pipeline failed: {:?}",
-                                                        e
-                                                    ),
-                                                }
-                                            }
-                                            Err(e) => {
-                                                log::error!(
-                                                    "❌ Failed to build local runtime for restart thread: {:?}",
-                                                    e
-                                                );
+                    // Find the latest file in the directory
+                    let mut latest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+                    if let Ok(entries) = std::fs::read_dir(&dir) {
+                        for entry in entries.flatten() {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                if name.starts_with(date) && name.ends_with(".mp4") {
+                                    if let Ok(meta) = entry.metadata() {
+                                        if let Ok(modified) = meta.modified() {
+                                            let consider = match &latest {
+                                                Some((_, m)) => modified > *m,
+                                                None => true,
+                                            };
+                                            if consider {
+                                                latest = Some((entry.path(), modified));
                                             }
                                         }
-                                    });
-
-                                    // Reset counters to avoid noisy repeats; allow new growth to be observed
-                                    stable_count = 0;
-                                    last_size = size;
+                                    }
                                 }
                             }
                         }
-                        Err(e) => {
-                            log::warn!(
-                                "⚠️ Failed to stat recording file '{}' during watchdog: {:?}",
-                                recording_file_path.display(),
-                                e
-                            );
-                            // Keep looping; stat can fail transiently.
+                    }
+
+                    if let Some((recording_file_path, _)) = latest {
+                        match tokio::fs::metadata(&recording_file_path).await {
+                            Ok(meta) => {
+                                let size = meta.len();
+                                if size > last_size {
+                                    if stable_count > 0 {
+                                        log::info!(
+                                            "🩺 Recording file resumed growth: {} -> {} bytes (stable_count was {})",
+                                            last_size,
+                                            size,
+                                            stable_count
+                                        );
+                                    }
+                                    last_size = size;
+                                    stable_count = 0;
+                                } else {
+                                    stable_count = stable_count.saturating_add(1);
+                                    log::debug!(
+                                        "🕵️ Recording file size unchanged: {} bytes (stable_count={})",
+                                        size,
+                                        stable_count
+                                    );
+                                    if stable_count >= MAX_STABLE_CHECKS {
+                                        log::error!(
+                                            "❌ Recording file appears stalled (no growth for {} checks, ~{}s). Path: {}. Attempting automatic pipeline restart",
+                                            MAX_STABLE_CHECKS,
+                                            (MAX_STABLE_CHECKS as u64) * CHECK_INTERVAL_SECS,
+                                            recording_file_path.display()
+                                        );
+
+                                        // Try to restart pipeline to recover. We can't safely
+                                        // tokio::spawn the restart future if it's not `Send` (GStreamer
+                                        // types are often !Send). Spawn a dedicated thread and run a
+                                        // small current-thread runtime to execute the async restart.
+                                        let ctx = Arc::clone(&context_watch);
+                                        std::thread::spawn(move || {
+                                            let rt = tokio::runtime::Builder::new_current_thread()
+                                                .enable_all()
+                                                .build();
+                                            match rt {
+                                                Ok(rt) => {
+                                                    let res = rt.block_on(async move {
+                                                        crate::camera::restart_camera_pipeline(ctx).await
+                                                    });
+                                                    match res {
+                                                        Ok(_) => log::info!(
+                                                            "✅ Automatic restart_camera_pipeline succeeded after detecting stalled recording"
+                                                        ),
+                                                        Err(e) => log::error!(
+                                                            "❌ Automatic restart_camera_pipeline failed: {:?}",
+                                                            e
+                                                        ),
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    log::error!(
+                                                        "❌ Failed to build local runtime for restart thread: {:?}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        });
+
+                                        // Reset counters to avoid noisy repeats; allow new growth to be observed
+                                        stable_count = 0;
+                                        last_size = size;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "⚠️ Failed to stat recording file '{}' during watchdog: {:?}",
+                                    recording_file_path.display(),
+                                    e
+                                );
+                                // Keep looping; stat can fail transiently.
+                            }
                         }
                     }
                 }

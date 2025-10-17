@@ -8,6 +8,7 @@ pub mod state;
 pub mod status;
 pub mod storage;
 pub mod stream;
+pub mod utils;
 
 use auth::AuthManager;
 

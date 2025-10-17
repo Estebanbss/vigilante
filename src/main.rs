@@ -558,6 +558,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Camera pipeline started");
 
+    // Periodic cleanup: remove files smaller than 1 MB every 2 minutes.
+    // Runs in a blocking task to avoid blocking the async runtime.
+    {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(120)); // 2 minutes
+            loop {
+                interval.tick().await;
+                log::info!("🧹 Periodic cleanup: scanning for files < 1MB...");
+
+                let storage_path = state_clone.storage_path().clone();
+                let max_size = 1 * 1024 * 1024u64; // 1 MB
+                let paths = vec![storage_path];
+
+                // Use spawn_blocking because the cleanup function performs filesystem I/O
+                match tokio::task::spawn_blocking(move || vigilante::utils::remove_small_files_under_paths(paths, max_size)).await {
+                    Ok(Ok(summary)) => {
+                        log::info!("🧹 Cleanup completed: deleted {} files, freed {} bytes, errors {}", summary.files_deleted, summary.bytes_freed, summary.errors);
+                    }
+                    Ok(Err(e)) => {
+                        log::error!("🧹 Cleanup failed: {}", e);
+                    }
+                    Err(e) => {
+                        log::error!("🧹 Cleanup task join error / panicked: {:?}", e);
+                    }
+                }
+            }
+        });
+    }
+
     // Subrouter comprimido: solo JSON/text (no streams) para evitar bloqueo de MJPEG/SSE
     let app_compressed = Router::new()
         .route("/metrics", get(metrics_handler))

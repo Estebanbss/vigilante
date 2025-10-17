@@ -4103,6 +4103,7 @@ dependencies = [
  "sha1",
  "shell-escape",
  "simplelog",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tokio-test",
