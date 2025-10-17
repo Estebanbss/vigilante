@@ -1,7 +1,7 @@
 use axum::body::{to_bytes, Body, Bytes};
 use axum::{
     extract::Request,
-    http::{header, HeaderName, HeaderValue, Method, StatusCode},
+    http::{header, HeaderName, Method, StatusCode},
     middleware::{from_fn, from_fn_with_state, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
