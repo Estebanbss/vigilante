@@ -17,7 +17,6 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use tokio::time::{sleep, Duration};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
@@ -1027,12 +1026,12 @@ async fn stream_continuous_recording(
     }
 
     // Verificar si el archivo está siendo grabado actualmente
-    // (por simplicidad, consideramos que archivos modificados en los últimos 30 segundos están en grabación)
+    // (consideramos que archivos modificados en los últimos 10 minutos están en grabación)
     let is_recording = is_file_being_recorded(&full_path).await;
 
     if is_recording {
-        // Streaming progresivo para archivos en grabación
-        return stream_progressive_recording(&full_path, content_type).await;
+        // No permitir streaming de archivos en grabación para evitar lentitud
+        return (StatusCode::ACCEPTED, "Archivo en grabación activa, espere a que termine para stream").into_response();
     } else {
         // Streaming normal para archivos completados usando stream real
         // If MP4 and the quick MP4 probe didn't find a 'moov' atom up front,
@@ -1144,15 +1143,15 @@ async fn stream_continuous_recording(
 }
 
 /// Verificar si un archivo está siendo grabado actualmente
-/// (considera que archivos modificados en los últimos 30 segundos están en grabación)
+/// (considera que archivos modificados en los últimos 10 minutos están en grabación)
 async fn is_file_being_recorded(file_path: &std::path::Path) -> bool {
     match tokio::fs::metadata(file_path).await {
         Ok(metadata) => {
             if let Ok(modified) = metadata.modified() {
                 let now = std::time::SystemTime::now();
                 if let Ok(duration) = now.duration_since(modified) {
-                    // Si el archivo fue modificado en los últimos 30 segundos, está en grabación
-                    duration.as_secs() < 30
+                    // Cambiado a 10 minutos (600 segundos) para evitar streaming de archivos activos
+                    duration.as_secs() < 600
                 } else {
                     false
                 }
@@ -1162,89 +1161,6 @@ async fn is_file_being_recorded(file_path: &std::path::Path) -> bool {
         }
         Err(_) => false,
     }
-}
-
-/// Streaming progresivo para archivos que están siendo grabados en tiempo real
-async fn stream_progressive_recording(
-    file_path: &std::path::Path,
-    content_type: &str,
-) -> axum::response::Response {
-    use axum::body::Body;
-
-    let path = file_path.to_path_buf();
-
-    // Create an async stream that tails the file as it grows
-    let stream = async_stream::stream! {
-        let mut offset: u64 = 0;
-
-        loop {
-            // Check current size
-            let size = match tokio::fs::metadata(&path).await {
-                Ok(m) => m.len(),
-                Err(e) => {
-                    log::warn!("progressive_stream: metadata error: {}", e);
-                    break;
-                }
-            };
-
-            if size > offset {
-                // Read new data from offset..size
-                match File::open(&path).await {
-                    Ok(mut file) => {
-                        if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
-                            log::warn!("progressive_stream: seek error: {}", e);
-                            break;
-                        }
-
-                        let to_read = size - offset;
-                        // Read in chunks to avoid large allocations
-                        let mut remaining = to_read;
-                        let mut buf = vec![0u8; 64 * 1024]; // 64 KiB chunks
-                        while remaining > 0 {
-                            let chunk_len = std::cmp::min(remaining, buf.len() as u64) as usize;
-                            match file.read_exact(&mut buf[..chunk_len]).await {
-                                Ok(_) => {
-                                    yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..chunk_len]));
-                                    offset += chunk_len as u64;
-                                    remaining -= chunk_len as u64;
-                                }
-                                Err(e) => {
-                                    // If we hit EOF because writer is still flushing, wait and retry
-                                    log::debug!("progressive_stream: read error (likely EOF during write): {}", e);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("progressive_stream: open error: {}", e);
-                        break;
-                    }
-                }
-            } else {
-                // No new data yet, wait a bit
-                sleep(Duration::from_millis(400)).await;
-            }
-        }
-    };
-
-    let body = Body::from_stream(stream);
-
-    let mut builder = axum::response::Response::builder();
-    builder = builder.status(StatusCode::OK);
-    builder = builder.header(header::CONTENT_TYPE, content_type);
-    // Fallback CORS header in case the global CORS layer is not applied
-    builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
-    builder = builder.header(
-        header::CACHE_CONTROL,
-        "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
-    );
-    builder = builder.header(header::PRAGMA, "no-cache");
-    builder = builder.header(header::EXPIRES, "0");
-    builder = builder.header("Surrogate-Control", "no-store");
-    builder = builder.header(header::TRANSFER_ENCODING, "chunked");
-    builder = builder.header("X-Recording-Status", "live");
-    builder.body(body).unwrap()
 }
 
 /// Manejar peticiones range para streaming parcial (seek/scrubbing)
