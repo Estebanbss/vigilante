@@ -1027,34 +1027,9 @@ async fn stream_continuous_recording(
         return resp;
     }
 
-    // Buffer inicial inteligente para videos - enviar primeros segundos automáticamente
-    // para iniciar la reproducción más rápido (similar a YouTube)
-    let is_video = content_type.starts_with("video/");
-    if is_video && file_size > 0 {
-        // Estimar buffer inicial inteligente:
-        // - Para archivos pequeños (< 100MB): enviar 20% del archivo
-        // - Para archivos medianos (100MB-1GB): enviar 10% o 100MB lo que sea menor
-        // - Para archivos grandes (>1GB): enviar 5% o 200MB lo que sea menor
-        let initial_buffer_bytes = if file_size < 100 * 1024 * 1024 {
-            file_size / 5 // 20% para archivos pequeños
-        } else if file_size < 1024 * 1024 * 1024 {
-            std::cmp::min(file_size / 10, 100 * 1024 * 1024) // 10% o 100MB
-        } else {
-            std::cmp::min(file_size / 20, 200 * 1024 * 1024) // 5% o 200MB
-        };
-
-        let initial_range = format!("bytes=0-{}", initial_buffer_bytes - 1);
-        log::info!("[recordings] sending smart initial buffer for video: {} bytes ({:.1}%)",
-                   initial_buffer_bytes, (initial_buffer_bytes as f64 / file_size as f64) * 100.0);
-
-        // Crear range header artificial para el buffer inicial
-        let mut range_headers = headers.clone();
-        range_headers.insert("range", initial_range.parse().unwrap());
-
-        let resp = handle_range_request(&full_path, range_headers.get("range").unwrap(), file_size, content_type).await;
-        log::info!("[recordings] initial buffer sent for path={} after {}ms", path, req_start.elapsed().as_millis());
-        return resp;
-    }
+    // Para videos, optimizar headers para mejor buffering automático del navegador
+    // En lugar de forzar buffer inicial, dejamos que el navegador maneje el buffering
+    // pero con headers optimizados para que lo haga agresivamente
 
     // Permitir streaming de grabaciones activas - el código ahora maneja archivos en grabación
     // If MP4 and the quick MP4 probe didn't find a 'moov' atom up front,
@@ -1121,6 +1096,9 @@ async fn stream_continuous_recording(
                     builder = builder.header(header::TRANSFER_ENCODING, "chunked");
                     builder = builder.header("X-Recording-Remuxed", "true");
                     builder = builder.header("Link", "</>; rel=\"preload\"; as=\"video\"");
+                    // Headers adicionales para mejor buffering
+                    builder = builder.header("X-Playback-Rate", "1.0");
+                    builder = builder.header("X-Buffer-Size", "50MB");
 
                     // Return the response streaming ffmpeg stdout. The child process
                     // will be automatically terminated when stdout closes; if the
@@ -1163,6 +1141,9 @@ async fn stream_continuous_recording(
                     // Indicar al navegador que haga preload del contenido
                     builder = builder.header("X-Accel-Buffering", "no");
                     builder = builder.header("Link", "</>; rel=\"preload\"; as=\"video\"");
+                    // Headers adicionales para mejor buffering
+                    builder = builder.header("X-Playback-Rate", "1.0");
+                    builder = builder.header("X-Buffer-Size", "50MB");
                 } else {
                     // Para otros tipos: no cache para asegurar frescura
                     builder = builder.header(
@@ -1227,20 +1208,32 @@ async fn handle_range_request(
             end = std::cmp::min(end, file_size.saturating_sub(1));
             let content_length = end.saturating_sub(start) + 1;
 
-            // Limit range size to prevent memory exhaustion (max 10MB per range request)
+            // Limit range size to prevent memory exhaustion (max 50MB per range request)
             const MAX_RANGE_SIZE: u64 = 50 * 1024 * 1024; // 50MB - aumentado para mejor buffering
             // Serve a minimum chunk size to avoid many tiny range requests from the client
-            const MIN_RANGE_RESPONSE: u64 = 256 * 1024; // 256KB
+            // Para videos, ser más agresivo con el buffering
+            let min_range_response: u64 = if content_type.starts_with("video/") {
+                2 * 1024 * 1024 // 2MB para videos - mucho más agresivo
+            } else {
+                256 * 1024 // 256KB para otros tipos
+            };
 
-            // If client requested a very small range, expand it to MIN_RANGE_RESPONSE
-            let expanded_content_length = if content_length < MIN_RANGE_RESPONSE {
+            // If client requested a very small range, expand it significantly for videos
+            let expanded_content_length = if content_length < min_range_response {
                 let max_possible = file_size.saturating_sub(start);
-                let expanded = std::cmp::min(MIN_RANGE_RESPONSE, max_possible);
+                let expanded = if content_type.starts_with("video/") && start == 0 && content_length <= 1 {
+                    // Si es una petición muy pequeña al inicio de un video, ser ultra-agresivo
+                    // Enviar hasta 20MB iniciales para un buffering excelente
+                    std::cmp::min(20 * 1024 * 1024, max_possible)
+                } else {
+                    std::cmp::min(min_range_response, max_possible)
+                };
                 log::debug!(
-                    "[recordings] expanding small range request start={} requested={} -> expanded={}",
+                    "[recordings] expanding small range request start={} requested={} -> expanded={} (type={})",
                     start,
                     content_length,
-                    expanded
+                    expanded,
+                    content_type
                 );
                 expanded
             } else {
@@ -1309,6 +1302,9 @@ async fn handle_range_request(
                 );
                 response.headers_mut().insert("x-accel-buffering", "no".parse().unwrap());
                 response.headers_mut().insert("Link", "</>; rel=\"preload\"; as=\"video\"".parse().unwrap());
+                // Indicar al navegador que puede bufferizar agresivamente
+                response.headers_mut().insert("X-Playback-Rate", "1.0".parse().unwrap());
+                response.headers_mut().insert("X-Buffer-Size", "50MB".parse().unwrap());
             } else {
                 response.headers_mut().insert(
                     header::CACHE_CONTROL,
