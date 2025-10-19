@@ -28,6 +28,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::collections::HashMap;
 use std::io::Read as _;
+use async_stream;
+use bytes;
 // GStreamer discovery for media metadata (duration, codecs)
 use gstreamer_pbutils::Discoverer; // main discoverer
 use gstreamer_pbutils::DiscovererInfo; // info struct
@@ -1025,25 +1027,46 @@ async fn stream_continuous_recording(
         return resp;
     }
 
-    // Verificar si el archivo está siendo grabado actualmente
-    // (consideramos que archivos modificados en los últimos 10 minutos están en grabación)
-    let is_recording = is_file_being_recorded(&full_path).await;
+    // Buffer inicial inteligente para videos - enviar primeros segundos automáticamente
+    // para iniciar la reproducción más rápido (similar a YouTube)
+    let is_video = content_type.starts_with("video/");
+    if is_video && file_size > 0 {
+        // Estimar buffer inicial inteligente:
+        // - Para archivos pequeños (< 100MB): enviar 20% del archivo
+        // - Para archivos medianos (100MB-1GB): enviar 10% o 100MB lo que sea menor
+        // - Para archivos grandes (>1GB): enviar 5% o 200MB lo que sea menor
+        let initial_buffer_bytes = if file_size < 100 * 1024 * 1024 {
+            file_size / 5 // 20% para archivos pequeños
+        } else if file_size < 1024 * 1024 * 1024 {
+            std::cmp::min(file_size / 10, 100 * 1024 * 1024) // 10% o 100MB
+        } else {
+            std::cmp::min(file_size / 20, 200 * 1024 * 1024) // 5% o 200MB
+        };
 
-    if is_recording {
-        // No permitir streaming de archivos en grabación para evitar lentitud
-        return (StatusCode::ACCEPTED, "Archivo en grabación activa, espere a que termine para stream").into_response();
-    } else {
-        // Streaming normal para archivos completados usando stream real
-        // If MP4 and the quick MP4 probe didn't find a 'moov' atom up front,
-        // try to remux on-the-fly with ffmpeg into a fragmented MP4 so browsers
-        // can start playback immediately. If ffmpeg is not available or fails,
-        // fallback to streaming the file as-is.
-        let try_remux = full_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("mp4"))
-            .unwrap_or(false)
-            && probe_mp4_duration_quick(&full_path).is_none();
+        let initial_range = format!("bytes=0-{}", initial_buffer_bytes - 1);
+        log::info!("[recordings] sending smart initial buffer for video: {} bytes ({:.1}%)",
+                   initial_buffer_bytes, (initial_buffer_bytes as f64 / file_size as f64) * 100.0);
+
+        // Crear range header artificial para el buffer inicial
+        let mut range_headers = headers.clone();
+        range_headers.insert("range", initial_range.parse().unwrap());
+
+        let resp = handle_range_request(&full_path, range_headers.get("range").unwrap(), file_size, content_type).await;
+        log::info!("[recordings] initial buffer sent for path={} after {}ms", path, req_start.elapsed().as_millis());
+        return resp;
+    }
+
+    // Permitir streaming de grabaciones activas - el código ahora maneja archivos en grabación
+    // If MP4 and the quick MP4 probe didn't find a 'moov' atom up front,
+    // try to remux on-the-fly with ffmpeg into a fragmented MP4 so browsers
+    // can start playback immediately. If ffmpeg is not available or fails,
+    // fallback to streaming the file as-is.
+    let try_remux = full_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("mp4"))
+        .unwrap_or(false)
+        && probe_mp4_duration_quick(&full_path).is_none();
 
         if try_remux {
             log::info!("[recordings] remux candidate (mp4 with moov at end) for path={}", path);
@@ -1058,9 +1081,13 @@ async fn stream_continuous_recording(
                 .arg("-c")
                 .arg("copy")
                 .arg("-movflags")
-                .arg("frag_keyframe+empty_moov+default_base_moof")
+                .arg("frag_keyframe+empty_moov+faststart+default_base_moof")
                 .arg("-f")
                 .arg("mp4")
+                .arg("-avoid_negative_ts")
+                .arg("make_zero")
+                .arg("-fflags")
+                .arg("+discardcorrupt+genpts")
                 .arg("-")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -1082,16 +1109,18 @@ async fn stream_continuous_recording(
                     builder = builder.header(header::CONTENT_TYPE, "video/mp4");
                     // Fallback CORS header in case the global CORS layer is not applied
                     builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
+
+                    // Headers optimizados para streaming MP4 remuxeado
                     builder = builder.header(
                         header::CACHE_CONTROL,
-                        "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
+                        "public, max-age=3600, stale-while-revalidate=86400",
                     );
                     builder = builder.header(header::PRAGMA, "no-cache");
                     builder = builder.header(header::EXPIRES, "0");
-                    builder = builder.header("Surrogate-Control", "no-store");
                     builder = builder.header("x-accel-buffering", "no");
                     builder = builder.header(header::TRANSFER_ENCODING, "chunked");
                     builder = builder.header("X-Recording-Remuxed", "true");
+                    builder = builder.header("Link", "</>; rel=\"preload\"; as=\"video\"");
 
                     // Return the response streaming ffmpeg stdout. The child process
                     // will be automatically terminated when stdout closes; if the
@@ -1123,14 +1152,29 @@ async fn stream_continuous_recording(
                 // Fallback CORS header in case the global CORS layer is not applied
                 builder = builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
                 builder = builder.header(header::CONTENT_LENGTH, file_size.to_string());
-                builder = builder.header(
-                    header::CACHE_CONTROL,
-                    "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
-                );
+
+                // Headers optimizados para streaming rápido como YouTube
+                if content_type.starts_with("video/") {
+                    // Para videos: permitir cache agresivo pero con revalidación
+                    builder = builder.header(
+                        header::CACHE_CONTROL,
+                        "public, max-age=3600, stale-while-revalidate=86400",
+                    );
+                    // Indicar al navegador que haga preload del contenido
+                    builder = builder.header("X-Accel-Buffering", "no");
+                    builder = builder.header("Link", "</>; rel=\"preload\"; as=\"video\"");
+                } else {
+                    // Para otros tipos: no cache para asegurar frescura
+                    builder = builder.header(
+                        header::CACHE_CONTROL,
+                        "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform",
+                    );
+                    builder = builder.header("Surrogate-Control", "no-store");
+                    builder = builder.header("x-accel-buffering", "no");
+                }
+
                 builder = builder.header(header::PRAGMA, "no-cache");
                 builder = builder.header(header::EXPIRES, "0");
-                builder = builder.header("Surrogate-Control", "no-store");
-                builder = builder.header("x-accel-buffering", "no");
                 builder = builder.header(header::ACCEPT_RANGES, "bytes");
 
                 let resp = builder.body(body).unwrap();
@@ -1139,7 +1183,6 @@ async fn stream_continuous_recording(
             }
             Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "File open error").into_response(),
         }
-    }
 }
 
 /// Verificar si un archivo está siendo grabado actualmente
@@ -1185,7 +1228,7 @@ async fn handle_range_request(
             let content_length = end.saturating_sub(start) + 1;
 
             // Limit range size to prevent memory exhaustion (max 10MB per range request)
-            const MAX_RANGE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+            const MAX_RANGE_SIZE: u64 = 50 * 1024 * 1024; // 50MB - aumentado para mejor buffering
             // Serve a minimum chunk size to avoid many tiny range requests from the client
             const MIN_RANGE_RESPONSE: u64 = 256 * 1024; // 256KB
 
@@ -1214,10 +1257,29 @@ async fn handle_range_request(
             };
 
             file.seek(std::io::SeekFrom::Start(start)).await.unwrap();
-            let mut buffer = vec![0; actual_content_length as usize];
-            file.read_exact(&mut buffer).await.unwrap();
 
-            let mut response = axum::response::Response::new(axum::body::Body::from(buffer));
+            // Crear un stream para el range en lugar de leer todo en memoria
+            let stream = async_stream::stream! {
+                let mut remaining = actual_content_length;
+                let mut buf = vec![0u8; 256 * 1024]; // 256KB chunks para mejor responsividad
+
+                while remaining > 0 {
+                    let chunk_len = std::cmp::min(remaining, buf.len() as u64) as usize;
+                    match file.read_exact(&mut buf[..chunk_len]).await {
+                        Ok(_) => {
+                            yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..chunk_len]));
+                            remaining -= chunk_len as u64;
+                        }
+                        Err(e) => {
+                            log::warn!("range_stream: read error: {}", e);
+                            break;
+                        }
+                    }
+                }
+            };
+
+            let body = axum::body::Body::from_stream(stream);
+            let mut response = axum::response::Response::new(body);
             response
                 .headers_mut()
                 .insert(header::CONTENT_TYPE, content_type.parse().unwrap());
@@ -1238,26 +1300,30 @@ async fn handle_range_request(
                     .parse()
                     .unwrap(),
             );
-            response
-                .headers_mut()
-                .insert(
+
+            // Headers optimizados para range requests
+            if content_type.starts_with("video/") {
+                response.headers_mut().insert(
                     header::CACHE_CONTROL,
-                    "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform"
-                        .parse()
-                        .unwrap(),
+                    "public, max-age=3600, stale-while-revalidate=86400".parse().unwrap(),
                 );
+                response.headers_mut().insert("x-accel-buffering", "no".parse().unwrap());
+                response.headers_mut().insert("Link", "</>; rel=\"preload\"; as=\"video\"".parse().unwrap());
+            } else {
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, no-transform".parse().unwrap(),
+                );
+                response.headers_mut().insert("surrogate-control", "no-store".parse().unwrap());
+                response.headers_mut().insert("x-accel-buffering", "no".parse().unwrap());
+            }
+
             response
                 .headers_mut()
                 .insert(header::PRAGMA, "no-cache".parse().unwrap());
             response
                 .headers_mut()
                 .insert(header::EXPIRES, "0".parse().unwrap());
-            response
-                .headers_mut()
-                .insert("surrogate-control", "no-store".parse().unwrap());
-            response
-                .headers_mut()
-                .insert("x-accel-buffering", "no".parse().unwrap());
             *response.status_mut() = StatusCode::PARTIAL_CONTENT;
             return response;
         }
