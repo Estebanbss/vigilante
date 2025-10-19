@@ -104,6 +104,14 @@ fn process_file(path: &Path, max_size_bytes: u64) -> Result<(bool, u64), io::Err
     let meta = fs::metadata(path)?;
     let len = meta.len();
     if len < max_size_bytes {
+        // Check if file was modified recently (within last 10 minutes) to avoid deleting active recordings
+        let modified = meta.modified()?;
+        let now = std::time::SystemTime::now();
+        let age = now.duration_since(modified).unwrap_or(std::time::Duration::from_secs(0));
+        if age < std::time::Duration::from_secs(600) { // 10 minutes
+            log::info!("fs_cleanup: skipping recently modified file {} ({} seconds old)", path.display(), age.as_secs());
+            return Ok((false, 0));
+        }
         // Attempt delete
         match fs::remove_file(path) {
             Ok(()) => Ok((true, len)),
@@ -132,12 +140,12 @@ mod tests {
         f.write_all(&vec![0u8; 512]).unwrap();
         f.sync_all().unwrap();
 
-        // large 2 MB
+        // large 25 MB
         let mut f2 = File::create(&large).unwrap();
-        f2.write_all(&vec![0u8; 2 * 1024 * 1024]).unwrap();
+        f2.write_all(&vec![0u8; 25 * 1024 * 1024]).unwrap();
         f2.sync_all().unwrap();
 
-        let max = 1 * 1024 * 1024u64; // 1 MB
+        let max = 20 * 1024 * 1024u64; // 20 MB
         let res = remove_small_files_under_paths(vec![tmp.path()], max).unwrap();
         assert_eq!(res.files_deleted, 1);
         assert_eq!(res.errors, 0);

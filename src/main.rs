@@ -548,7 +548,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Camera pipeline started");
 
-    // Periodic cleanup: remove files smaller than 1 MB every 2 minutes.
+    // Periodic cleanup: remove files smaller than 20 MB every 2 minutes.
     // Runs in a blocking task to avoid blocking the async runtime.
     {
         let state_clone = state.clone();
@@ -556,10 +556,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut interval = tokio::time::interval(Duration::from_secs(120)); // 2 minutes
             loop {
                 interval.tick().await;
-                log::info!("🧹 Periodic cleanup: scanning for files < 1MB...");
+                log::info!("🧹 Periodic cleanup: scanning for files < 20MB...");
 
                 let storage_path = state_clone.storage_path().clone();
-                let max_size = 1 * 1024 * 1024u64; // 1 MB
+                let max_size = 20 * 1024 * 1024u64; // 20 MB
                 let paths = vec![storage_path];
 
                 // Use spawn_blocking because the cleanup function performs filesystem I/O
