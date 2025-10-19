@@ -103,15 +103,33 @@ pub fn remove_small_files_under_paths<P: AsRef<Path>, I: IntoIterator<Item = P>>
 fn process_file(path: &Path, max_size_bytes: u64) -> Result<(bool, u64), io::Error> {
     let meta = fs::metadata(path)?;
     let len = meta.len();
+
+    // Log files with 0 bytes specifically
+    if len == 0 {
+        log::info!("fs_cleanup: found 0-byte file: {}", path.display());
+    }
+
     if len < max_size_bytes {
         // Check if file was modified recently (within last 10 minutes) to avoid deleting active recordings
         let modified = meta.modified()?;
         let now = std::time::SystemTime::now();
         let age = now.duration_since(modified).unwrap_or(std::time::Duration::from_secs(0));
         if age < std::time::Duration::from_secs(600) { // 10 minutes
-            log::info!("fs_cleanup: skipping recently modified file {} ({} seconds old)", path.display(), age.as_secs());
+            log::info!("fs_cleanup: skipping recently modified file {} ({} seconds old, {} bytes)", path.display(), age.as_secs(), len);
             return Ok((false, 0));
         }
+
+        // Additional check: verify if file is currently being written to
+        if is_file_being_written(path)? {
+            log::info!("fs_cleanup: skipping file currently being written: {} ({} bytes)", path.display(), len);
+            return Ok((false, 0));
+        }
+
+        // Special handling for 0-byte files - always delete them regardless of age
+        if len == 0 {
+            log::info!("fs_cleanup: deleting 0-byte file {} ({} seconds old)", path.display(), age.as_secs());
+        }
+
         // Attempt delete
         match fs::remove_file(path) {
             Ok(()) => Ok((true, len)),
@@ -119,6 +137,40 @@ fn process_file(path: &Path, max_size_bytes: u64) -> Result<(bool, u64), io::Err
         }
     } else {
         Ok((false, 0))
+    }
+}
+
+/// Check if a file is currently being written to by another process
+/// Returns true if the file appears to be in use for writing
+fn is_file_being_written(path: &Path) -> Result<bool, io::Error> {
+    // Try to open the file in exclusive write mode
+    // If this fails, another process likely has it open for writing
+    match fs::OpenOptions::new()
+        .write(true)
+        .create(false)
+        .truncate(false)
+        .open(path)
+    {
+        Ok(_) => {
+            // File was opened successfully, so it's not being written by another process
+            // Note: We don't actually write anything, just check if we can open it exclusively
+            Ok(false)
+        }
+        Err(e) => {
+            // Check if the error is due to the file being locked/busy
+            match e.kind() {
+                io::ErrorKind::PermissionDenied |
+                io::ErrorKind::AlreadyExists |
+                io::ErrorKind::ResourceBusy => {
+                    // File is likely being written by another process
+                    Ok(true)
+                }
+                _ => {
+                    // Other error, assume file is not being written
+                    Ok(false)
+                }
+            }
+        }
     }
 }
 

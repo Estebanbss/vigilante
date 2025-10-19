@@ -109,6 +109,26 @@ pub async fn start_camera_pipeline(
                             "⚠️ Pipeline health check: State is {:?}, expected Playing",
                             pipeline_state
                         );
+
+                        // Add more diagnostic information
+                        match pipeline_state {
+                            gst::State::Paused => {
+                                log::warn!("📋 Pipeline diagnostic: Pipeline is paused - may indicate buffering or temporary issue");
+                            }
+                            gst::State::Ready => {
+                                log::warn!("📋 Pipeline diagnostic: Pipeline is ready but not started - possible initialization issue");
+                            }
+                            gst::State::Null => {
+                                log::warn!("📋 Pipeline diagnostic: Pipeline is null - likely crashed or stopped unexpectedly");
+                            }
+                            gst::State::VoidPending => {
+                                log::warn!("📋 Pipeline diagnostic: Pipeline in void pending state - transitional state");
+                            }
+                            _ => {
+                                log::warn!("📋 Pipeline diagnostic: Pipeline in unexpected state: {:?}", pipeline_state);
+                            }
+                        }
+
                         if pending_state != gst::State::VoidPending {
                             log::warn!(
                                 "⏳ Pending state detected during health check: {:?}",
@@ -117,15 +137,15 @@ pub async fn start_camera_pipeline(
                         }
 
                         // Attempt a graceful restart with limited retry/backoff to avoid thrashing
-                        log::info!("🔄 Attempting graceful restart of pipeline (health check)");
+                        log::info!("🔄 Attempting graceful restart of pipeline (health check - state: {:?})", pipeline_state);
                         let restart_ctx = Arc::clone(&state);
                         // Spawn a background task to restart so the health loop keeps running
                         tokio::spawn(async move {
                             // Small backoff before restart
                             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                             match crate::camera::restart_camera_pipeline(restart_ctx).await {
-                                Ok(_) => log::info!("✅ Pipeline restart_camera_pipeline succeeded from health check"),
-                                Err(e) => log::error!("❌ Pipeline restart_camera_pipeline failed from health check: {:?}", e),
+                                Ok(_) => log::info!("✅ Pipeline restart_camera_pipeline succeeded from health check (was: {:?})", pipeline_state),
+                                Err(e) => log::error!("❌ Pipeline restart_camera_pipeline failed from health check (was: {:?}): {:?}", pipeline_state, e),
                             }
                         });
                     }
